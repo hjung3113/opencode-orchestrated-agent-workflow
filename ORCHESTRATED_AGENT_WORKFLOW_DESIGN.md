@@ -500,8 +500,9 @@ The task entry in `graph.json` is the host-owned location for
 
 Slice A0 takes a validated, structured intake manifest as input. It does not
 infer ambiguity or call a model: an intake adapter is a later Slice-A concern.
-The manifest contains the human request, objective, scope, exclusions, safe
-assumptions, and one declared ambiguity classification.
+The manifest contains the human request, objective, scope, allowed paths,
+forbidden paths, non-goals, exclusions, safe assumptions, and one declared
+ambiguity classification.
 
 For `clarification-required`, `/route` creates `request.md`, an empty
 `decisions.json`, a revision-one blocked `graph.json`, and exactly one gate;

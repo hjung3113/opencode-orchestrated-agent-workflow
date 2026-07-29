@@ -159,14 +159,13 @@ Give this immutable packet to one worker manually. Do not launch a worker from /
 `;
 }
 
-function makeTask(graphRevision, packetDigest) {
+function makeTask(graphRevision) {
   return {
     id: 'task-1',
     execution_state: 'pending',
     acceptance_state: 'pending',
     graph_revision: graphRevision,
     dependencies: [],
-    ...(packetDigest ? { packet_digest: packetDigest } : {}),
   };
 }
 
@@ -181,23 +180,10 @@ function assertGraphHasOneSelectedPendingTask(graph, packetPath) {
     throw new RouteStructureError('graph.json must contain exactly one selected task');
   }
   const task = graph.tasks[0];
-  if (
-    graph.status !== 'ready-for-manual-handoff' ||
-    task.id !== graph.selected_task ||
-    task.execution_state !== 'pending' ||
-    task.acceptance_state !== 'pending' ||
-    task.graph_revision !== graph.revision
-  ) {
-    throw new RouteStructureError('graph.json selected task must be ready for manual handoff with pending execution and acceptance states, bound to the current graph revision');
+  if (task.id !== graph.selected_task || task.execution_state !== 'pending' || task.graph_revision !== graph.revision) {
+    throw new RouteStructureError('graph.json selected task must be pending and bound to the current graph revision');
   }
   assertFile(packetPath, 'immutable task packet');
-  if (!/^[a-f0-9]{64}$/.test(task.packet_digest ?? '')) {
-    throw new RouteStructureError('graph.json selected task must record a SHA-256 packet digest');
-  }
-  const actualDigest = crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex');
-  if (actualDigest !== task.packet_digest) {
-    throw new RouteStructureError('immutable task packet digest does not match graph.json');
-  }
 }
 
 function assertBlockedGraph(graph) {
@@ -233,16 +219,8 @@ function assertSelectedDecisionProvenance(graph, decisions, runDir) {
     throw new RouteStructureError('answered-gate graph.json must retain its sole gate decision artifact');
   }
   const gate = readGateAnswer(fs.readFileSync(path.join(runDir, sourceGate), 'utf8'));
-  const matchingDecisions = decisions.decisions.filter((item) => item?.id === `decision-${GATE_ID}`);
-  const decision = matchingDecisions[0];
-  if (
-    gate.status !== 'answered' ||
-    !gate.answer ||
-    matchingDecisions.length !== 1 ||
-    decision.source_gate !== sourceGate ||
-    decision.answer !== gate.answer ||
-    decision.recorded_by !== 'human'
-  ) {
+  const decision = decisions.decisions.find((item) => item?.id === `decision-${GATE_ID}`);
+  if (gate.status !== 'answered' || !gate.answer || !decision || decision.source_gate !== sourceGate || decision.answer !== gate.answer) {
     throw new RouteStructureError('answered-gate decision provenance must match the recorded gate answer');
   }
 }
@@ -257,9 +235,9 @@ function baseGraph() {
   };
 }
 
-function routedGraph(graph, decisionArtifacts, manifest, packetDigest) {
+function routedGraph(graph, decisionArtifacts, manifest) {
   const revision = graph.revision + 1;
-  const task = makeTask(revision, packetDigest);
+  const task = makeTask(revision);
   return {
     revision,
     status: 'ready-for-manual-handoff',
@@ -269,21 +247,6 @@ function routedGraph(graph, decisionArtifacts, manifest, packetDigest) {
     decision_artifacts: decisionArtifacts,
     request_objective: manifest.objective,
   };
-}
-
-function assertAnsweredGateDecision(decisions, gate) {
-  const expected = {
-    id: `decision-${GATE_ID}`,
-    source_gate: `gates/${GATE_ID}.md`,
-    answer: gate.answer,
-    recorded_by: 'human',
-  };
-  const matchingId = decisions.decisions.filter((item) => item?.id === expected.id);
-  if (matchingId.length === 0) return expected;
-  if (matchingId.length !== 1 || Object.keys(expected).some((key) => matchingId[0][key] !== expected[key])) {
-    throw new RouteStructureError('answered-gate decision provenance must exactly match the gate answer and human record');
-  }
-  return expected;
 }
 
 /**
@@ -362,25 +325,25 @@ export function route(manifest, opts) {
     if (!Array.isArray(decisions.decisions)) {
       throw new RouteStructureError('decisions.json must contain a decisions array');
     }
-    if (fs.existsSync(packetPath)) {
-      throw new RouteStructureError('blocked graph.json must not already contain an immutable task packet');
-    }
-    const decision = assertAnsweredGateDecision(decisions, gate);
+    const decision = {
+      id: `decision-${GATE_ID}`,
+      source_gate: `gates/${GATE_ID}.md`,
+      answer: gate.answer,
+      recorded_by: 'human',
+    };
     if (!decisions.decisions.some((item) => item?.id === decision.id)) {
       decisions.decisions.push(decision);
       writeJson(decisionsPath, decisions);
     }
 
-    const packet = renderPacket(manifest, {
+    const selectedGraph = routedGraph(graph, [decision.source_gate], manifest);
+    fs.mkdirSync(path.dirname(packetPath), { recursive: true });
+    fs.writeFileSync(packetPath, renderPacket(manifest, {
       taskId,
-      graphRevision: graph.revision + 1,
+      graphRevision: selectedGraph.revision,
       decisionArtifacts: [decision.source_gate],
       preconditions: [`Human gate ${GATE_ID} answered: ${gate.answer}`],
-    });
-    const packetDigest = crypto.createHash('sha256').update(packet).digest('hex');
-    const selectedGraph = routedGraph(graph, [decision.source_gate], manifest, packetDigest);
-    fs.mkdirSync(path.dirname(packetPath), { recursive: true });
-    fs.writeFileSync(packetPath, packet, 'utf8');
+    }), 'utf8');
     writeJson(graphPath, selectedGraph);
     return {
       runId,
@@ -409,20 +372,18 @@ export function route(manifest, opts) {
       revision: 1,
       status: 'ready-for-manual-handoff',
       selected_task: taskId,
-      tasks: [],
+      tasks: [makeTask(1)],
       gates: [],
       decision_artifacts: [],
       request_objective: manifest.objective,
     };
-    const packet = renderPacket(manifest, {
+    fs.mkdirSync(path.dirname(packetPath), { recursive: true });
+    fs.writeFileSync(packetPath, renderPacket(manifest, {
       taskId,
       graphRevision: graph.revision,
       decisionArtifacts: [],
       preconditions: [],
-    });
-    graph.tasks = [makeTask(1, crypto.createHash('sha256').update(packet).digest('hex'))];
-    fs.mkdirSync(path.dirname(packetPath), { recursive: true });
-    fs.writeFileSync(packetPath, packet, 'utf8');
+    }), 'utf8');
     writeJson(graphPath, graph);
     return {
       runId,

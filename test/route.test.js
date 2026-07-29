@@ -184,13 +184,12 @@ test('an answered gate is recorded as decision provenance before one pending tas
   assert.equal(selected.graph.revision, 2);
   assert.equal(selected.graph.selected_task, 'task-1');
   assert.equal(selected.graph.tasks.length, 1);
-  assert.deepEqual({ ...selected.graph.tasks[0], packet_digest: undefined }, {
+  assert.deepEqual(selected.graph.tasks[0], {
     id: 'task-1',
     execution_state: 'pending',
     acceptance_state: 'pending',
     graph_revision: 2,
     dependencies: [],
-    packet_digest: undefined,
   });
   const decisions = JSON.parse(fs.readFileSync(selected.decisionsPath, 'utf8'));
   assert.deepEqual(decisions, {
@@ -217,7 +216,6 @@ test('an answered gate is recorded as decision provenance before one pending tas
   assert.match(packet, /## Forbidden paths\n\n- src\/ui\/\*\*/);
   assert.match(packet, /## Non-goals\n\n- Build a dashboard or UI/);
   assert.match(packet, /Graph revision: 2/);
-  assert.match(selected.graph.tasks[0].packet_digest, /^[a-f0-9]{64}$/);
   assert.match(selected.manualHandoff, /Give .*packet\.md to one worker manually/);
 
   const rerouted = route(manifest, { stateRoot, checkoutRoot });
@@ -282,65 +280,6 @@ test('a selected answered-gate run rejects removed or mismatched decision proven
   }, null, 2)}\n`, 'utf8');
   fs.unlinkSync(selected.gatePath);
   assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
-});
-
-test('an answered gate with mismatched existing provenance fails before task or packet selection', () => {
-  const stateRoot = makeTmpStateRoot();
-  const manifest = loadFixture('clarification-required.json');
-  const blocked = route(manifest, { stateRoot, checkoutRoot });
-  answerGate(blocked);
-  fs.writeFileSync(blocked.decisionsPath, `${JSON.stringify({ decisions: [{
-    id: 'decision-gate-1',
-    source_gate: 'gates/other-gate.md',
-    answer: 'Exclude blocked runs.',
-    recorded_by: 'worker',
-  }] }, null, 2)}\n`, 'utf8');
-
-  assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
-  const graph = JSON.parse(fs.readFileSync(path.join(blocked.runDir, 'graph.json'), 'utf8'));
-  assert.equal(graph.selected_task, null);
-  assert.equal(fs.existsSync(path.join(blocked.runDir, 'tasks', 'task-1', 'packet.md')), false);
-});
-
-test('selected packet digest rejects tampering', () => {
-  const stateRoot = makeTmpStateRoot();
-  const manifest = loadFixture('executable.json');
-  const selected = route(manifest, { stateRoot, checkoutRoot });
-  fs.appendFileSync(selected.packetPath, '\ntampered\n', 'utf8');
-  assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
-});
-
-test('selected graph requires manual-handoff status and pending execution and acceptance states', () => {
-  const manifest = loadFixture('executable.json');
-  for (const [field, value] of [
-    ['status', 'blocked'],
-    ['execution_state', 'succeeded'],
-    ['acceptance_state', 'passed'],
-  ]) {
-    const stateRoot = makeTmpStateRoot();
-    const selected = route(manifest, { stateRoot, checkoutRoot });
-    const graphPath = path.join(selected.runDir, 'graph.json');
-    const graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
-    if (field === 'status') graph.status = value;
-    else graph.tasks[0][field] = value;
-    fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, 'utf8');
-    assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
-  }
-});
-
-test('a blocked graph with a pre-existing packet is rejected without overwriting that packet', () => {
-  const stateRoot = makeTmpStateRoot();
-  const manifest = loadFixture('clarification-required.json');
-  const blocked = route(manifest, { stateRoot, checkoutRoot });
-  answerGate(blocked);
-  const packetPath = path.join(blocked.runDir, 'tasks', 'task-1', 'packet.md');
-  fs.mkdirSync(path.dirname(packetPath), { recursive: true });
-  fs.writeFileSync(packetPath, 'pre-existing packet', 'utf8');
-
-  assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
-  assert.equal(fs.readFileSync(packetPath, 'utf8'), 'pre-existing packet');
-  const graph = JSON.parse(fs.readFileSync(path.join(blocked.runDir, 'graph.json'), 'utf8'));
-  assert.equal(graph.selected_task, null);
 });
 
 test('an executable manifest selects one pending task and emits a manual handoff without claims or worker process artifacts', () => {

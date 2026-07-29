@@ -25,6 +25,12 @@
 
 - Read `CONTEXT.md`, accepted ADRs, and the relevant design or specification
   before changing product behaviour.
+- Treat the named issue's acceptance criteria as the implementation ceiling.
+  Do not add tamper resistance, recovery, validation, or lifecycle hardening
+  for malformed or externally modified run state unless that behaviour is
+  explicitly required by the issue or an accepted design decision. In review,
+  distinguish a normal-flow acceptance gap from optional hardening; defer the
+  latter rather than expanding the slice.
 - Preserve unrelated changes and third-party submodules. Do not modify
   `third_party/llm-wiki` without an explicit gitlink update decision.
 - Keep the Phase-1 boundary: `/route` prepares artifacts and prompts; it does
