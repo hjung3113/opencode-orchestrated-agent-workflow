@@ -1,0 +1,5 @@
+{
+  "instructions": [
+    "./third_party/llm-wiki/plugins/llm-wiki-opencode/skills/wiki-query/SKILL.md"
+  ]
+}
