@@ -2,6 +2,9 @@
   "human_request": "Add a nightly export of failed workflow runs to CSV.",
   "objective": "Give operators a daily CSV of failed runs for triage.",
   "scope": ["src/export.js", "test/export.test.js"],
+  "allowed_paths": ["src/export.js", "test/export.test.js"],
+  "forbidden_paths": ["src/ui/**", "bin/route.js"],
+  "non_goals": ["Build a dashboard or UI", "Launch a worker from /route"],
   "exclusions": ["No dashboard or UI", "Do not launch a worker from /route"],
   "safe_assumptions": ["Runs are already stored under ORCHESTRATOR_RUN_STATE_DIR"],
   "ambiguity": {

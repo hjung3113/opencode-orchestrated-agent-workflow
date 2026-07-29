@@ -54,6 +54,15 @@ export function validateManifest(manifest) {
   if (!isNonEmptyStringArray(manifest.scope)) {
     errors.push('scope must be a non-empty array of non-empty strings');
   }
+  if (!isNonEmptyStringArray(manifest.allowed_paths)) {
+    errors.push('allowed_paths must be a non-empty array of non-empty strings');
+  }
+  if (!isStringArray(manifest.forbidden_paths)) {
+    errors.push('forbidden_paths must be an array of strings');
+  }
+  if (!isStringArray(manifest.non_goals)) {
+    errors.push('non_goals must be an array of strings');
+  }
   if (!isStringArray(manifest.exclusions)) {
     errors.push('exclusions must be an array of strings');
   }

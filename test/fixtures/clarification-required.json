@@ -2,6 +2,9 @@
   "human_request": "Add a nightly export of failed workflow runs to CSV.",
   "objective": "Give operators a daily CSV of failed runs for triage.",
   "scope": ["Read run records from the external state root", "Write one CSV per day"],
+  "allowed_paths": ["src/export.js", "test/export.test.js"],
+  "forbidden_paths": ["src/ui/**"],
+  "non_goals": ["Build a dashboard or UI"],
   "exclusions": ["No dashboard or UI"],
   "safe_assumptions": ["Runs are already stored under ORCHESTRATOR_RUN_STATE_DIR"],
   "ambiguity": {

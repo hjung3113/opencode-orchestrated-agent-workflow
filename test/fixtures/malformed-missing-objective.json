@@ -1,6 +1,9 @@
 {
   "human_request": "Add a nightly export of failed workflow runs to CSV.",
   "scope": ["Read run records from the external state root"],
+  "allowed_paths": ["src/export.js"],
+  "forbidden_paths": [],
+  "non_goals": [],
   "exclusions": [],
   "safe_assumptions": [],
   "ambiguity": {
