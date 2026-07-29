@@ -146,6 +146,31 @@ bounded research/design → persisted graph with dependencies and a feedback edg
 using Slice A's generated spec and ticket. This keeps graph engineering and
 human control in the MVP without importing a heavyweight control plane.
 
+### 2.4 Failure-evidence branch
+
+On the next human-invoked `/route`, a **post-terminal failure assessment** is
+created only when the human asserts the active task has ended and it declared a
+block or its required outputs are absent/invalid. Silence, elapsed time, and a
+verifier rejection are not this branch: verifier rejection follows repair.
+
+`failure-assessment.json` is the sole Phase-1 artifact. It records cited
+observations, bounded exit/output tail, one outcome, `replaces_task_id`, route,
+and an exact unblock condition. Outcomes are closed: `transient_execution`,
+`contract_failure`, `packet_defect`, `authority_block`, or `unknown_failure`.
+
+- Transient execution permits one human-routed replacement with a freshly
+  rendered packet; external environment changes create a gate instead.
+- Contract failure creates a bounded output-contract correction task.
+- Packet defect returns to specification/ticket revision, never to the same
+  packet.
+- Authority block creates focused research or a gate; unknown failure blocks
+  until its named missing observation exists.
+
+All failure-created tasks count against the run ceiling. If a failed task already
+has `replaces_task_id`, routing blocks rather than attempting a second retry.
+Watchdogs, automatic retries, timeouts, full transcript retention, and
+cross-run failure analytics remain Phase 2.
+
 ### 3.1 Repository knowledge vs. execution state
 
 Project knowledge is versioned with the repository:
