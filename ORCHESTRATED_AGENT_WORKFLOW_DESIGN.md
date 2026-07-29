@@ -53,7 +53,98 @@ only when a demonstrated need appears.
 8. **Automation has bounded failure.** Repeated failures become a well-described
    block or a human decision request, not an endless retry loop.
 
+### 2.1 Five engineering layers: prompt → context → harness → loop → graph
+
+The workflow uses the following five layers as a shared vocabulary. Each layer
+absorbs the concerns below it; a reliable multi-agent project cannot be made
+reliable by improving prompts alone.
+
+| Layer | Responsibility in this project | Primary artifact / boundary |
+| --- | --- | --- |
+| **Prompt engineering** | Make one agent's immediate task clear: role, objective, constraints, expected output, and acceptance criteria. | `brief.md` and the rendered decision packet. |
+| **Context engineering** | Select the smallest relevant set of facts, decisions, evidence, and unresolved questions for that prompt. | `CONTEXT.md`, ADRs, manifests, and cited upstream run artifacts. |
+| **Harness engineering** | Make an individual task executable and checkable: gather inputs, invoke a worker, validate outputs, and record evidence. | Task directory, `status.json`, `evidence.json`, schema checks, and verifier contract. |
+| **Loop engineering** | Repeatedly observe a task/run, validate its output, retry only bounded transient failures, and route repair or escalation. | Orchestrator routing pass, exit criteria, retry/block policy, and final receipt. |
+| **Graph engineering** | Coordinate the whole organization of workers: dependencies, safe parallel branches, approval gates, feedback paths, and dynamic re-planning. | `graph.json`, decision registry, task index, and orchestrator scheduler. |
+
+The graph layer is not a static sequence of prompts. It is a dependency-aware
+organization: researchers can feed designers, designers can create decisions
+for spec authors, builders can be verified independently, and reviewers can
+cause a bounded repair branch. The orchestrator dynamically reconfigures that
+graph as new evidence arrives.
+
+### 2.2 File-backed shared memory, not agent chat
+
+In graph-engineering terminology, agents need a shared state/memory surface.
+For this project, that surface is deliberately file-backed and authority-aware:
+
+- **Long-lived shared knowledge:** `CONTEXT.md`, accepted ADRs, specifications,
+  and maintenance records, all versioned with the repository.
+- **Run-scoped shared knowledge:** request, decisions, graph, task outputs,
+  reviews, and receipts in the run directory.
+- **Agent-local scratch work:** may exist while an agent runs but is not a
+  handoff channel and cannot become authority without being written into a
+  declared task artifact.
+
+Agents never send hidden direct messages to one another. The orchestrator reads
+declared outputs, compiles the next decision packet, and creates the next edge
+in the graph. This preserves the benefits of shared memory while retaining an
+auditable, replayable protocol.
+
+```text
+Graph engineering      task graph, gates, branches, dynamic re-planning
+        ▲
+Loop engineering       observe → validate → route/retry/escalate
+        ▲
+Harness engineering    gather → execute → verify one task
+        ▲
+Context engineering    select decisions, evidence, facts, and unknowns
+        ▲
+Prompt engineering     render one bounded agent instruction
+```
+
 ## 3. System boundary
+
+### 2.3 Debate amendment: Phase-1 graph contract
+
+Sol medium and Opus 5 reviewed this design through an Orca-tracked,
+file-backed debate. Their combined amendment is:
+
+- Phase 1 has no privileged daemon. The orchestrator is a **human-invoked
+  `/route` pass** that writes the next graph revision and immutable task packet;
+  it prepares work but does not auto-launch workers.
+- Authority is enforced by path ownership: workers append only to their own
+  `tasks/<task-id>/` directory and all such output is a claim. Run-level graph,
+  decisions, gates, task index, and receipts are routing-pass artifacts.
+- Split worker execution from acceptance: `execution_state` is
+  `queued|running|succeeded|failed|blocked`, while `acceptance_state` is
+  `pending|passed|failed|not_applicable`. Worker exit never proves acceptance.
+- Use one canonical state root, `.orchestrator/runs/<run-id>/`, with
+  `graph.json`, `decisions.json`, `task-index.json`, `tasks/`, `gates/`, and
+  `final-receipt.json`. A task receives one never-rewritten `packet.md`; its
+  evidence is an `evidence-claim.json`.
+- A required human choice is a real artifact: `gates/<gate-id>.md` contains the
+  question, consequence, options, non-binding recommendation, and empty answer
+  fields. `/route` stops at an unanswered gate and records an answered gate as
+  level-1 decision provenance. `NEEDS-HUMAN.md` indexes outstanding gates.
+- Mandatory gates cover irreversible data changes, cost commitments, external
+  sending/publication, credentials/security-sensitive work, and durable product
+  direction. Superseded decisions mark downstream cited artifacts `stale`;
+  stale evidence is retained but cannot satisfy current acceptance.
+- In Phase 1, `graph.json` is a record, not an executor: one active task, no
+  automatic retries, no parallelism, and no graph mutation during dispatch.
+  A task is bound to its graph revision. Parallel scheduling, leases,
+  cancellation, digest verification, and auto-launch are Phase-2 work.
+- Independence is a context property: a verifier receives only specification,
+  acceptance criteria, changed files, and evidence claim—not the implementer's
+  private reasoning or narrative. Research/design outputs carry authority class
+  and need no verifier merely to be consumed.
+
+The first proof is **Slice A**: ambiguous request → intake → one human gate →
+bounded research/design → persisted graph with dependencies and a feedback edge.
+**Slice B** then proves implementation → independent verification → receipt
+using Slice A's generated spec and ticket. This keeps graph engineering and
+human control in the MVP without importing a heavyweight control plane.
 
 ### 3.1 Repository knowledge vs. execution state
 
@@ -579,3 +670,6 @@ The workflow is successful when it can demonstrate that:
 5. Independent verification can reject an unsupported implementation claim.
 6. A maintainer can reconstruct what happened from files and receipts.
 7. The system remains smaller than a general-purpose lifecycle/control plane.
+8. A task can be placed in a graph with explicit dependencies, read/write
+   boundaries, approval gates, and feedback/repair paths rather than being
+   treated as an isolated prompt chain.
