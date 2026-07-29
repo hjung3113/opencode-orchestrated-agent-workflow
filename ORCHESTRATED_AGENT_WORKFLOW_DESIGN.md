@@ -2,9 +2,9 @@
 
 ## Status
 
-Brainstorming proposal. This document defines a target architecture and does
-not authorize implementation, installation, process spawning, or changes to
-external systems.
+Design proposal with one adopted integration decision: the unmodified pinned
+`llm-wiki` knowledge adapter. It does not authorize implementation of the
+workflow runtime, automatic process spawning, or changes to external systems.
 
 ## 1. Purpose
 
@@ -61,17 +61,15 @@ reliable by improving prompts alone.
 
 | Layer | Responsibility in this project | Primary artifact / boundary |
 | --- | --- | --- |
-| **Prompt engineering** | Make one agent's immediate task clear: role, objective, constraints, expected output, and acceptance criteria. | `brief.md` and the rendered decision packet. |
+| **Prompt engineering** | Make one agent's immediate task clear: role, objective, constraints, expected output, and acceptance criteria. | Rendered `packet.md`. |
 | **Context engineering** | Select the smallest relevant set of facts, decisions, evidence, and unresolved questions for that prompt. | `CONTEXT.md`, ADRs, manifests, and cited upstream run artifacts. |
-| **Harness engineering** | Make an individual task executable and checkable: gather inputs, invoke a worker, validate outputs, and record evidence. | Task directory, `status.json`, `evidence.json`, schema checks, and verifier contract. |
-| **Loop engineering** | Repeatedly observe a task/run, validate its output, retry only bounded transient failures, and route repair or escalation. | Orchestrator routing pass, exit criteria, retry/block policy, and final receipt. |
-| **Graph engineering** | Coordinate the whole organization of workers: dependencies, safe parallel branches, approval gates, feedback paths, and dynamic re-planning. | `graph.json`, decision registry, task index, and orchestrator scheduler. |
+| **Harness engineering** | Make one task executable and checkable: render its packet, collect its claim, and (for implementation) obtain independent verification. | Task directory, `result.md`, `evidence-claim.json`, and optional `verification.json`. |
+| **Loop engineering** | On a human-invoked route, observe the result and choose the next bounded task, gate, or block. | `/route`, exit condition, and final receipt. |
+| **Graph engineering** | Record dependencies, human gates, and feedback paths without executing them automatically. | `graph.json` and `gates/`. |
 
-The graph layer is not a static sequence of prompts. It is a dependency-aware
-organization: researchers can feed designers, designers can create decisions
-for spec authors, builders can be verified independently, and reviewers can
-cause a bounded repair branch. The orchestrator dynamically reconfigures that
-graph as new evidence arrives.
+The graph layer is not a static sequence of prompts. In Phase 1 it is only a
+human-reviewed record: it can show that research fed design or that review
+created a repair edge, but it does not launch, retry, or parallelize workers.
 
 ### 2.2 File-backed shared memory, not agent chat
 
@@ -87,7 +85,7 @@ For this project, that surface is deliberately file-backed and authority-aware:
   declared task artifact.
 
 Agents never send hidden direct messages to one another. The orchestrator reads
-declared outputs, compiles the next decision packet, and creates the next edge
+declared outputs, compiles the next task packet, and creates the next edge
 in the graph. This preserves the benefits of shared memory while retaining an
 auditable, replayable protocol.
 
@@ -103,8 +101,6 @@ Context engineering    select decisions, evidence, facts, and unknowns
 Prompt engineering     render one bounded agent instruction
 ```
 
-## 3. System boundary
-
 ### 2.3 Debate amendment: Phase-1 graph contract
 
 Sol medium and Opus 5 reviewed this design through an Orca-tracked,
@@ -112,25 +108,29 @@ file-backed debate. Their combined amendment is:
 
 - Phase 1 has no privileged daemon. The orchestrator is a **human-invoked
   `/route` pass** that writes the next graph revision and immutable task packet;
-  it prepares work but does not auto-launch workers.
-- Authority is enforced by path ownership: workers append only to their own
-  `tasks/<task-id>/` directory and all such output is a claim. Run-level graph,
-  decisions, gates, task index, and receipts are routing-pass artifacts.
+  it prepares work but does not auto-launch workers. A selected packet ends
+  with a manual handoff instruction for the chosen worker profile.
+- Authority is enforced by path ownership: workers write only to their own
+  `tasks/<task-id>/` directory and all such output is a claim. Only a routing
+  pass writes run-level `graph.json`, `decisions.json`, `gates/`, receipts, or
+  task packets.
 - Split worker execution from acceptance: `execution_state` is
-  `queued|running|succeeded|failed|blocked`, while `acceptance_state` is
+  `pending|succeeded|failed|blocked`, while `acceptance_state` is
   `pending|passed|failed|not_applicable`. Worker exit never proves acceptance.
-- Use one canonical state root, `.orchestrator/runs/<run-id>/`, with
-  `graph.json`, `decisions.json`, `task-index.json`, `tasks/`, `gates/`, and
-  `final-receipt.json`. A task receives one never-rewritten `packet.md`; its
-  evidence is an `evidence-claim.json`.
+- Use one canonical external state root,
+  `$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/`, with
+  `request.md`, `decisions.json`, `graph.json`, `tasks/`, optional `gates/`,
+  and `final-receipt.json`. A task receives one never-rewritten `packet.md`;
+  its evidence is an `evidence-claim.json`.
 - A required human choice is a real artifact: `gates/<gate-id>.md` contains the
-  question, consequence, options, non-binding recommendation, and empty answer
-  fields. `/route` stops at an unanswered gate and records an answered gate as
-  level-1 decision provenance. `NEEDS-HUMAN.md` indexes outstanding gates.
+  question, consequence, options, non-binding recommendation, and answer.
+  `/route` stops at an unanswered gate and records an answered gate as decision
+  provenance. No separate gate index is required.
 - Mandatory gates cover irreversible data changes, cost commitments, external
   sending/publication, credentials/security-sensitive work, and durable product
-  direction. Superseded decisions mark downstream cited artifacts `stale`;
-  stale evidence is retained but cannot satisfy current acceptance.
+  direction. A routing pass marks downstream cited artifacts `stale` when it
+  records a superseded decision; stale evidence is retained but cannot satisfy
+  current acceptance.
 - In Phase 1, `graph.json` is a record, not an executor: one active task, no
   automatic retries, no parallelism, and no graph mutation during dispatch.
   A task is bound to its graph revision. Parallel scheduling, leases,
@@ -140,38 +140,37 @@ file-backed debate. Their combined amendment is:
   private reasoning or narrative. Research/design outputs carry authority class
   and need no verifier merely to be consumed.
 
-The first proof is **Slice A**: ambiguous request → intake → one human gate →
-bounded research/design → persisted graph with dependencies and a feedback edge.
-**Slice B** then proves implementation → independent verification → receipt
-using Slice A's generated spec and ticket. This keeps graph engineering and
-human control in the MVP without importing a heavyweight control plane.
+The first implementation proof is **Slice A0**: ambiguous request → intake →
+one human gate → persisted blocked graph, with no worker execution. **Slice A**
+then extends A0 through bounded research/design to a persisted graph with
+dependencies and a feedback edge. **Slice B** proves implementation →
+independent verification → receipt using Slice A's generated spec and ticket.
+This keeps graph engineering and human control in the MVP without importing a
+heavyweight control plane.
 
-### 2.4 Failure-evidence branch
+### 2.4 Phase-1 failure boundary
 
-On the next human-invoked `/route`, a **post-terminal failure assessment** is
-created only when the human asserts the active task has ended and it declared a
-block or its required outputs are absent/invalid. Silence, elapsed time, and a
-verifier rejection are not this branch: verifier rejection follows repair.
+A failed task records the observation, blocker, and exact unblock condition in
+its `result.md`. The next execution starts only through a human-invoked
+`/route`; a task is not re-routed while its packet and unblock condition are
+unchanged. Typed failure taxonomies, retry lineage, run ceilings, watchdogs,
+timeouts, transcript retention, and cross-run failure analytics are Phase-2
+work.
 
-`failure-assessment.json` is the sole Phase-1 artifact. It records cited
-observations, bounded exit/output tail, one outcome, `replaces_task_id`, route,
-and an exact unblock condition. Outcomes are closed: `transient_execution`,
-`contract_failure`, `packet_defect`, `authority_block`, or `unknown_failure`.
-
-- Transient execution permits one human-routed replacement with a freshly
-  rendered packet; external environment changes create a gate instead.
-- Contract failure creates a bounded output-contract correction task.
-- Packet defect returns to specification/ticket revision, never to the same
-  packet.
-- Authority block creates focused research or a gate; unknown failure blocks
-  until its named missing observation exists.
-
-All failure-created tasks count against the run ceiling. If a failed task already
-has `replaces_task_id`, routing blocks rather than attempting a second retry.
-Watchdogs, automatic retries, timeouts, full transcript retention, and
-cross-run failure analytics remain Phase 2.
+## 3. System boundary
 
 ### 3.1 Repository knowledge vs. execution state
+
+`llm-wiki` is an optional upstream knowledge adapter, not an orchestrator
+component or a second control plane. It is included unmodified as the pinned
+submodule `third_party/llm-wiki` at upstream
+[`nvk/llm-wiki` commit `2a37e8649339e2f1a2936be3aa761e949b79afdc`](https://github.com/nvk/llm-wiki/tree/2a37e8649339e2f1a2936be3aa761e949b79afdc),
+with no local patches; updates are explicit gitlink changes. The default
+OpenCode instruction is the upstream read-only
+`plugins/llm-wiki-opencode/skills/wiki-query/SKILL.md`; use
+`wiki-manager/SKILL.md` only for an explicitly requested wiki research or
+maintenance task. Upstream is MIT-licensed, but that does not make its license
+the license of this repository.
 
 Project knowledge is versioned with the repository:
 
@@ -185,25 +184,44 @@ docs/maintenance/           Maintainer guidance and curated debt records
 .opencode/                  OpenCode agent, command, skill, and template definitions
 ```
 
-Per-run mutable state is stored outside the checkout where possible, or in an
-explicitly ignored location such as `.orchestrator/`. It contains only
-reconstructable execution artifacts:
+Per-run mutable state is stored in the absolute external
+`ORCHESTRATOR_RUN_STATE_DIR`; it must not be inside the checkout or a
+developer-tool directory. `.orchestrator/` is an explicitly ignored local
+fallback only. The state root contains only reconstructable execution
+artifacts:
 
 ```text
-.orchestrator/runs/<run-id>/
-  request.md
-  decisions.md
-  plan.md
-  graph.json
+$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
+  request.md                  # objective, scope, assumptions, ambiguities
+  decisions.json
+  graph.json                  # record only; never an executor
+  gates/<gate-id>.md          # only when a material choice needs a human
   tasks/<task-id>/
-  reviews/
+    packet.md                 # never rewritten
+    result.md                 # worker's concise result claim and blocker
+    evidence-claim.json
+    verification.json         # implementation tasks only
   final-receipt.json
 ```
 
 This separation prevents generated status, receipts, and recovery artifacts
 from being confused with source-of-truth product decisions.
 
-### 3.2 Authority order
+### 3.2 Development environment and dogfooding
+
+Developer tooling is a separate, user-owned environment. In particular,
+Matt Pocock engineering skills remain under `/Users/hyojung/.codex/skills` and
+are never implicitly promoted to product skills, runtime prompt inputs, or
+receipt provenance. A future product skill requires an explicit
+repository-owned adoption decision.
+
+Dogfooding applies this workflow to its own checkout without erasing this
+boundary: a dogfood run has an explicit self-target and stores its packet,
+claims, and verification in the external state root. It follows normal scope,
+human-gate, evidence, and independent-verification rules; it does not grant
+automatic execution, publication, or access to developer-home tooling.
+
+### 3.3 Authority order
 
 When sources disagree, use this order:
 
@@ -212,6 +230,10 @@ When sources disagree, use this order:
 3. Approved specification and acceptance criteria.
 4. Verified research facts and implementation evidence.
 5. Proposed decisions, agent recommendations, and historical run outputs.
+
+An external knowledge adapter, including `llm-wiki`, can supply cited research
+facts only: its output cannot rise above level 4 or become an accepted decision
+or approved specification without the normal authority path.
 
 The orchestrator records conflicts instead of resolving material product,
 cost, security, or public-release choices on its own.
@@ -260,13 +282,9 @@ The meta-prompting skill is central here. It is a clarification and task-
 framing tool, not an unconstrained prompt beautifier and not an authority that
 changes user intent.
 
-Required outputs:
-
-- `request.md`: interpreted objective, scope, exclusions, and desired outcome.
-- `ambiguities.md`: missing information and ambiguity classification.
-- `assumptions.md`: assumptions made, why they are safe, and which require
-  confirmation.
-- `routing-recommendation.md`: recommended next workflow and rationale.
+The sole Phase-1 output is `request.md`, containing the interpreted objective,
+scope, exclusions, safe assumptions, and ambiguity classification. It is a
+task-framing artifact, not an authority that changes user intent.
 
 Ambiguity classification:
 
@@ -275,8 +293,8 @@ Ambiguity classification:
 - `clarification-required`: the answer would materially change product
   direction, cost, data handling, public exposure, or irreversible work.
 
-Only the first two may proceed automatically. The third creates a concise
-human-decision request.
+Only the first two may proceed automatically. The third makes `/route` write a
+concise `gates/<gate-id>.md` and stop for the human answer.
 
 ### 5.2 Discovery / research
 
@@ -284,12 +302,8 @@ human-decision request.
 decision itself.
 
 Inputs include the request contract, active decisions, and a bounded research
-question. Outputs include:
-
-- `research.md`: findings, sources, and limitations.
-- `facts.json`: machine-readable claims with provenance.
-- `unknowns.md`: unanswered questions and their impact.
-- `research-recommendation.md`: suggested next question or design input.
+question. The task records findings, sources, limitations, and open questions
+in its `result.md`; its `evidence-claim.json` identifies the cited sources.
 
 Research tasks should be small and independently useful. If a provider's cost
 or API constraint is unknown, create a provider-constraint task; do not route
@@ -300,12 +314,8 @@ directly to design based on an unverified guess.
 **Goal:** Compare alternatives, establish boundaries, and propose durable
 decisions.
 
-Outputs:
-
-- `options.md`: alternatives, trade-offs, constraints, and rejected paths.
-- `decision-proposal.md`: one or more proposed decisions with rationale.
-- `adr-draft.md`: only when a decision is durable enough to warrant it.
-- `design-risks.md`: open questions, failure modes, and validation needs.
+The task records alternatives, trade-offs, proposed decisions, and risks in
+`result.md`. An ADR is created only when a human accepts a durable decision.
 
 The design workflow may recommend a decision but cannot mark a material
 decision accepted unless the authority rules allow it. The orchestrator routes
@@ -315,28 +325,25 @@ competing material choices to a human decision gate.
 
 **Goal:** Turn accepted design decisions into observable, testable contracts.
 
-Outputs:
+The task records behavior, invariants, non-goals, observable acceptance
+criteria, allowed/excluded scope, and an observation method for every
+criterion in `result.md`.
 
-- `spec.md`: behavior, interfaces, invariants, error cases, and non-goals.
-- `acceptance.md`: unambiguous acceptance criteria.
-- `verification-plan.md`: how each criterion will be checked.
-- `scope.md`: allowed areas, excluded areas, and migration/compatibility needs.
-
-Specification does not implement. It fails its exit gate if a reviewer cannot
-state how a criterion could be verified.
+Specification does not implement. In Phase 1, `/route` performs only a
+structural exit check: a missing observation method makes the specification
+unroutable. This does not introduce an additional verifier role.
 
 ### 5.5 Ticketing and task-graph compilation
 
 **Goal:** Convert an approved specification into small, independently
 verifiable execution units.
 
-Outputs:
+It proposes small task candidates and their dependencies in its own task claim.
+On a later routing pass, `/route` alone updates the record-only `graph.json`
+and renders one immutable `packet.md` for the selected next task; it does not
+compile an executable scheduler.
 
-- `tickets.md`: human-readable task list.
-- `task-graph.json`: dependencies, inputs, outputs, and routing constraints.
-- one `brief.md` per proposed task.
-
-Every task brief contains:
+Every task packet contains:
 
 ```md
 # Objective
@@ -350,20 +357,18 @@ Every task brief contains:
 # Preconditions and dependent tasks
 ```
 
-The graph declares read/write paths. Tasks with overlapping writes are
-serialized. Research, independent testing, and independent review may run in
-parallel only when their inputs are ready and their outputs do not conflict.
+The graph declares dependencies and path boundaries for later scheduling.
+Phase 1 selects one task only; safe parallel scheduling is Phase-2 work.
 
 ### 5.6 Implementation
 
 **Goal:** Complete one approved ticket, and nothing broader.
 
-An implementation agent receives a compiled decision packet, not raw broad
-history. It writes:
-
-- `result.md`: concise outcome, changes, decisions encountered, limitations.
-- `evidence.json`: commands, results, changed files, and acceptance mapping.
-- `status.json`: terminal status and any typed blocker.
+An implementation agent receives a compiled task packet, not raw broad history.
+It writes `result.md` (concise outcome, changes, limitations, and any blocker)
+and `evidence-claim.json` (commands, results, changed files, and acceptance
+mapping). A later routing pass records execution and acceptance state; the
+worker never writes run-level lifecycle state.
 
 It must create a `scope-escalation` request rather than making unapproved
 architecture changes or broad cleanup.
@@ -374,11 +379,9 @@ architecture changes or broad cleanup.
 contract.
 
 Review examines the specification, allowed paths, changed content, and
-evidence. It does not accept “completed” as proof. Outputs:
-
-- `review.md`: findings with severity, concrete evidence, and scope status.
-- `verification.json`: pass/fail per acceptance criterion.
-- `repair-recommendation.md`: bounded follow-up work if needed.
+evidence. It does not accept “completed” as proof. It writes
+`verification.json` with pass/fail per acceptance criterion and any
+acceptance-mapped finding.
 
 A failing review does not become an informal chat back to the implementer.
 The orchestrator creates a new repair task with the review findings as input.
@@ -407,9 +410,10 @@ The orchestrator is the only component allowed to:
 
 1. Read the overall run state and active decisions.
 2. Decide which workflow is appropriate next.
-3. Compile a new task brief and decision packet.
+3. Compile a new task packet.
 4. Construct and update the task graph.
-5. Determine safe sequential or parallel scheduling.
+5. In Phase 1, record dependencies and select one active sequential task.
+   Parallel scheduling is Phase-2 work.
 6. Check phase exit criteria and required artifacts.
 7. Create a human-decision request, repair task, or blocked record.
 8. Produce the final run receipt.
@@ -426,12 +430,15 @@ For each routing pass the orchestrator:
 2. Validates artifact shape and phase exit conditions.
 3. Determines whether the run needs clarification, focused research, design,
    specification, tasking, repair, verification, or completion.
-4. Creates the smallest task or compatible task set that advances the run.
-5. Injects relevant historical context and explicit constraints into each brief.
-6. Schedules tasks based on dependencies and declared read/write paths.
-7. Waits for terminal artifacts, validates them, then repeats.
+4. Creates the smallest single task that advances the run.
+5. Injects relevant historical context and explicit constraints into each task
+   packet.
+6. Records dependencies and the selected task in `graph.json`; it does not
+   launch workers or mutate the graph during dispatch.
+7. On a later human-invoked route, evaluates terminal artifacts and selects the
+   next task, gate, block, or completion.
 
-### 6.2 Decision packet
+### 6.2 Task packet
 
 Every dispatched agent receives a compact, stable packet:
 
@@ -467,150 +474,73 @@ decisions are clearly labeled as inputs to evaluate, never as settled fact.
 ### 7.1 Run layout
 
 ```text
-runs/<run-id>/
+$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
   request.md
-  decisions.md
-  plan.md
+  decisions.json
   graph.json
-  task-index.json
+  gates/<gate-id>.md
   tasks/<task-id>/
-    brief.md
-    input-manifest.json
+    packet.md
     result.md
-    evidence.json
-    handoff.md
-    status.json
-  reviews/<review-id>/
-    brief.md
-    review.md
-    verification.json
+    evidence-claim.json
+    verification.json       # implementation tasks only
   final-receipt.json
 ```
 
-### 7.2 Required task status shape
+`result.md` and `evidence-claim.json` are task claims. A routing pass records
+execution and acceptance state after checking the applicable contract; an
+implementation task needs independent `verification.json` before acceptance.
+Schemas stay small and machine-checkable. A missing required artifact prevents
+the task from being routed as complete.
 
-```json
-{
-  "task_id": "example",
-  "workflow": "research",
-  "state": "queued | running | completed | failed | blocked",
-  "updated_at": "ISO-8601 timestamp",
-  "blocker_type": "optional typed reason",
-  "output_manifest": ["result.md", "evidence.json"]
-}
-```
+The task entry in `graph.json` is the host-owned location for
+`execution_state` and `acceptance_state`; workers do not write either field.
 
-### 7.3 Evidence shape
+### 7.2 Slice A0 route contract
 
-```json
-{
-  "changed_files": [],
-  "commands": [{"command": "", "exit_code": 0, "summary": ""}],
-  "acceptance_mapping": [
-    {"criterion": "", "evidence": "artifact path or command result"}
-  ],
-  "known_limitations": []
-}
-```
+Slice A0 takes a validated, structured intake manifest as input. It does not
+infer ambiguity or call a model: an intake adapter is a later Slice-A concern.
+The manifest contains the human request, objective, scope, allowed paths,
+forbidden paths, non-goals, exclusions, safe assumptions, and one declared
+ambiguity classification.
 
-The exact schemas may evolve, but they must remain small, versioned, and
-machine-checkable. A missing required artifact prevents a task from being
-routed as complete.
+For `clarification-required`, `/route` creates `request.md`, an empty
+`decisions.json`, a revision-one blocked `graph.json`, and exactly one gate;
+then it stops without selecting a task or rendering a packet. Re-running the
+unchanged manifest is idempotent: it creates no second gate and does not change
+the graph revision.
+
+After a recorded gate answer, `/route` records its decision provenance,
+selects at most one `pending` task, and renders that task's immutable packet.
+It prints the manual worker handoff but never launches a process. The A0 test
+fixtures must cover: blocked ambiguous input, idempotent re-route, answered
+gate, executable input, absent required artifact, and the absence of worker
+processes or `result.md` files.
 
 ## 8. Safety, quality, and recovery features
 
-### 8.1 Decision conflict detection
+### 8.1 Scope guards and change budget
 
-Every decision includes an identifier, status, rationale, evidence, affected
-scope, and (where applicable) a superseded decision. When a new task conflicts
-with an accepted decision, the orchestrator creates a `decision-conflict`
-workflow instead of silently choosing a side.
-
-### 8.2 Scope guards and change budget
-
-Task briefs define allowed and forbidden paths, non-goals, and a maximum
+Task packets define allowed and forbidden paths, non-goals, and a maximum
 intended change size. Verification checks these constraints. Work outside the
 contract becomes a separate proposed ticket.
 
-### 8.3 Failure and retry policy
+### 8.2 Later reliability work
 
-- A transient execution failure may retry a limited number of times.
-- A repeated failure with the same root cause becomes `blocked`.
-- Missing facts route to focused Discovery.
-- Missing material decisions route to the human decision gate.
-- Failed verification creates a fresh, bounded repair task.
-
-The run record must say what failed, what evidence exists, what was attempted,
-and precisely what information or authority would unblock it.
-
-### 8.4 Receipts and reproducibility
-
-The final receipt records input artifact versions or hashes, the task graph,
-agent/skill identities, decisions applied, commands run, verification results,
-final status, and known limitations. It is a reconstruction tool, not merely
-a success badge.
-
-### 8.5 Drift detection
-
-A later maintenance workflow compares accepted ADR/spec claims with code,
-tests, and documentation. It creates evidence-backed maintenance candidates;
-it does not automatically edit the system merely because a mismatch is found.
+Decision-conflict automation, typed retry/block policy, rich reproducibility
+receipts, drift detection, and maintenance analytics are Phase-2 or Phase-3
+work. Phase 1 retains only the failure boundary in §2.4, the human gate, the
+bounded packet, and implementation-only independent verification.
 
 ## 9. OpenCode organization and commands
 
-Suggested repository layout:
-
-```text
-.opencode/
-  agents/
-    intake.md
-    researcher.md
-    designer.md
-    spec-author.md
-    ticket-planner.md
-    implementer.md
-    verifier.md
-    maintainer.md
-    orchestrator.md
-  commands/
-    intake.md
-    research.md
-    design.md
-    spec.md
-    ticket.md
-    implement.md
-    verify.md
-    maintain.md
-    route.md
-    status.md
-    resume.md
-  skills/
-    meta-prompt-intake.md
-    research-composition.md
-    design-composition.md
-    implementation-composition.md
-  templates/
-    task-brief.md
-    decision-packet.md
-    evidence.json
-    status.json
-```
-
-Command meanings:
-
-| Command | Intent |
-| --- | --- |
-| `/intake` | Refine a human request, list ambiguity, and select the next workflow. |
-| `/research` | Run a bounded fact-finding task. |
-| `/design` | Compare options and prepare decisions/ADR proposals. |
-| `/spec` | Convert accepted decisions into a testable contract. |
-| `/ticket` | Produce a dependency-aware execution graph. |
-| `/implement` | Execute exactly one approved implementation ticket. |
-| `/verify` | Independently validate a ticket against spec and evidence. |
-| `/maintain` | Identify and curate health/debt/drift work. |
-| `/route` | Re-read run artifacts and compile the next appropriate task graph. |
-| `/status` | Summarize active tasks, decisions, blockers, and evidence. |
-| `/resume` | Reconstruct an interrupted run from durable artifacts. |
+Phase 1 needs only one human-invoked `/route` command, a task-packet template,
+and two narrow worker profiles: implementer and independent verifier. A route
+pass prints the manual handoff required to give a packet to a worker; no
+command dispatches it. Intake, research, design, specification, and ticketing
+are workflow roles recorded in the packet, not a required command suite.
+Future commands such as `/resume`, `/maintain`, and graph execution are
+introduced only with their Phase-2/3 evidence.
 
 ## 10. Matt Pocock skill composition
 
@@ -628,21 +558,26 @@ all-purpose agent.
 | Verification | Independent review | Validate spec, standards, scope, and regression risk. |
 | Maintenance | Inspection + narrow patch/review | Curate and safely address operational debt. |
 
-The composition must remain visible in each task's receipt so later maintainers
-can understand which workflow and constraints produced an artifact.
+The selected composition is recorded in the task packet and final receipt so
+later maintainers can understand which workflow and constraints produced an
+artifact.
 
 ## 11. Delivery phases
 
 ### Phase 1 — Minimum usable workflow
 
-Implement only the design-critical path:
+Implement only one end-to-end, human-invoked path:
 
-- `/intake`, `/research`, `/design`, `/spec`, `/ticket`, `/implement`,
-  `/verify`, and `/route`;
-- file protocol and minimal schemas;
-- accepted/proposed decision tracking;
-- scope guards;
-- evidence-required completion.
+- `/route` prepares files and prompts but never auto-launches a worker;
+- begin with Slice A0: an ambiguous request produces a blocked graph and one
+  gate, then stops with no task execution;
+- one sequential task has a bounded packet, scope, result claim, and graph
+  record;
+- `request.md` keeps ambiguity classification and creates a human gate only for
+  material choices;
+- implementation tasks alone receive independent verification;
+- `llm-wiki` is an optional, pinned knowledge adapter rather than a workflow or
+  control-plane subsystem.
 
 This phase should support one sequential project slice end-to-end before any
 automatic broad parallelism or sophisticated recovery is added.
@@ -666,19 +601,18 @@ Add:
 - repeated-finding analysis;
 - operational health and dependency review workflows.
 
-## 12. Decisions still needed before implementation
+## 12. Decisions resolved for Phase 1
 
-1. Does the orchestrator directly launch OpenCode agents, or only prepare files
-   and prompts for human-approved execution?
-2. Will per-run state always live outside the checkout, or is an ignored
-   `.orchestrator/` directory required for portability?
-3. Which decisions may be accepted automatically, if any? The recommended
-   initial answer is: only reversible, low-risk implementation details.
-4. What is the first narrow vertical slice to prove the system: a research-to-
-   ADR flow, a spec-to-ticket flow, or a one-ticket implementation flow?
-5. Which approval gates must always require a human: irreversible data changes,
-   cost commitments, external publication, security-sensitive changes, and
-   durable product-direction decisions are recommended defaults.
+1. `/route` prepares files and prompts only; it does not launch OpenCode agents.
+2. Per-run state is `$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/` and is
+   generated execution state, not repository knowledge.
+3. Material product decisions are never accepted automatically.
+4. The first proof is Slice A (ambiguous request through human gate and graph
+   record), followed by Slice B (one implementation task and independent
+   verification).
+5. Irreversible data changes, cost commitments, external publication,
+   credential/security-sensitive work, and durable product-direction decisions
+   always require a human gate.
 
 ## 13. Success criteria for this design
 
@@ -695,6 +629,6 @@ The workflow is successful when it can demonstrate that:
 5. Independent verification can reject an unsupported implementation claim.
 6. A maintainer can reconstruct what happened from files and receipts.
 7. The system remains smaller than a general-purpose lifecycle/control plane.
-8. A task can be placed in a graph with explicit dependencies, read/write
-   boundaries, approval gates, and feedback/repair paths rather than being
-   treated as an isolated prompt chain.
+8. `graph.json` records explicit dependencies, approval gates, and a
+   feedback/repair path rather than treating a task as an isolated prompt
+   chain.

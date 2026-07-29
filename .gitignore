@@ -1,0 +1,2 @@
+# Generated harness state must never become product source.
+.orchestrator/
