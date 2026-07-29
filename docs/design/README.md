@@ -1,0 +1,34 @@
+# Design proposal index
+
+This directory is the canonical location for the original design proposal,
+partitioned mechanically by its former top-level sections. The partition
+preserves the complete proposal; these files are rationale and roadmap unless
+an ADR or contract explicitly says otherwise. Current observable behavior is
+owned by `docs/contracts/` and public tests.
+
+| Former section | Canonical document |
+| --- | --- |
+| Status | [status](status.md) |
+| 1. Purpose | [purpose](purpose.md) |
+| 2. Core principles | [core principles](core-principles.md) |
+| 3. System boundary | [system boundary](system-boundary.md) |
+| 4. Workflow lifecycle | [lifecycle](lifecycle.md) |
+| 5. Workflows | [workflows](workflows.md) |
+| 6. Orchestrator responsibilities | [routing](routing.md) |
+| 7. File protocol | [file protocol](file-protocol.md) |
+| 8. Safety and recovery | [safety and recovery](safety-and-recovery.md) |
+| 9–10. OpenCode and skill composition | [organization](opencode-organization.md), [composition](skill-composition.md) |
+| 11–13. Phases, decisions, success | [phases](delivery-phases.md), [decisions](phase-1-decisions.md), [success](success-criteria.md) |
+
+## Reading router
+
+All product work reads `CONTEXT.md`, the named issue or specification, and
+relevant accepted ADRs. Then use the task-specific rows in `AGENTS.md`.
+The focused contract or workflow document is authoritative over this rationale
+directory; an ADR wins over a conflicting contract.
+
+## Migration ledger
+
+The 634-line root proposal was split on all thirteen top-level section
+headings. The exact section files total the same 634 source lines; this index
+is the only added navigation text.
