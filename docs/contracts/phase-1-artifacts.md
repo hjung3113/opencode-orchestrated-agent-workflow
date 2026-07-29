@@ -1,0 +1,31 @@
+# Phase-1 artifacts and ownership
+
+## Ownership rule
+
+Only a human-invoked routing pass owns run-level state. A worker owns claims
+inside its selected task directory. The routing pass creates a gate; the human
+may fill only its declared answer slot. A verifier owns only its independent
+verification result. No claim is accepted merely because it exists.
+
+| Artifact | Writer | Primary consumer | Authority | Slice status |
+| --- | --- | --- | --- | --- |
+| Intake manifest | Human or future intake adapter | `/route` | Declared request; never inferred by `/route`. | A0 current |
+| `request.md` | `/route` | Later workflow roles | Faithful routed request and ambiguity classification. | A0 current |
+| `decisions.json` | `/route` | Later routing passes and packets | Accepted human gate provenance. | A0 current |
+| `graph.json` | `/route` | Maintainer and later routing pass | Host-owned task selection, dependencies, and execution/acceptance record. | A0 current: one task only |
+| `gates/<id>.md` | `/route` creates; human fills answer slot | `/route` | Material decision question and answer provenance. | A0 current |
+| `tasks/<id>/packet.md` | `/route` | One manually chosen worker | Immutable bounded instruction tied to graph revision. | A0 current |
+| `tasks/<id>/result.md` | Worker | Later routing pass | Worker outcome claim, blocker, and limitations. | Slice A planned |
+| `tasks/<id>/evidence-claim.json` | Worker | Independent verifier | Claimed commands, outputs, changed files, and acceptance mapping. | Slice A planned |
+| `tasks/<id>/verification.json` | Independent verifier | Later routing pass | Independent pass/fail evidence for implementation criteria. | Slice B planned |
+| `final-receipt.json` | `/route` | Maintainer | Evidence-backed final outcome for a completed run. | Slice B planned |
+
+## Invariants
+
+- Run state root is absolute and external to this checkout and developer-tool
+  directories.
+- A material ambiguity creates a gate; `/route` does not invent its answer.
+- A packet is created for at most one pending task and is never rewritten.
+- `/route` never calls a model, launches a worker, or writes worker claims.
+- Worker completion is not acceptance. Only the applicable acceptance rule,
+  including independent verification for implementation, may establish it.

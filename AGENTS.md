@@ -23,8 +23,25 @@
 
 ## Working rules
 
-- Read `CONTEXT.md`, accepted ADRs, and the relevant design or specification
-  before changing product behaviour.
+- Read `CONTEXT.md`, accepted ADRs, and the named issue or specification before
+  changing product behaviour. Then read the task-matched documents below;
+  `docs/design/` is rationale and roadmap, while contracts and ADRs govern
+  current behavior.
+- **Routing, gates, graph, run-state, or artifact ownership:** read
+  `docs/contracts/phase-1-artifacts.md`, the applicable slice contract,
+  `docs/workflows/README.md`, and ADR-0001/0002.
+- **Workflow role or handoff:** read `docs/workflows/README.md`, the affected
+  artifact contract, and the lifecycle/design section for the active phase.
+- **Packet, scope, evidence, or acceptance:** read the task-packet contract,
+  artifact ownership contract, and the named specification.
+- **Architecture or durable product direction:** read
+  `docs/architecture/system-map.md`, `docs/design/`, and relevant ADRs.
+- **Milestone or future-slice planning:** read `docs/design/delivery-phases.md`
+  and `docs/design/phase-1-decisions.md`.
+- **Dogfooding or development environment:** read
+  `docs/development-environment.md` and ADR-0001.
+- **Review:** read the same row as the changed surface plus originating issue
+  acceptance criteria. Do not treat unrelated design history as scope.
 - Treat the named issue's acceptance criteria as the implementation ceiling.
   Do not add tamper resistance, recovery, validation, or lifecycle hardening
   for malformed or externally modified run state unless that behaviour is
