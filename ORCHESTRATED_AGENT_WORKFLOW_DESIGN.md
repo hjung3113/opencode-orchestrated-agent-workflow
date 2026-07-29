@@ -85,7 +85,7 @@ For this project, that surface is deliberately file-backed and authority-aware:
   declared task artifact.
 
 Agents never send hidden direct messages to one another. The orchestrator reads
-declared outputs, compiles the next decision packet, and creates the next edge
+declared outputs, compiles the next task packet, and creates the next edge
 in the graph. This preserves the benefits of shared memory while retaining an
 auditable, replayable protocol.
 
@@ -108,25 +108,29 @@ file-backed debate. Their combined amendment is:
 
 - Phase 1 has no privileged daemon. The orchestrator is a **human-invoked
   `/route` pass** that writes the next graph revision and immutable task packet;
-  it prepares work but does not auto-launch workers.
+  it prepares work but does not auto-launch workers. A selected packet ends
+  with a manual handoff instruction for the chosen worker profile.
 - Authority is enforced by path ownership: workers write only to their own
-  `tasks/<task-id>/` directory and all such output is a claim. Run-level graph,
-  decisions, gates, and receipts are routing-pass artifacts.
+  `tasks/<task-id>/` directory and all such output is a claim. Only a routing
+  pass writes run-level `graph.json`, `decisions.json`, `gates/`, receipts, or
+  task packets.
 - Split worker execution from acceptance: `execution_state` is
-  `queued|running|succeeded|failed|blocked`, while `acceptance_state` is
+  `pending|succeeded|failed|blocked`, while `acceptance_state` is
   `pending|passed|failed|not_applicable`. Worker exit never proves acceptance.
-- Use one canonical state root, `.orchestrator/runs/<run-id>/`, with
+- Use one canonical external state root,
+  `$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/`, with
   `request.md`, `decisions.json`, `graph.json`, `tasks/`, optional `gates/`,
   and `final-receipt.json`. A task receives one never-rewritten `packet.md`;
   its evidence is an `evidence-claim.json`.
 - A required human choice is a real artifact: `gates/<gate-id>.md` contains the
   question, consequence, options, non-binding recommendation, and answer.
-  `/route` stops at an unanswered gate and records an answered gate as level-1
-  decision provenance. No separate gate index is required.
+  `/route` stops at an unanswered gate and records an answered gate as decision
+  provenance. No separate gate index is required.
 - Mandatory gates cover irreversible data changes, cost commitments, external
   sending/publication, credentials/security-sensitive work, and durable product
-  direction. Superseded decisions mark downstream cited artifacts `stale`;
-  stale evidence is retained but cannot satisfy current acceptance.
+  direction. A routing pass marks downstream cited artifacts `stale` when it
+  records a superseded decision; stale evidence is retained but cannot satisfy
+  current acceptance.
 - In Phase 1, `graph.json` is a record, not an executor: one active task, no
   automatic retries, no parallelism, and no graph mutation during dispatch.
   A task is bound to its graph revision. Parallel scheduling, leases,
@@ -136,11 +140,13 @@ file-backed debate. Their combined amendment is:
   private reasoning or narrative. Research/design outputs carry authority class
   and need no verifier merely to be consumed.
 
-The first proof is **Slice A**: ambiguous request → intake → one human gate →
-bounded research/design → persisted graph with dependencies and a feedback edge.
-**Slice B** then proves implementation → independent verification → receipt
-using Slice A's generated spec and ticket. This keeps graph engineering and
-human control in the MVP without importing a heavyweight control plane.
+The first implementation proof is **Slice A0**: ambiguous request → intake →
+one human gate → persisted blocked graph, with no worker execution. **Slice A**
+then extends A0 through bounded research/design to a persisted graph with
+dependencies and a feedback edge. **Slice B** proves implementation →
+independent verification → receipt using Slice A's generated spec and ticket.
+This keeps graph engineering and human control in the MVP without importing a
+heavyweight control plane.
 
 ### 2.4 Phase-1 failure boundary
 
@@ -178,19 +184,21 @@ docs/maintenance/           Maintainer guidance and curated debt records
 .opencode/                  OpenCode agent, command, skill, and template definitions
 ```
 
-Per-run mutable state is stored outside the checkout where possible, or in an
-explicitly ignored location such as `.orchestrator/`. It contains only
-reconstructable execution artifacts:
+Per-run mutable state is stored in the absolute external
+`ORCHESTRATOR_RUN_STATE_DIR`; it must not be inside the checkout or a
+developer-tool directory. `.orchestrator/` is an explicitly ignored local
+fallback only. The state root contains only reconstructable execution
+artifacts:
 
 ```text
-.orchestrator/runs/<run-id>/
+$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
   request.md                  # objective, scope, assumptions, ambiguities
   decisions.json
   graph.json                  # record only; never an executor
   gates/<gate-id>.md          # only when a material choice needs a human
   tasks/<task-id>/
     packet.md                 # never rewritten
-    result.md                 # includes execution/acceptance state when needed
+    result.md                 # worker's concise result claim and blocker
     evidence-claim.json
     verification.json         # implementation tasks only
   final-receipt.json
@@ -199,7 +207,21 @@ reconstructable execution artifacts:
 This separation prevents generated status, receipts, and recovery artifacts
 from being confused with source-of-truth product decisions.
 
-### 3.2 Authority order
+### 3.2 Development environment and dogfooding
+
+Developer tooling is a separate, user-owned environment. In particular,
+Matt Pocock engineering skills remain under `/Users/hyojung/.codex/skills` and
+are never implicitly promoted to product skills, runtime prompt inputs, or
+receipt provenance. A future product skill requires an explicit
+repository-owned adoption decision.
+
+Dogfooding applies this workflow to its own checkout without erasing this
+boundary: a dogfood run has an explicit self-target and stores its packet,
+claims, and verification in the external state root. It follows normal scope,
+human-gate, evidence, and independent-verification rules; it does not grant
+automatic execution, publication, or access to developer-home tooling.
+
+### 3.3 Authority order
 
 When sources disagree, use this order:
 
@@ -304,20 +326,24 @@ competing material choices to a human decision gate.
 **Goal:** Turn accepted design decisions into observable, testable contracts.
 
 The task records behavior, invariants, non-goals, observable acceptance
-criteria, and allowed/excluded scope in `result.md`.
+criteria, allowed/excluded scope, and an observation method for every
+criterion in `result.md`.
 
-Specification does not implement. It fails its exit gate if a reviewer cannot
-state how a criterion could be verified.
+Specification does not implement. In Phase 1, `/route` performs only a
+structural exit check: a missing observation method makes the specification
+unroutable. This does not introduce an additional verifier role.
 
 ### 5.5 Ticketing and task-graph compilation
 
 **Goal:** Convert an approved specification into small, independently
 verifiable execution units.
 
-It updates the record-only `graph.json` and renders one immutable `packet.md`
-for the selected next task; it does not compile an executable scheduler.
+It proposes small task candidates and their dependencies in its own task claim.
+On a later routing pass, `/route` alone updates the record-only `graph.json`
+and renders one immutable `packet.md` for the selected next task; it does not
+compile an executable scheduler.
 
-Every task brief contains:
+Every task packet contains:
 
 ```md
 # Objective
@@ -338,11 +364,11 @@ Phase 1 selects one task only; safe parallel scheduling is Phase-2 work.
 
 **Goal:** Complete one approved ticket, and nothing broader.
 
-An implementation agent receives a compiled decision packet, not raw broad
-history. It writes `result.md` (concise outcome, changes, limitations, and any
-blocker) and `evidence-claim.json` (commands, results, changed files, and
-acceptance mapping). Execution and acceptance state, if recorded, live in this
-one task record rather than in a separate status file.
+An implementation agent receives a compiled task packet, not raw broad history.
+It writes `result.md` (concise outcome, changes, limitations, and any blocker)
+and `evidence-claim.json` (commands, results, changed files, and acceptance
+mapping). A later routing pass records execution and acceptance state; the
+worker never writes run-level lifecycle state.
 
 It must create a `scope-escalation` request rather than making unapproved
 architecture changes or broad cleanup.
@@ -384,7 +410,7 @@ The orchestrator is the only component allowed to:
 
 1. Read the overall run state and active decisions.
 2. Decide which workflow is appropriate next.
-3. Compile a new task brief and decision packet.
+3. Compile a new task packet.
 4. Construct and update the task graph.
 5. In Phase 1, record dependencies and select one active sequential task.
    Parallel scheduling is Phase-2 work.
@@ -405,13 +431,14 @@ For each routing pass the orchestrator:
 3. Determines whether the run needs clarification, focused research, design,
    specification, tasking, repair, verification, or completion.
 4. Creates the smallest single task that advances the run.
-5. Injects relevant historical context and explicit constraints into each brief.
+5. Injects relevant historical context and explicit constraints into each task
+   packet.
 6. Records dependencies and the selected task in `graph.json`; it does not
    launch workers or mutate the graph during dispatch.
 7. On a later human-invoked route, evaluates terminal artifacts and selects the
    next task, gate, block, or completion.
 
-### 6.2 Decision packet
+### 6.2 Task packet
 
 Every dispatched agent receives a compact, stable packet:
 
@@ -447,7 +474,7 @@ decisions are clearly labeled as inputs to evaluate, never as settled fact.
 ### 7.1 Run layout
 
 ```text
-.orchestrator/runs/<run-id>/
+$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
   request.md
   decisions.json
   graph.json
@@ -460,17 +487,40 @@ decisions are clearly labeled as inputs to evaluate, never as settled fact.
   final-receipt.json
 ```
 
-`result.md` is the one task record for execution/acceptance state and blockers.
-`evidence-claim.json` states only the evidence the worker claims; an
+`result.md` and `evidence-claim.json` are task claims. A routing pass records
+execution and acceptance state after checking the applicable contract; an
 implementation task needs independent `verification.json` before acceptance.
 Schemas stay small and machine-checkable. A missing required artifact prevents
 the task from being routed as complete.
+
+The task entry in `graph.json` is the host-owned location for
+`execution_state` and `acceptance_state`; workers do not write either field.
+
+### 7.2 Slice A0 route contract
+
+Slice A0 takes a validated, structured intake manifest as input. It does not
+infer ambiguity or call a model: an intake adapter is a later Slice-A concern.
+The manifest contains the human request, objective, scope, exclusions, safe
+assumptions, and one declared ambiguity classification.
+
+For `clarification-required`, `/route` creates `request.md`, an empty
+`decisions.json`, a revision-one blocked `graph.json`, and exactly one gate;
+then it stops without selecting a task or rendering a packet. Re-running the
+unchanged manifest is idempotent: it creates no second gate and does not change
+the graph revision.
+
+After a recorded gate answer, `/route` records its decision provenance,
+selects at most one `pending` task, and renders that task's immutable packet.
+It prints the manual worker handoff but never launches a process. The A0 test
+fixtures must cover: blocked ambiguous input, idempotent re-route, answered
+gate, executable input, absent required artifact, and the absence of worker
+processes or `result.md` files.
 
 ## 8. Safety, quality, and recovery features
 
 ### 8.1 Scope guards and change budget
 
-Task briefs define allowed and forbidden paths, non-goals, and a maximum
+Task packets define allowed and forbidden paths, non-goals, and a maximum
 intended change size. Verification checks these constraints. Work outside the
 contract becomes a separate proposed ticket.
 
@@ -483,12 +533,13 @@ bounded packet, and implementation-only independent verification.
 
 ## 9. OpenCode organization and commands
 
-Phase 1 needs only one human-invoked `/route` command, a packet template, and
-two narrow worker profiles: implementer and independent verifier. Intake,
-research, design, specification, and ticketing are workflow roles recorded in
-the packet, not a required command suite. Future commands such as `/resume`,
-`/maintain`, and graph execution are introduced only with their Phase-2/3
-evidence.
+Phase 1 needs only one human-invoked `/route` command, a task-packet template,
+and two narrow worker profiles: implementer and independent verifier. A route
+pass prints the manual handoff required to give a packet to a worker; no
+command dispatches it. Intake, research, design, specification, and ticketing
+are workflow roles recorded in the packet, not a required command suite.
+Future commands such as `/resume`, `/maintain`, and graph execution are
+introduced only with their Phase-2/3 evidence.
 
 ## 10. Matt Pocock skill composition
 
@@ -517,6 +568,8 @@ artifact.
 Implement only one end-to-end, human-invoked path:
 
 - `/route` prepares files and prompts but never auto-launches a worker;
+- begin with Slice A0: an ambiguous request produces a blocked graph and one
+  gate, then stops with no task execution;
 - one sequential task has a bounded packet, scope, result claim, and graph
   record;
 - `request.md` keeps ambiguity classification and creates a human gate only for
@@ -550,8 +603,8 @@ Add:
 ## 12. Decisions resolved for Phase 1
 
 1. `/route` prepares files and prompts only; it does not launch OpenCode agents.
-2. Per-run state is `.orchestrator/runs/<run-id>/` and is generated execution
-   state, not repository knowledge.
+2. Per-run state is `$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/` and is
+   generated execution state, not repository knowledge.
 3. Material product decisions are never accepted automatically.
 4. The first proof is Slice A (ambiguous request through human gate and graph
    record), followed by Slice B (one implementation task and independent

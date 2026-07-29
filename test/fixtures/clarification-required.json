@@ -1,0 +1,14 @@
+{
+  "human_request": "Add a nightly export of failed workflow runs to CSV.",
+  "objective": "Give operators a daily CSV of failed runs for triage.",
+  "scope": ["Read run records from the external state root", "Write one CSV per day"],
+  "exclusions": ["No dashboard or UI"],
+  "safe_assumptions": ["Runs are already stored under ORCHESTRATOR_RUN_STATE_DIR"],
+  "ambiguity": {
+    "classification": "clarification-required",
+    "question": "Should the export include runs still blocked on a human gate?",
+    "consequence": "Including blocked runs changes what operators believe is actionable and may leak in-progress decisions externally.",
+    "options": ["Include blocked runs", "Exclude blocked runs", "Include but flag as blocked"],
+    "recommendation": "Exclude blocked runs until a stakeholder confirms the export's audience."
+  }
+}

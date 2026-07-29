@@ -1,0 +1,13 @@
+{
+  "human_request": "Add a nightly export of failed workflow runs to CSV.",
+  "scope": ["Read run records from the external state root"],
+  "exclusions": [],
+  "safe_assumptions": [],
+  "ambiguity": {
+    "classification": "clarification-required",
+    "question": "Should the export include runs still blocked on a human gate?",
+    "consequence": "Including blocked runs changes what operators believe is actionable.",
+    "options": ["Include blocked runs", "Exclude blocked runs"],
+    "recommendation": "Exclude blocked runs until confirmed."
+  }
+}
