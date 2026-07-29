@@ -12,9 +12,9 @@ verification result. No claim is accepted merely because it exists.
 | Intake manifest | Human or future intake adapter | `/route` | Declared request; never inferred by `/route`. | A0 current |
 | `request.md` | `/route` | Later workflow roles | Faithful routed request and ambiguity classification. | A0 current |
 | `decisions.json` | `/route` | Later routing passes and packets | Accepted human gate provenance. | A0 current |
-| `graph.json` | `/route` | Maintainer and later routing pass | Host-owned task selection, dependencies, and execution/acceptance record. | A0 current: one task only |
+| `graph.json` | `/route` | Maintainer and later routing pass | Host-owned declared-task record, dependencies, selection, and execution/acceptance record. | Slice A current: an explicit bounded sequence, one selected task |
 | `gates/<id>.md` | `/route` creates; human fills answer slot | `/route` | Material decision question and answer provenance. | A0 current |
-| `tasks/<id>/packet.md` | `/route` | One manually chosen worker | Immutable bounded instruction tied to graph revision. | A0 current |
+| `tasks/<id>/packet.md` | `/route` | One manually chosen worker | Immutable bounded instruction tied to graph revision. | Slice A current: selected task only |
 | `tasks/<id>/result.md` | Worker | Later routing pass | Worker outcome claim, blocker, and limitations. | Slice A planned |
 | `tasks/<id>/evidence-claim.json` | Worker | Independent verifier | Claimed commands, outputs, changed files, and acceptance mapping. | Slice A planned |
 | `tasks/<id>/verification.json` | Independent verifier | Later routing pass | Independent pass/fail evidence for implementation criteria. | Slice B planned |
@@ -26,6 +26,8 @@ verification result. No claim is accepted merely because it exists.
   directories.
 - A material ambiguity creates a gate; `/route` does not invent its answer.
 - A packet is created for at most one pending task and is never rewritten.
+- Later declared tasks remain blocked records without packets until a separately
+  specified routing slice defines promotion behavior.
 - `/route` never calls a model, launches a worker, or writes worker claims.
 - Worker completion is not acceptance. Only the applicable acceptance rule,
   including independent verification for implementation, may establish it.

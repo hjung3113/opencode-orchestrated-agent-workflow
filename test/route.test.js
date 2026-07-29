@@ -307,6 +307,89 @@ test('an executable manifest selects one pending task and emits a manual handoff
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
 });
 
+test('an executable bounded sequence records every task but packetizes only the first selected task', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const result = route(manifest, { stateRoot, checkoutRoot });
+
+  assert.equal(result.graph.selected_task, 'task-define-contract');
+  assert.equal(result.graph.tasks.length, 2);
+  assert.deepEqual(result.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    dependencies: task.dependencies,
+  })), [
+    { id: 'task-define-contract', execution_state: 'pending', dependencies: [] },
+    { id: 'task-update-workflow', execution_state: 'blocked', dependencies: ['task-define-contract'] },
+  ]);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-define-contract', 'packet.md')), true);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-define-contract', 'worker-claim.json')), false);
+  const allFiles = listAllFiles(result.runDir);
+  assert.deepEqual(allFiles.filter((file) => /(?:result\.md|evidence-claim\.json)$/.test(file)), []);
+
+  const packet = fs.readFileSync(result.packetPath, 'utf8');
+  assert.match(packet, /# Task: task-define-contract/);
+  assert.match(packet, /Define the bounded graph artifact contract\./);
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.created, false);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a declared sequence requires complete per-task scope before writing a run', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const invalid = {
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => index === 1 ? { ...task, allowed_paths: [] } : task),
+  };
+
+  assert.match(validateManifest(invalid).join(' '), /tasks\[1\]\.allowed_paths/);
+  assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+  assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+});
+
+test('a declared task id must be a safe packet directory segment before any run artifact is written', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const invalid = {
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => index === 0 ? { ...task, id: '../outside-run' } : task),
+  };
+
+  assert.match(validateManifest(invalid).join(' '), /tasks\[0\]\.id must be a safe path segment/);
+  assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+  assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+});
+
+test('a gate-blocked declared sequence records all candidates without selecting or packetizing one', () => {
+  const stateRoot = makeTmpStateRoot();
+  const gateManifest = loadFixture('clarification-required.json');
+  const sequence = loadFixture('bounded-sequence.json');
+  const manifest = { ...gateManifest, tasks: sequence.tasks };
+
+  const blocked = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(blocked.graph.status, 'blocked');
+  assert.equal(blocked.graph.selected_task, null);
+  assert.deepEqual(blocked.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    dependencies: task.dependencies,
+  })), [
+    { id: 'task-define-contract', execution_state: 'blocked', dependencies: [] },
+    { id: 'task-update-workflow', execution_state: 'blocked', dependencies: ['task-define-contract'] },
+  ]);
+  assert.equal(fs.existsSync(path.join(blocked.runDir, 'tasks')), false);
+
+  answerGate(blocked);
+  const selected = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(selected.graph.revision, 2);
+  assert.equal(selected.graph.selected_task, 'task-define-contract');
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'packet.md')), true);
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'worker-claim.json')), false);
+});
+
 test('an answered status without a recorded answer fails structurally without selecting a task', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('clarification-required.json');

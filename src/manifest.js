@@ -1,6 +1,6 @@
-// Slice A0 intake-manifest validation.
+// Phase-1 intake-manifest validation.
 //
-// The manifest is the only input `/route` accepts for Slice A0. It carries
+// The manifest is the only input `/route` accepts. It carries
 // the human request, objective, scope, exclusions, safe assumptions, and
 // exactly one ambiguity classification (design doc section 7.2, section
 // 5.1). No inference or model call happens here: a manifest that declares
@@ -31,6 +31,48 @@ function isStringArray(value) {
 
 function isNonEmptyStringArray(value) {
   return isStringArray(value) && value.length > 0 && value.every((item) => item.trim().length > 0);
+}
+
+function isSafeTaskId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+}
+
+function validateTaskCandidates(tasks) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return ['tasks must be a non-empty array when declared'];
+  }
+
+  const errors = [];
+  const earlierIds = new Set();
+  for (const [index, task] of tasks.entries()) {
+    const prefix = `tasks[${index}]`;
+    if (task === null || typeof task !== 'object' || Array.isArray(task)) {
+      errors.push(`${prefix} must be an object`);
+      continue;
+    }
+    if (!isNonEmptyString(task.id)) errors.push(`${prefix}.id must be a non-empty string`);
+    else if (!isSafeTaskId(task.id)) errors.push(`${prefix}.id must be a safe path segment`);
+    if (!isNonEmptyString(task.objective)) errors.push(`${prefix}.objective must be a non-empty string`);
+    if (!isNonEmptyStringArray(task.scope)) errors.push(`${prefix}.scope must be a non-empty array of non-empty strings`);
+    if (!isNonEmptyStringArray(task.allowed_paths)) errors.push(`${prefix}.allowed_paths must be a non-empty array of non-empty strings`);
+    if (!isStringArray(task.forbidden_paths)) errors.push(`${prefix}.forbidden_paths must be an array of strings`);
+    if (!isStringArray(task.non_goals)) errors.push(`${prefix}.non_goals must be an array of strings`);
+    if (!isStringArray(task.dependencies)) errors.push(`${prefix}.dependencies must be an array of strings`);
+
+    if (isSafeTaskId(task.id)) {
+      if (earlierIds.has(task.id)) errors.push(`${prefix}.id must be unique`);
+      if (isStringArray(task.dependencies)) {
+        for (const dependency of task.dependencies) {
+          if (!earlierIds.has(dependency)) {
+            errors.push(`${prefix}.dependencies must reference earlier task ids`);
+            break;
+          }
+        }
+      }
+      earlierIds.add(task.id);
+    }
+  }
+  return errors;
 }
 
 /**
@@ -68,6 +110,9 @@ export function validateManifest(manifest) {
   }
   if (!isStringArray(manifest.safe_assumptions)) {
     errors.push('safe_assumptions must be an array of strings');
+  }
+  if (manifest.tasks !== undefined) {
+    errors.push(...validateTaskCandidates(manifest.tasks));
   }
 
   const ambiguity = manifest.ambiguity;
