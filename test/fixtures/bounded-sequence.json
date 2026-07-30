@@ -15,7 +15,9 @@
       "allowed_paths": ["docs/contracts/**"],
       "forbidden_paths": ["src/**"],
       "non_goals": ["Implement routing behavior"],
-      "dependencies": []
+      "dependencies": [],
+      "acceptance_criteria": ["Record the declared graph contract."],
+      "evidence_required": ["Run the contract tests."]
     },
     {
       "id": "task-update-workflow",
@@ -24,7 +26,9 @@
       "allowed_paths": ["docs/workflows/**"],
       "forbidden_paths": ["src/**"],
       "non_goals": ["Create a worker claim"],
-      "dependencies": ["task-define-contract"]
+      "dependencies": ["task-define-contract"],
+      "acceptance_criteria": ["Update the declared workflow handoff."],
+      "evidence_required": ["Review the workflow document."]
     }
   ],
   "ambiguity": {

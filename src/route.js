@@ -104,14 +104,19 @@ function renderList(items, empty = '(none declared)') {
   return items.length > 0 ? items.map((item) => `- ${item}`).join('\n') : `- ${empty}`;
 }
 
-function renderPacket(task, { graphRevision, decisionArtifacts, preconditions }) {
+function renderPacket(task, { graphRevision, decisionArtifacts, preconditions, dependents }) {
+  const declared = !task.legacy;
   return `# Task: ${task.id}
 
 ## Objective
 
 ${task.objective}
 
-## Inputs and source artifacts
+${declared ? `## Scope
+
+${renderList(task.scope)}
+
+` : ''}## Inputs and source artifacts
 
 ${renderList([
   'request.md — the validated human request and declared scope',
@@ -139,17 +144,17 @@ ${renderList(task.non_goals)}
 
 ## Acceptance criteria
 
-- The implementation satisfies the stated objective within the declared allowed paths.
-- The implementation does not perform the declared exclusions or non-goals.
+${declared ? renderList(task.acceptance_criteria) : `- The implementation satisfies the stated objective within the declared allowed paths.
+- The implementation does not perform the declared exclusions or non-goals.`}
 
 ## Evidence required
 
-- Changed-file list mapped to the objective and scope.
-- Relevant verification command results.
+${declared ? renderList(task.evidence_required) : `- Changed-file list mapped to the objective and scope.
+- Relevant verification command results.`}
 
 ## Preconditions and dependent tasks
 
-${renderList(preconditions, 'No dependent tasks; this is the only selected Phase-1 task.')}
+${renderList([...preconditions, ...task.dependencies.map((id) => `Precondition: ${id}`), ...dependents.map((id) => `Dependent: ${id}`)], 'No dependent tasks; this is the only selected Phase-1 task.')}
 
 ## Graph binding
 
@@ -345,6 +350,7 @@ export function route(manifest, opts) {
   const tasksDir = path.join(runDir, 'tasks');
   const candidates = manifestTasks(manifest);
   const selectedCandidate = candidates[0];
+  const dependents = candidates.filter((candidate) => candidate.dependencies.includes(selectedCandidate.id)).map((candidate) => candidate.id);
   const packetPath = path.join(tasksDir, selectedCandidate.id, 'packet.md');
 
   if (fs.existsSync(graphPath)) {
@@ -443,6 +449,7 @@ export function route(manifest, opts) {
       graphRevision: selectedGraph.revision,
       decisionArtifacts: [decision.source_gate],
       preconditions: [`Human gate ${GATE_ID} answered: ${gate.answer}`],
+      dependents,
     }), 'utf8');
     writeJson(graphPath, selectedGraph);
     return {
@@ -483,6 +490,7 @@ export function route(manifest, opts) {
       graphRevision: graph.revision,
       decisionArtifacts: [],
       preconditions: [],
+      dependents,
     }), 'utf8');
     writeJson(graphPath, graph);
     return {

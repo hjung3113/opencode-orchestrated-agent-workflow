@@ -58,6 +58,8 @@ function validateTaskCandidates(tasks) {
     if (!isStringArray(task.forbidden_paths)) errors.push(`${prefix}.forbidden_paths must be an array of strings`);
     if (!isStringArray(task.non_goals)) errors.push(`${prefix}.non_goals must be an array of strings`);
     if (!isStringArray(task.dependencies)) errors.push(`${prefix}.dependencies must be an array of strings`);
+    if (!isNonEmptyStringArray(task.acceptance_criteria)) errors.push(`${prefix}.acceptance_criteria must be a non-empty array of non-empty strings`);
+    if (!isNonEmptyStringArray(task.evidence_required)) errors.push(`${prefix}.evidence_required must be a non-empty array of non-empty strings`);
 
     if (isSafeTaskId(task.id)) {
       if (earlierIds.has(task.id)) errors.push(`${prefix}.id must be unique`);

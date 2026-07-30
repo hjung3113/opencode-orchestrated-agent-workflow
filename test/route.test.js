@@ -336,6 +336,18 @@ test('an executable manifest selects one pending task and emits a manual handoff
   assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-1', 'worker-claim.json')), false);
 
   const packet = fs.readFileSync(result.packetPath, 'utf8');
+  const legacyPrefix = `# Task: task-1
+
+## Objective
+
+Give operators a daily CSV of failed runs for triage.
+
+## Inputs and source artifacts
+`;
+  assert.equal(packet.slice(0, legacyPrefix.length), legacyPrefix);
+  assert.match(packet, /## Acceptance criteria\n\n- The implementation satisfies the stated objective within the declared allowed paths\./);
+  assert.match(packet, /## Evidence required\n\n- Changed-file list mapped to the objective and scope\./);
+  assert.match(packet, /No dependent tasks; this is the only selected Phase-1 task\./);
   const rerouted = route(manifest, { stateRoot, checkoutRoot });
   assert.equal(rerouted.created, false);
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
@@ -365,6 +377,12 @@ test('an executable bounded sequence records every task but packetizes only the 
   const packet = fs.readFileSync(result.packetPath, 'utf8');
   assert.match(packet, /# Task: task-define-contract/);
   assert.match(packet, /Define the bounded graph artifact contract\./);
+  assert.match(packet, /## Scope\n\n- docs\/contracts\/\*\*/);
+  assert.equal((packet.match(/## Inputs and source artifacts/g) || []).length, 1);
+  assert.match(packet, /## Acceptance criteria\n\n- Record the declared graph contract\./);
+  assert.match(packet, /## Evidence required\n\n- Run the contract tests\./);
+  assert.match(packet, /- Dependent: task-update-workflow/);
+  assert.doesNotMatch(packet, /The implementation satisfies the stated objective/);
   const rerouted = route(manifest, { stateRoot, checkoutRoot });
   assert.equal(rerouted.created, false);
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
@@ -544,6 +562,19 @@ test('a declared sequence requires complete per-task scope before writing a run'
   assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
 });
 
+test('a declared candidate needs observable criteria and evidence before any run artifact is written', () => {
+  const manifest = loadFixture('bounded-sequence.json');
+  for (const field of ['acceptance_criteria', 'evidence_required']) {
+    for (const value of [undefined, [], 'text', [1], [' ']]) {
+      const stateRoot = makeTmpStateRoot();
+      const invalid = { ...manifest, tasks: manifest.tasks.map((task, index) => index === 0 ? { ...task, [field]: value } : task) };
+      assert.match(validateManifest(invalid).join(' '), new RegExp(`tasks\\[0\\]\\.${field}`));
+      assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+      assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+    }
+  }
+});
+
 test('a declared task id must be a safe packet directory segment before any run artifact is written', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('bounded-sequence.json');
@@ -583,6 +614,9 @@ test('a gate-blocked declared sequence records all candidates without selecting 
   assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'packet.md')), true);
   assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
   assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'worker-claim.json')), false);
+  const packet = fs.readFileSync(selected.packetPath, 'utf8');
+  assert.match(packet, /Human gate gate-1 answered: Exclude blocked runs\./);
+  assert.match(packet, /- Dependent: task-update-workflow/);
 });
 
 test('an answered status without a recorded answer fails structurally without selecting a task', () => {

@@ -3,8 +3,9 @@
 `bin/route.js` accepts the existing single-task intake form and, when a
 manifest declares `tasks`, an explicit ordered bounded task sequence. Each
 declared candidate owns a safe single-segment id, objective, scope, allowed
-paths, forbidden paths, non-goals, and dependencies. Dependencies name only
-earlier candidates in that declared order.
+paths, forbidden paths, non-goals, observable acceptance criteria, required
+evidence, and dependencies. Dependencies name only earlier candidates in that
+declared order.
 
 For a declared sequence, `/route` records every candidate and its dependencies
 in host-owned `graph.json`. The first candidate is the only selected task: it
