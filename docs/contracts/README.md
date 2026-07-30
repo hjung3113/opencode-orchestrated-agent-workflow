@@ -22,5 +22,7 @@ trade-off, an accepted ADR.
   writer, consumer, authority, and status of each run artifact.
 - [Slice A result-claim recording](slice-a-result-claim.md) — the explicit
   worker outcome slot and its record-only `/route` behavior.
+- [Slice A evidence-claim recording](slice-a-evidence-claim.md) — the worker
+  evidence-claim shape and record-only provenance reference.
 
 Future contracts are added only with the phase that makes them observable.

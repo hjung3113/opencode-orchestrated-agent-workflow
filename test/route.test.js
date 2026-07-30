@@ -65,6 +65,29 @@ function writeResultClaim(routed, content) {
   return resultPath;
 }
 
+function writeEvidenceClaim(routed, claim) {
+  const claimPath = path.join(
+    routed.runDir,
+    'tasks',
+    routed.graph.selected_task,
+    'evidence-claim.json',
+  );
+  fs.writeFileSync(claimPath, typeof claim === 'string' ? claim : `${JSON.stringify(claim, null, 2)}\n`, 'utf8');
+  return claimPath;
+}
+
+function validEvidenceClaim(taskId) {
+  return {
+    task_id: taskId,
+    commands: ['npm test'],
+    changed_files: [],
+    acceptance_mapping: [{
+      criterion: 'The implementation satisfies the stated objective within the declared allowed paths.',
+      evidence: 'npm test passed',
+    }],
+  };
+}
+
 test('clarification-required manifest writes request, empty decisions, revision-one blocked graph, and one unanswered gate', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('clarification-required.json');
@@ -372,10 +395,11 @@ test('a later route records one complete result claim without promoting later ta
     id: task.id,
     execution_state: task.execution_state,
     acceptance_state: task.acceptance_state,
+    evidence_claim: task.evidence_claim,
     graph_revision: task.graph_revision,
   })), [
-    { id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'pending', graph_revision: 2 },
-    { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', graph_revision: 2 },
+    { id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'pending', evidence_claim: null, graph_revision: 2 },
+    { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', evidence_claim: undefined, graph_revision: 2 },
   ]);
   assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
   assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
@@ -401,6 +425,7 @@ test('a complete failed result claim is recorded for a legacy manifest without c
     id: 'task-1',
     execution_state: 'failed',
     acceptance_state: 'pending',
+    evidence_claim: null,
     graph_revision: 2,
     dependencies: [],
   }]);
@@ -418,6 +443,92 @@ test('a complete result claim with no recognized outcome fails without rewriting
   assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
   assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
   assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+});
+
+test('a complete result records one valid evidence-claim reference without accepting it or changing later tasks', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+
+  assert.equal(recorded.graph.revision, 2);
+  assert.deepEqual(recorded.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    acceptance_state: task.acceptance_state,
+    evidence_claim: task.evidence_claim,
+    graph_revision: task.graph_revision,
+  })), [
+    {
+      id: 'task-define-contract',
+      execution_state: 'succeeded',
+      acceptance_state: 'pending',
+      evidence_claim: { path: 'tasks/task-define-contract/evidence-claim.json' },
+      graph_revision: 2,
+    },
+    {
+      id: 'task-update-workflow',
+      execution_state: 'blocked',
+      acceptance_state: 'pending',
+      evidence_claim: undefined,
+      graph_revision: 2,
+    },
+  ]);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'verification.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'final-receipt.json')), false);
+
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 2);
+  assert.deepEqual(rerouted.graph.tasks[0].evidence_claim, { path: 'tasks/task-define-contract/evidence-claim.json' });
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a pending task ignores an evidence claim until it has a complete result claim', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+
+  writeEvidenceClaim(first, '{not json');
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 1);
+  assert.equal(rerouted.graph.tasks[0].execution_state, 'pending');
+  assert.equal('evidence_claim' in rerouted.graph.tasks[0], false);
+});
+
+test('an invalid complete evidence claim fails structurally before graph or packet rewrite', () => {
+  const cases = [
+    '{not json',
+    { commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 1, commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: [], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: 'npm test', changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: 'src/route.js', acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['/src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/../route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'other-task', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: '', evidence: 'e' }] },
+  ];
+
+  for (const claim of cases) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+    writeEvidenceClaim(first, claim);
+
+    assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+  }
 });
 
 test('a declared sequence requires complete per-task scope before writing a run', () => {

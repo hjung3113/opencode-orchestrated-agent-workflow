@@ -12,6 +12,7 @@ import { assertValidManifest } from './manifest.js';
 import { assertValidStateRoot } from './state-root.js';
 import { GATE_ID, readGateAnswer, renderGateMarkdown } from './gate.js';
 import { readResultClaim } from './tasks/result-claim.js';
+import { readEvidenceClaim } from './tasks/evidence-claim.js';
 
 export class UnsupportedAmbiguityClassificationError extends Error {
   constructor(classification) {
@@ -223,16 +224,14 @@ function assertGraphHasOneSelectedTask(graph, packetPath, executionStates) {
   }
 }
 
-function recordedGraph(graph, outcome) {
+function recordedGraph(graph, outcome, evidenceClaim) {
   const revision = graph.revision + 1;
   return {
     ...graph,
     revision,
-    tasks: graph.tasks.map((task) => ({
-      ...task,
-      execution_state: task.id === graph.selected_task ? outcome : task.execution_state,
-      graph_revision: revision,
-    })),
+    tasks: graph.tasks.map((task) => task.id === graph.selected_task
+      ? { ...task, execution_state: outcome, evidence_claim: evidenceClaim, graph_revision: revision }
+      : { ...task, graph_revision: revision }),
   };
 }
 
@@ -370,7 +369,17 @@ export function route(manifest, opts) {
           if (!['succeeded', 'failed'].includes(claim.outcome)) {
             throw new RouteStructureError('a complete result claim must contain outcome: succeeded or outcome: failed');
           }
-          const updatedGraph = recordedGraph(graph, claim.outcome);
+          const evidenceClaimPath = path.join(tasksDir, graph.selected_task, 'evidence-claim.json');
+          let evidenceClaim = null;
+          if (fs.existsSync(evidenceClaimPath)) {
+            try {
+              readEvidenceClaim(fs.readFileSync(evidenceClaimPath, 'utf8'), graph.selected_task);
+            } catch (err) {
+              throw new RouteStructureError(`invalid evidence claim: ${err.message}`);
+            }
+            evidenceClaim = { path: `tasks/${graph.selected_task}/evidence-claim.json` };
+          }
+          const updatedGraph = recordedGraph(graph, claim.outcome, evidenceClaim);
           writeJson(graphPath, updatedGraph);
           return {
             runId,
