@@ -1,5 +1,6 @@
-// Slice A0 `/route`: an intake manifest -> either one blocked human gate or
-// one immutable packet for manual worker handoff, never a launched worker.
+// Phase-1 `/route`: an intake manifest -> either one blocked human gate or
+// one immutable packet for the first selected manual worker handoff, never a
+// launched worker.
 //
 // Authority: design doc sections 2.3, 2.4, 7.2; ADR-0002; issue #2.
 
@@ -10,11 +11,15 @@ import crypto from 'node:crypto';
 import { assertValidManifest } from './manifest.js';
 import { assertValidStateRoot } from './state-root.js';
 import { GATE_ID, readGateAnswer, renderGateMarkdown } from './gate.js';
+import { readResultClaim } from './tasks/result-claim.js';
+import { readEvidenceClaim } from './tasks/evidence-claim.js';
+import { readVerificationResult } from './verification/verification-result.js';
+import { finalReceipt } from './receipt/final-receipt.js';
 
 export class UnsupportedAmbiguityClassificationError extends Error {
   constructor(classification) {
     super(
-        `Slice A0 /route only handles clarification-required and executable ` +
+        `Phase-1 /route only handles clarification-required and executable ` +
         `outcomes; got classification "${classification}".`,
     );
     this.name = 'UnsupportedAmbiguityClassificationError';
@@ -101,14 +106,19 @@ function renderList(items, empty = '(none declared)') {
   return items.length > 0 ? items.map((item) => `- ${item}`).join('\n') : `- ${empty}`;
 }
 
-function renderPacket(manifest, { taskId, graphRevision, decisionArtifacts, preconditions }) {
-  return `# Task: ${taskId}
+function renderPacket(task, { graphRevision, decisionArtifacts, preconditions, dependents }) {
+  const declared = !task.legacy;
+  return `# Task: ${task.id}
 
 ## Objective
 
-${manifest.objective}
+${task.objective}
 
-## Inputs and source artifacts
+${declared ? `## Scope
+
+${renderList(task.scope)}
+
+` : ''}## Inputs and source artifacts
 
 ${renderList([
   'request.md — the validated human request and declared scope',
@@ -119,38 +129,38 @@ ${renderList([
 
 ## Allowed paths
 
-${renderList(manifest.allowed_paths)}
+${renderList(task.allowed_paths)}
 
 ## Forbidden paths
 
-${renderList(manifest.forbidden_paths)}
+${renderList(task.forbidden_paths)}
 
 ## Non-goals
 
-${renderList(manifest.non_goals)}
+${renderList(task.non_goals)}
 
 ## Expected outputs
 
-- A scoped implementation outcome for: ${manifest.objective}
+- A scoped implementation outcome for: ${task.objective}
 - A concise worker result claim and evidence claim after manual execution (not created by /route)
 
 ## Acceptance criteria
 
-- The implementation satisfies the stated objective within the declared allowed paths.
-- The implementation does not perform the declared exclusions or non-goals.
+${declared ? renderList(task.acceptance_criteria) : `- The implementation satisfies the stated objective within the declared allowed paths.
+- The implementation does not perform the declared exclusions or non-goals.`}
 
 ## Evidence required
 
-- Changed-file list mapped to the objective and scope.
-- Relevant verification command results.
+${declared ? renderList(task.evidence_required) : `- Changed-file list mapped to the objective and scope.
+- Relevant verification command results.`}
 
 ## Preconditions and dependent tasks
 
-${renderList(preconditions, 'No dependent tasks; this is the only selected Phase-1 task.')}
+${renderList([...preconditions, ...task.dependencies.map((id) => `Precondition: ${id}`), ...dependents.map((id) => `Dependent: ${id}`)], 'No dependent tasks; this is the only selected Phase-1 task.')}
 
 ## Graph binding
 
-- Task ID: ${taskId}
+- Task ID: ${task.id}
 - Graph revision: ${graphRevision}
 
 ## Manual worker handoff
@@ -159,39 +169,105 @@ Give this immutable packet to one worker manually. Do not launch a worker from /
 `;
 }
 
-function makeTask(graphRevision) {
-  return {
-    id: 'task-1',
-    execution_state: 'pending',
+function manifestTasks(manifest) {
+  if (manifest.tasks === undefined) {
+    return [{
+      id: 'task-1',
+      objective: manifest.objective,
+      scope: manifest.scope,
+      allowed_paths: manifest.allowed_paths,
+      forbidden_paths: manifest.forbidden_paths,
+      non_goals: manifest.non_goals,
+      dependencies: [],
+      legacy: true,
+    }];
+  }
+  return manifest.tasks;
+}
+
+function makeTask(candidate, graphRevision, executionState) {
+  const task = {
+    id: candidate.id,
+    execution_state: executionState,
     acceptance_state: 'pending',
     graph_revision: graphRevision,
-    dependencies: [],
+    dependencies: candidate.dependencies,
+  };
+  if (candidate.legacy) return task;
+  return {
+    ...task,
+    objective: candidate.objective,
+    scope: candidate.scope,
+    allowed_paths: candidate.allowed_paths,
+    forbidden_paths: candidate.forbidden_paths,
+    non_goals: candidate.non_goals,
   };
 }
 
-function assertGraphHasOneSelectedPendingTask(graph, packetPath) {
+function assertGraphHasOneSelectedTask(graph, packetPath, executionStates) {
   if (!Number.isInteger(graph.revision) || graph.revision < 1) {
     throw new RouteStructureError('graph.json must contain a positive integer revision');
   }
   if (typeof graph.selected_task !== 'string') {
     throw new RouteStructureError('graph.json must select exactly one task');
   }
-  if (!Array.isArray(graph.tasks) || graph.tasks.length !== 1) {
-    throw new RouteStructureError('graph.json must contain exactly one selected task');
+  if (!Array.isArray(graph.tasks) || graph.tasks.length === 0) {
+    throw new RouteStructureError('graph.json must contain at least one declared task');
   }
-  const task = graph.tasks[0];
-  if (task.id !== graph.selected_task || task.execution_state !== 'pending' || task.graph_revision !== graph.revision) {
-    throw new RouteStructureError('graph.json selected task must be pending and bound to the current graph revision');
+  const task = graph.tasks.find((item) => item.id === graph.selected_task);
+  if (task.id !== graph.selected_task || !executionStates.includes(task.execution_state) || task.graph_revision !== graph.revision) {
+    throw new RouteStructureError(`graph.json selected task must be ${executionStates.join(' or ')} and bound to the current graph revision`);
   }
   assertFile(packetPath, 'immutable task packet');
+  const tasksDir = path.dirname(path.dirname(packetPath));
+  for (const candidate of graph.tasks) {
+    if (candidate.id === graph.selected_task) continue;
+    if (candidate.execution_state !== 'blocked' || candidate.graph_revision !== graph.revision) {
+      throw new RouteStructureError('unselected graph tasks must remain blocked and bound to the current graph revision');
+    }
+    if (fs.existsSync(path.join(tasksDir, candidate.id, 'packet.md'))) {
+      throw new RouteStructureError('unselected graph tasks must not have task packets');
+    }
+  }
 }
 
-function assertBlockedGraph(graph) {
+function recordedGraph(graph, outcome, evidenceClaim) {
+  const revision = graph.revision + 1;
+  return {
+    ...graph,
+    revision,
+    tasks: graph.tasks.map((task) => task.id === graph.selected_task
+      ? { ...task, execution_state: outcome, evidence_claim: evidenceClaim, graph_revision: revision }
+      : { ...task, graph_revision: revision }),
+  };
+}
+
+function recordedAcceptanceGraph(graph, verificationPath, verdict) {
+  const revision = graph.revision + 1;
+  return {
+    ...graph,
+    revision,
+    tasks: graph.tasks.map((task) => task.id === graph.selected_task
+      ? { ...task, acceptance_state: verdict, verification: { path: verificationPath }, graph_revision: revision }
+      : { ...task, graph_revision: revision }),
+  };
+}
+
+function assertBlockedGraph(graph, manifest) {
+  const expectedTasks = manifest.tasks === undefined
+    ? []
+    : manifestTasks(manifest).map((candidate) => makeTask(candidate, 1, 'blocked'));
   if (graph.revision !== 1 || graph.status !== 'blocked' || graph.selected_task !== null) {
     throw new RouteStructureError('blocked graph.json must remain at revision one with no selected task');
   }
-  if (!Array.isArray(graph.tasks) || graph.tasks.length !== 0 || !Array.isArray(graph.gates) || graph.gates.length !== 1 || graph.gates[0] !== GATE_ID) {
-    throw new RouteStructureError('blocked graph.json must contain exactly the original human gate and no tasks');
+  if (!Array.isArray(graph.tasks) || graph.tasks.length !== expectedTasks.length || !Array.isArray(graph.gates) || graph.gates.length !== 1 || graph.gates[0] !== GATE_ID) {
+    throw new RouteStructureError('blocked graph.json must contain the original human gate and declared tasks only');
+  }
+  for (const [index, task] of graph.tasks.entries()) {
+    const expected = expectedTasks[index];
+    if (task.id !== expected.id || task.execution_state !== 'blocked' || task.graph_revision !== 1) {
+      throw new RouteStructureError('blocked graph.json must retain declared tasks as blocked records');
+    }
   }
 }
 
@@ -225,24 +301,29 @@ function assertSelectedDecisionProvenance(graph, decisions, runDir) {
   }
 }
 
-function baseGraph() {
+function baseGraph(manifest) {
+  const tasks = manifest.tasks === undefined
+    ? []
+    : manifestTasks(manifest).map((candidate) => makeTask(candidate, 1, 'blocked'));
   return {
     revision: 1,
     status: 'blocked',
     selected_task: null,
-    tasks: [],
+    tasks,
     gates: [GATE_ID],
   };
 }
 
 function routedGraph(graph, decisionArtifacts, manifest) {
   const revision = graph.revision + 1;
-  const task = makeTask(revision);
+  const candidates = manifestTasks(manifest);
+  const tasks = candidates.map((candidate, index) => makeTask(candidate, revision, index === 0 ? 'pending' : 'blocked'));
+  const task = tasks[0];
   return {
     revision,
     status: 'ready-for-manual-handoff',
     selected_task: task.id,
-    tasks: [task],
+    tasks,
     gates: graph.gates,
     decision_artifacts: decisionArtifacts,
     request_objective: manifest.objective,
@@ -280,8 +361,11 @@ export function route(manifest, opts) {
   const gatesDir = path.join(runDir, 'gates');
   const gatePath = path.join(gatesDir, `${GATE_ID}.md`);
   const tasksDir = path.join(runDir, 'tasks');
-  const taskId = 'task-1';
-  const packetPath = path.join(tasksDir, taskId, 'packet.md');
+  const candidates = manifestTasks(manifest);
+  const selectedCandidate = candidates[0];
+  const dependents = candidates.filter((candidate) => candidate.dependencies.includes(selectedCandidate.id)).map((candidate) => candidate.id);
+  const packetPath = path.join(tasksDir, selectedCandidate.id, 'packet.md');
+  const receiptPath = path.join(runDir, 'final-receipt.json');
 
   if (fs.existsSync(graphPath)) {
     assertFile(requestPath, 'request artifact');
@@ -289,12 +373,84 @@ export function route(manifest, opts) {
     const graph = readJson(graphPath);
 
     if (graph.selected_task !== null) {
-      assertGraphHasOneSelectedPendingTask(graph, packetPath);
       const decisions = readJson(decisionsPath);
       if (!Array.isArray(decisions.decisions)) {
         throw new RouteStructureError('decisions.json must contain a decisions array');
       }
       assertSelectedDecisionProvenance(graph, decisions, runDir);
+      const selectedTask = graph.tasks.find((task) => task.id === graph.selected_task);
+      if (selectedTask.execution_state === 'pending') {
+        assertGraphHasOneSelectedTask(graph, packetPath, ['pending']);
+        const resultPath = path.join(tasksDir, graph.selected_task, 'result.md');
+        const claim = fs.existsSync(resultPath)
+          ? readResultClaim(fs.readFileSync(resultPath, 'utf8'))
+          : { status: undefined, outcome: undefined };
+        if (claim.status === 'complete') {
+          if (!['succeeded', 'failed'].includes(claim.outcome)) {
+            throw new RouteStructureError('a complete result claim must contain outcome: succeeded or outcome: failed');
+          }
+          const evidenceClaimPath = path.join(tasksDir, graph.selected_task, 'evidence-claim.json');
+          let evidenceClaim = null;
+          if (fs.existsSync(evidenceClaimPath)) {
+            try {
+              readEvidenceClaim(fs.readFileSync(evidenceClaimPath, 'utf8'), graph.selected_task);
+            } catch (err) {
+              throw new RouteStructureError(`invalid evidence claim: ${err.message}`);
+            }
+            evidenceClaim = { path: `tasks/${graph.selected_task}/evidence-claim.json` };
+          }
+          const updatedGraph = recordedGraph(graph, claim.outcome, evidenceClaim);
+          writeJson(graphPath, updatedGraph);
+          return {
+            runId,
+            runDir,
+            created: false,
+            graph: updatedGraph,
+            gatePath: fs.existsSync(gatePath) ? gatePath : null,
+            requestPath,
+            decisionsPath,
+            packetPath,
+            manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+          };
+        }
+      } else {
+        assertGraphHasOneSelectedTask(graph, packetPath, ['succeeded', 'failed']);
+        if (selectedTask.acceptance_state === 'pending') {
+          const verificationPath = path.join(tasksDir, graph.selected_task, 'verification.json');
+          if (fs.existsSync(verificationPath)) {
+            if (selectedTask.evidence_claim === null || typeof selectedTask.evidence_claim?.path !== 'string') {
+              throw new RouteStructureError('verification result requires a recorded evidence claim');
+            }
+            try {
+              const verification = readVerificationResult(
+                fs.readFileSync(verificationPath, 'utf8'),
+                graph.selected_task,
+                selectedTask.evidence_claim.path,
+                selectedTask.execution_state,
+              );
+              const updatedGraph = recordedAcceptanceGraph(graph, `tasks/${graph.selected_task}/verification.json`, verification.verdict);
+              writeJson(graphPath, updatedGraph);
+              return {
+                runId, runDir, created: false, graph: updatedGraph,
+                gatePath: fs.existsSync(gatePath) ? gatePath : null,
+                requestPath, decisionsPath, packetPath,
+                manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+              };
+            } catch (err) {
+              throw new RouteStructureError(`invalid verification result: ${err.message}`);
+            }
+          }
+        }
+        if (['passed', 'failed'].includes(selectedTask.acceptance_state) && !fs.existsSync(receiptPath)) {
+          writeJson(receiptPath, finalReceipt(runId, graph));
+          return {
+            runId, runDir, created: false, graph,
+            gatePath: fs.existsSync(gatePath) ? gatePath : null,
+            requestPath, decisionsPath, packetPath, receiptPath,
+            manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+          };
+        }
+      }
       return {
         runId,
         runDir,
@@ -304,6 +460,7 @@ export function route(manifest, opts) {
         requestPath,
         decisionsPath,
         packetPath,
+        receiptPath: fs.existsSync(receiptPath) ? receiptPath : null,
         manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
       };
     }
@@ -311,7 +468,7 @@ export function route(manifest, opts) {
     if (classification !== 'clarification-required') {
       throw new RouteStructureError('an executable run with no selected task is structurally incomplete');
     }
-    assertBlockedGraph(graph);
+    assertBlockedGraph(graph, manifest);
     assertFile(gatePath, 'human gate artifact');
     const gate = readGateAnswer(fs.readFileSync(gatePath, 'utf8'));
     if (gate.status === 'unanswered') {
@@ -338,11 +495,11 @@ export function route(manifest, opts) {
 
     const selectedGraph = routedGraph(graph, [decision.source_gate], manifest);
     fs.mkdirSync(path.dirname(packetPath), { recursive: true });
-    fs.writeFileSync(packetPath, renderPacket(manifest, {
-      taskId,
+    fs.writeFileSync(packetPath, renderPacket(selectedCandidate, {
       graphRevision: selectedGraph.revision,
       decisionArtifacts: [decision.source_gate],
       preconditions: [`Human gate ${GATE_ID} answered: ${gate.answer}`],
+      dependents,
     }), 'utf8');
     writeJson(graphPath, selectedGraph);
     return {
@@ -368,21 +525,22 @@ export function route(manifest, opts) {
   writeJson(decisionsPath, { decisions: [] });
 
   if (classification === 'executable') {
+    const tasks = candidates.map((candidate, index) => makeTask(candidate, 1, index === 0 ? 'pending' : 'blocked'));
     const graph = {
       revision: 1,
       status: 'ready-for-manual-handoff',
-      selected_task: taskId,
-      tasks: [makeTask(1)],
+      selected_task: selectedCandidate.id,
+      tasks,
       gates: [],
       decision_artifacts: [],
       request_objective: manifest.objective,
     };
     fs.mkdirSync(path.dirname(packetPath), { recursive: true });
-    fs.writeFileSync(packetPath, renderPacket(manifest, {
-      taskId,
+    fs.writeFileSync(packetPath, renderPacket(selectedCandidate, {
       graphRevision: graph.revision,
       decisionArtifacts: [],
       preconditions: [],
+      dependents,
     }), 'utf8');
     writeJson(graphPath, graph);
     return {
@@ -400,7 +558,7 @@ export function route(manifest, opts) {
 
   fs.mkdirSync(gatesDir, { recursive: true });
 
-  const graph = baseGraph();
+  const graph = baseGraph(manifest);
   writeJson(graphPath, graph);
 
   fs.writeFileSync(gatePath, renderGateMarkdown(manifest.ambiguity), 'utf8');

@@ -6,13 +6,13 @@ Files, rather than agent chat, are the handoff protocol.
 | Role | Inputs | Output claim or artifact | Authority / stop condition | Status |
 | --- | --- | --- | --- | --- |
 | Intake | Human request | Intake manifest, then `request.md` | Stops at material ambiguity through a human gate. | A0 current |
-| Routing | Manifest, prior run artifacts, accepted decisions | `graph.json`, decisions, gates, one packet | Owns run-level state; prepares but never dispatches. | A0 current |
+| Routing | Manifest, prior run artifacts, accepted decisions | `graph.json`, decisions, gates, one packet | Records an explicit bounded sequence but selects and packetizes only its first task; never dispatches. | Slice A current |
 | Discovery / research | Bounded research question and request context | `result.md`, `evidence-claim.json` | Establishes facts; does not choose product direction. | Slice A planned |
 | Design | Research and active decisions | `result.md` with alternatives and proposed decisions | Material choices return to a human gate; accepted durable choices become ADRs. | Slice A planned |
 | Specification | Accepted decisions and design | `result.md` with observable criteria and observation method | Stops when a criterion cannot be observed. | Slice A planned |
 | Ticketing | Approved specification | Small task candidates and dependencies | `/route` alone selects the next packet. | Slice A planned |
 | Implementation | Immutable `packet.md` | `result.md` and `evidence-claim.json` | May not change run-level state or expand scope. | Slice B planned |
-| Independent verification | Specification, allowed paths, changed files, evidence claim | `verification.json` | Does not receive private implementer reasoning; failure routes a repair task. | Slice B planned |
+| Independent verification | Specification, allowed paths, changed files, evidence claim | `verification.json` | Records an independent verdict only; repair routing remains unimplemented. | Slice B current |
 | Maintenance | Curated candidate | New intake candidate | Never silently fixes product behavior. | Phase 3 planned |
 
 ## Handoff sequence

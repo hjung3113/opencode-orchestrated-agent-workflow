@@ -29,6 +29,6 @@ directory; an ADR wins over a conflicting contract.
 
 ## Migration ledger
 
-The 634-line root proposal was split on all thirteen top-level section
-headings. The exact section files total the same 634 source lines; this index
-is the only added navigation text.
+The former 634-line root proposal was split on all thirteen top-level section
+headings. The canonical-destination coverage check is
+`test/design-migration.test.js`; this index adds only navigation text.

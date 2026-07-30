@@ -54,6 +54,56 @@ function answerGate(blocked, answer = 'Exclude blocked runs.') {
   );
 }
 
+function writeResultClaim(routed, content) {
+  const resultPath = path.join(
+    routed.runDir,
+    'tasks',
+    routed.graph.selected_task,
+    'result.md',
+  );
+  fs.writeFileSync(resultPath, content, 'utf8');
+  return resultPath;
+}
+
+function writeEvidenceClaim(routed, claim) {
+  const claimPath = path.join(
+    routed.runDir,
+    'tasks',
+    routed.graph.selected_task,
+    'evidence-claim.json',
+  );
+  fs.writeFileSync(claimPath, typeof claim === 'string' ? claim : `${JSON.stringify(claim, null, 2)}\n`, 'utf8');
+  return claimPath;
+}
+
+function validEvidenceClaim(taskId) {
+  return {
+    task_id: taskId,
+    commands: ['npm test'],
+    changed_files: [],
+    acceptance_mapping: [{
+      criterion: 'The implementation satisfies the stated objective within the declared allowed paths.',
+      evidence: 'npm test passed',
+    }],
+  };
+}
+
+function writeVerificationResult(routed, result) {
+  const resultPath = path.join(routed.runDir, 'tasks', routed.graph.selected_task, 'verification.json');
+  fs.writeFileSync(resultPath, typeof result === 'string' ? result : `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  return resultPath;
+}
+
+function validVerificationResult(taskId, verdict = 'passed') {
+  return {
+    task_id: taskId,
+    verdict,
+    verified_by: 'independent-verifier',
+    evidence_claim_path: `tasks/${taskId}/evidence-claim.json`,
+    criteria_results: [{ criterion: 'Record the declared graph contract.', result: verdict, evidence: 'Observed graph.json.' }],
+  };
+}
+
 test('clarification-required manifest writes request, empty decisions, revision-one blocked graph, and one unanswered gate', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('clarification-required.json');
@@ -302,9 +352,436 @@ test('an executable manifest selects one pending task and emits a manual handoff
   assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-1', 'worker-claim.json')), false);
 
   const packet = fs.readFileSync(result.packetPath, 'utf8');
+  const legacyPrefix = `# Task: task-1
+
+## Objective
+
+Give operators a daily CSV of failed runs for triage.
+
+## Inputs and source artifacts
+`;
+  assert.equal(packet.slice(0, legacyPrefix.length), legacyPrefix);
+  assert.match(packet, /## Acceptance criteria\n\n- The implementation satisfies the stated objective within the declared allowed paths\./);
+  assert.match(packet, /## Evidence required\n\n- Changed-file list mapped to the objective and scope\./);
+  assert.match(packet, /No dependent tasks; this is the only selected Phase-1 task\./);
   const rerouted = route(manifest, { stateRoot, checkoutRoot });
   assert.equal(rerouted.created, false);
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('an executable bounded sequence records every task but packetizes only the first selected task', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const result = route(manifest, { stateRoot, checkoutRoot });
+
+  assert.equal(result.graph.selected_task, 'task-define-contract');
+  assert.equal(result.graph.tasks.length, 2);
+  assert.deepEqual(result.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    dependencies: task.dependencies,
+  })), [
+    { id: 'task-define-contract', execution_state: 'pending', dependencies: [] },
+    { id: 'task-update-workflow', execution_state: 'blocked', dependencies: ['task-define-contract'] },
+  ]);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-define-contract', 'packet.md')), true);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.existsSync(path.join(result.runDir, 'tasks', 'task-define-contract', 'worker-claim.json')), false);
+  const allFiles = listAllFiles(result.runDir);
+  assert.deepEqual(allFiles.filter((file) => /(?:result\.md|evidence-claim\.json)$/.test(file)), []);
+
+  const packet = fs.readFileSync(result.packetPath, 'utf8');
+  assert.match(packet, /# Task: task-define-contract/);
+  assert.match(packet, /Define the bounded graph artifact contract\./);
+  assert.match(packet, /## Scope\n\n- docs\/contracts\/\*\*/);
+  assert.equal((packet.match(/## Inputs and source artifacts/g) || []).length, 1);
+  assert.match(packet, /## Acceptance criteria\n\n- Record the declared graph contract\./);
+  assert.match(packet, /## Evidence required\n\n- Run the contract tests\./);
+  assert.match(packet, /- Dependent: task-update-workflow/);
+  assert.doesNotMatch(packet, /The implementation satisfies the stated objective/);
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.created, false);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a later route records one complete result claim without promoting later tasks or rewriting the packet', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  const withoutResult = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(withoutResult.graph.revision, 1);
+  assert.equal(withoutResult.graph.tasks[0].execution_state, 'pending');
+  assert.equal(fs.readFileSync(withoutResult.packetPath, 'utf8'), packet);
+
+  writeResultClaim(first, '## Outcome\n\nstatus: pending\n');
+  const incomplete = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(incomplete.graph.revision, 1);
+  assert.equal(incomplete.graph.tasks[0].execution_state, 'pending');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(recorded.created, false);
+  assert.equal(recorded.graph.revision, 2);
+  assert.equal(recorded.graph.selected_task, 'task-define-contract');
+  assert.deepEqual(recorded.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    acceptance_state: task.acceptance_state,
+    evidence_claim: task.evidence_claim,
+    graph_revision: task.graph_revision,
+  })), [
+    { id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'pending', evidence_claim: null, graph_revision: 2 },
+    { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', evidence_claim: undefined, graph_revision: 2 },
+  ]);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'evidence-claim.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'verification.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'final-receipt.json')), false);
+
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 2);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a complete failed result claim is recorded for a legacy manifest without changing its task shape', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(recorded.graph.revision, 2);
+  assert.deepEqual(recorded.graph.tasks, [{
+    id: 'task-1',
+    execution_state: 'failed',
+    acceptance_state: 'pending',
+    evidence_claim: null,
+    graph_revision: 2,
+    dependencies: [],
+  }]);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+});
+
+test('a complete result claim with no recognized outcome fails without rewriting graph or packet', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: maybe\n');
+  assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+  assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+});
+
+test('a complete result records one valid evidence-claim reference without accepting it or changing later tasks', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+
+  assert.equal(recorded.graph.revision, 2);
+  assert.deepEqual(recorded.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    acceptance_state: task.acceptance_state,
+    evidence_claim: task.evidence_claim,
+    graph_revision: task.graph_revision,
+  })), [
+    {
+      id: 'task-define-contract',
+      execution_state: 'succeeded',
+      acceptance_state: 'pending',
+      evidence_claim: { path: 'tasks/task-define-contract/evidence-claim.json' },
+      graph_revision: 2,
+    },
+    {
+      id: 'task-update-workflow',
+      execution_state: 'blocked',
+      acceptance_state: 'pending',
+      evidence_claim: undefined,
+      graph_revision: 2,
+    },
+  ]);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'verification.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'final-receipt.json')), false);
+
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 2);
+  assert.deepEqual(rerouted.graph.tasks[0].evidence_claim, { path: 'tasks/task-define-contract/evidence-claim.json' });
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a terminal task records an independent passed or failed verification without changing execution, packet, or later tasks', () => {
+  for (const [outcome, verdict] of [['succeeded', 'passed'], ['failed', 'failed']]) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeResultClaim(first, `## Outcome\n\nstatus: complete\noutcome: ${outcome}\n`);
+    writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+    const terminal = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task, verdict));
+
+    const accepted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    assert.equal(accepted.graph.revision, 3);
+    assert.deepEqual(accepted.graph.tasks.map((task) => ({
+      id: task.id, execution_state: task.execution_state, acceptance_state: task.acceptance_state,
+      verification: task.verification, graph_revision: task.graph_revision,
+    })), [
+      { id: 'task-define-contract', execution_state: outcome, acceptance_state: verdict, verification: { path: 'tasks/task-define-contract/verification.json' }, graph_revision: 3 },
+      { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', verification: undefined, graph_revision: 3 },
+    ]);
+    assert.equal(fs.readFileSync(accepted.packetPath, 'utf8'), packet);
+    assert.equal(fs.existsSync(path.join(accepted.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+    assert.equal(fs.existsSync(path.join(accepted.runDir, 'final-receipt.json')), false);
+
+    const rerouted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    assert.equal(rerouted.graph.revision, 3);
+    assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+  }
+});
+
+test('a legacy task retains its shape through independent verification recording', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+  const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult('task-1'));
+  const accepted = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  assert.deepEqual(accepted.graph.tasks, [{
+    id: 'task-1', execution_state: 'succeeded', acceptance_state: 'passed',
+    evidence_claim: { path: 'tasks/task-1/evidence-claim.json' },
+    verification: { path: 'tasks/task-1/verification.json' }, graph_revision: 3, dependencies: [],
+  }]);
+});
+
+test('a later pass writes one immutable receipt from an accepted bounded graph', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+  const terminal = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task));
+  const accepted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  assert.equal(fs.existsSync(path.join(first.runDir, 'final-receipt.json')), false);
+
+  const receipted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  assert.equal(receipted.receiptPath, path.join(first.runDir, 'final-receipt.json'));
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+  assert.equal(fs.readFileSync(receipted.packetPath, 'utf8'), packet);
+  assert.deepEqual(JSON.parse(fs.readFileSync(receipted.receiptPath, 'utf8')), {
+    run_id: receipted.runId, graph_revision: 3,
+    selected_task: {
+      id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'passed',
+      evidence_claim_path: 'tasks/task-define-contract/evidence-claim.json',
+      verification_path: 'tasks/task-define-contract/verification.json',
+    },
+    unrouted_tasks: ['task-update-workflow'],
+  });
+  const receipt = fs.readFileSync(receipted.receiptPath, 'utf8');
+  const rerouted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 3);
+  assert.equal(fs.readFileSync(rerouted.receiptPath, 'utf8'), receipt);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a failed and legacy accepted task receive receipts without changing task shape', () => {
+  for (const manifestName of ['bounded-sequence.json', 'executable.json']) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+    writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+    const terminal = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task, 'failed'));
+    const accepted = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const receipted = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    const receipt = JSON.parse(fs.readFileSync(receipted.receiptPath, 'utf8'));
+    assert.equal(receipt.selected_task.acceptance_state, 'failed');
+    assert.equal(receipt.selected_task.execution_state, 'failed');
+    assert.deepEqual(receipt.unrouted_tasks, manifestName === 'bounded-sequence.json' ? ['task-update-workflow'] : []);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(accepted.graph.tasks[0].acceptance_state, 'failed');
+  }
+});
+
+test('verification is ignored before a terminal claim and rejected without a recorded evidence claim', () => {
+  const pendingRoot = makeTmpStateRoot();
+  const pending = route(loadFixture('executable.json'), { stateRoot: pendingRoot, checkoutRoot });
+  writeVerificationResult(pending, validVerificationResult('task-1'));
+  const ignored = route(loadFixture('executable.json'), { stateRoot: pendingRoot, checkoutRoot });
+  assert.equal(ignored.graph.revision, 1);
+  assert.equal(ignored.graph.tasks[0].acceptance_state, 'pending');
+
+  const missingEvidenceRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  const terminal = route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult('task-1'));
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  assert.throws(() => route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+});
+
+test('an invalid terminal verification result fails before graph or packet rewrite', () => {
+  const valid = validVerificationResult('task-1');
+  const cases = [
+    '{not json', {}, { ...valid, task_id: 'other-task' }, { ...valid, verdict: 'maybe' },
+    { ...valid, verified_by: ' ' }, { ...valid, evidence_claim_path: 'tasks/task-1/other.json' },
+    { ...valid, criteria_results: [] }, { ...valid, criteria_results: [{ criterion: 'c', result: 'maybe', evidence: 'e' }] },
+    { ...valid, criteria_results: [{ criterion: 'c', result: 'failed', evidence: 'e' }] },
+  ];
+  for (const verification of cases) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+    writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+    const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeVerificationResult(terminal, verification);
+    assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+  }
+});
+
+test('a passed verification requires a succeeded execution state', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+  writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+  const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  writeVerificationResult(terminal, validVerificationResult('task-1', 'passed'));
+  assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+});
+
+test('a pending task ignores an evidence claim until it has a complete result claim', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+
+  writeEvidenceClaim(first, '{not json');
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 1);
+  assert.equal(rerouted.graph.tasks[0].execution_state, 'pending');
+  assert.equal('evidence_claim' in rerouted.graph.tasks[0], false);
+});
+
+test('an invalid complete evidence claim fails structurally before graph or packet rewrite', () => {
+  const cases = [
+    '{not json',
+    { commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 1, commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: [], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: 'npm test', changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: 'src/route.js', acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['/src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/../route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'other-task', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c', evidence: 'e' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: 'c' }] },
+    { task_id: 'task-1', commands: ['npm test'], changed_files: ['src/route.js'], acceptance_mapping: [{ criterion: '', evidence: 'e' }] },
+  ];
+
+  for (const claim of cases) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+    writeEvidenceClaim(first, claim);
+
+    assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+  }
+});
+
+test('a declared sequence requires complete per-task scope before writing a run', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const invalid = {
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => index === 1 ? { ...task, allowed_paths: [] } : task),
+  };
+
+  assert.match(validateManifest(invalid).join(' '), /tasks\[1\]\.allowed_paths/);
+  assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+  assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+});
+
+test('a declared candidate needs observable criteria and evidence before any run artifact is written', () => {
+  const manifest = loadFixture('bounded-sequence.json');
+  for (const field of ['acceptance_criteria', 'evidence_required']) {
+    for (const value of [undefined, [], 'text', [1], [' ']]) {
+      const stateRoot = makeTmpStateRoot();
+      const invalid = { ...manifest, tasks: manifest.tasks.map((task, index) => index === 0 ? { ...task, [field]: value } : task) };
+      assert.match(validateManifest(invalid).join(' '), new RegExp(`tasks\\[0\\]\\.${field}`));
+      assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+      assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+    }
+  }
+});
+
+test('a declared task id must be a safe packet directory segment before any run artifact is written', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const invalid = {
+    ...manifest,
+    tasks: manifest.tasks.map((task, index) => index === 0 ? { ...task, id: '../outside-run' } : task),
+  };
+
+  assert.match(validateManifest(invalid).join(' '), /tasks\[0\]\.id must be a safe path segment/);
+  assert.throws(() => route(invalid, { stateRoot, checkoutRoot }), ManifestValidationError);
+  assert.equal(fs.existsSync(path.join(stateRoot, 'runs')), false);
+});
+
+test('a gate-blocked declared sequence records all candidates without selecting or packetizing one', () => {
+  const stateRoot = makeTmpStateRoot();
+  const gateManifest = loadFixture('clarification-required.json');
+  const sequence = loadFixture('bounded-sequence.json');
+  const manifest = { ...gateManifest, tasks: sequence.tasks };
+
+  const blocked = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(blocked.graph.status, 'blocked');
+  assert.equal(blocked.graph.selected_task, null);
+  assert.deepEqual(blocked.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    dependencies: task.dependencies,
+  })), [
+    { id: 'task-define-contract', execution_state: 'blocked', dependencies: [] },
+    { id: 'task-update-workflow', execution_state: 'blocked', dependencies: ['task-define-contract'] },
+  ]);
+  assert.equal(fs.existsSync(path.join(blocked.runDir, 'tasks')), false);
+
+  answerGate(blocked);
+  const selected = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(selected.graph.revision, 2);
+  assert.equal(selected.graph.selected_task, 'task-define-contract');
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'packet.md')), true);
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.existsSync(path.join(selected.runDir, 'tasks', 'task-define-contract', 'worker-claim.json')), false);
+  const packet = fs.readFileSync(selected.packetPath, 'utf8');
+  assert.match(packet, /Human gate gate-1 answered: Exclude blocked runs\./);
+  assert.match(packet, /- Dependent: task-update-workflow/);
 });
 
 test('an answered status without a recorded answer fails structurally without selecting a task', () => {

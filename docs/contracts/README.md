@@ -20,5 +20,13 @@ trade-off, an accepted ADR.
 
 - [Phase-1 artifacts and ownership](phase-1-artifacts.md) — the canonical
   writer, consumer, authority, and status of each run artifact.
+- [Slice A result-claim recording](slice-a-result-claim.md) — the explicit
+  worker outcome slot and its record-only `/route` behavior.
+- [Slice A evidence-claim recording](slice-a-evidence-claim.md) — the worker
+  evidence-claim shape and record-only provenance reference.
+- [Slice B verification recording](slice-b-verification.md) — the independent
+  verifier result shape and record-only acceptance provenance.
+- [Slice B receipt recording](slice-b-receipt.md) — the immutable run-level
+  summary of already-recorded accepted graph facts.
 
 Future contracts are added only with the phase that makes them observable.

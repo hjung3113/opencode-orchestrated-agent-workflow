@@ -27,6 +27,9 @@
   changing product behaviour. Then read the task-matched documents below;
   `docs/design/` is rationale and roadmap, while contracts and ADRs govern
   current behavior.
+- Root `HANDOFF.md` is the only continuation handoff for this checkout; do not
+  create a parallel handoff. An absent future design document is not a defect
+  unless the active issue explicitly requires it.
 - **Routing, gates, graph, run-state, or artifact ownership:** read
   `docs/contracts/phase-1-artifacts.md`, the applicable slice contract,
   `docs/workflows/README.md`, and ADR-0001/0002.
