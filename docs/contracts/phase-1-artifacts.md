@@ -15,7 +15,7 @@ verification result. No claim is accepted merely because it exists.
 | `graph.json` | `/route` | Maintainer and later routing pass | Host-owned declared-task record, dependencies, selection, and execution/acceptance record. | Slice A current: an explicit bounded sequence, one selected task |
 | `gates/<id>.md` | `/route` creates; human fills answer slot | `/route` | Material decision question and answer provenance. | A0 current |
 | `tasks/<id>/packet.md` | `/route` | One manually chosen worker | Immutable bounded instruction tied to graph revision. | Slice A current: selected task only |
-| `tasks/<id>/result.md` | Worker | Later routing pass | Worker outcome claim, blocker, and limitations. | Slice A planned |
+| `tasks/<id>/result.md` | Worker | Later routing pass | Worker outcome claim; an explicit complete succeeded/failed claim may be recorded as execution state only. | Slice A current |
 | `tasks/<id>/evidence-claim.json` | Worker | Independent verifier | Claimed commands, outputs, changed files, and acceptance mapping. | Slice A planned |
 | `tasks/<id>/verification.json` | Independent verifier | Later routing pass | Independent pass/fail evidence for implementation criteria. | Slice B planned |
 | `final-receipt.json` | `/route` | Maintainer | Evidence-backed final outcome for a completed run. | Slice B planned |

@@ -54,6 +54,17 @@ function answerGate(blocked, answer = 'Exclude blocked runs.') {
   );
 }
 
+function writeResultClaim(routed, content) {
+  const resultPath = path.join(
+    routed.runDir,
+    'tasks',
+    routed.graph.selected_task,
+    'result.md',
+  );
+  fs.writeFileSync(resultPath, content, 'utf8');
+  return resultPath;
+}
+
 test('clarification-required manifest writes request, empty decisions, revision-one blocked graph, and one unanswered gate', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('clarification-required.json');
@@ -334,6 +345,79 @@ test('an executable bounded sequence records every task but packetizes only the 
   const rerouted = route(manifest, { stateRoot, checkoutRoot });
   assert.equal(rerouted.created, false);
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a later route records one complete result claim without promoting later tasks or rewriting the packet', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('bounded-sequence.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  const withoutResult = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(withoutResult.graph.revision, 1);
+  assert.equal(withoutResult.graph.tasks[0].execution_state, 'pending');
+  assert.equal(fs.readFileSync(withoutResult.packetPath, 'utf8'), packet);
+
+  writeResultClaim(first, '## Outcome\n\nstatus: pending\n');
+  const incomplete = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(incomplete.graph.revision, 1);
+  assert.equal(incomplete.graph.tasks[0].execution_state, 'pending');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(recorded.created, false);
+  assert.equal(recorded.graph.revision, 2);
+  assert.equal(recorded.graph.selected_task, 'task-define-contract');
+  assert.deepEqual(recorded.graph.tasks.map((task) => ({
+    id: task.id,
+    execution_state: task.execution_state,
+    acceptance_state: task.acceptance_state,
+    graph_revision: task.graph_revision,
+  })), [
+    { id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'pending', graph_revision: 2 },
+    { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', graph_revision: 2 },
+  ]);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'evidence-claim.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'tasks', 'task-define-contract', 'verification.json')), false);
+  assert.equal(fs.existsSync(path.join(recorded.runDir, 'final-receipt.json')), false);
+
+  const rerouted = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 2);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a complete failed result claim is recorded for a legacy manifest without changing its task shape', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+  const recorded = route(manifest, { stateRoot, checkoutRoot });
+  assert.equal(recorded.graph.revision, 2);
+  assert.deepEqual(recorded.graph.tasks, [{
+    id: 'task-1',
+    execution_state: 'failed',
+    acceptance_state: 'pending',
+    graph_revision: 2,
+    dependencies: [],
+  }]);
+  assert.equal(fs.readFileSync(recorded.packetPath, 'utf8'), packet);
+});
+
+test('a complete result claim with no recognized outcome fails without rewriting graph or packet', () => {
+  const stateRoot = makeTmpStateRoot();
+  const manifest = loadFixture('executable.json');
+  const first = route(manifest, { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: maybe\n');
+  assert.throws(() => route(manifest, { stateRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+  assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
 });
 
 test('a declared sequence requires complete per-task scope before writing a run', () => {

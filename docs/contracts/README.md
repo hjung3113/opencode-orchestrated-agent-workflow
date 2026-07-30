@@ -20,5 +20,7 @@ trade-off, an accepted ADR.
 
 - [Phase-1 artifacts and ownership](phase-1-artifacts.md) — the canonical
   writer, consumer, authority, and status of each run artifact.
+- [Slice A result-claim recording](slice-a-result-claim.md) — the explicit
+  worker outcome slot and its record-only `/route` behavior.
 
 Future contracts are added only with the phase that makes them observable.

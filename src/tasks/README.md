@@ -1,5 +1,5 @@
 # Tasks module location
 
-Reserved for later task-claim helpers. Workers may write only their selected
-task directory in external run state. This directory contains no worker or
-lifecycle implementation yet.
+Workers may write claims only in their selected task directory in external run
+state. `result-claim.js` reads the explicit outcome slot; `/route` remains the
+only graph writer and never creates or edits a worker claim.

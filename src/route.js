@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { assertValidManifest } from './manifest.js';
 import { assertValidStateRoot } from './state-root.js';
 import { GATE_ID, readGateAnswer, renderGateMarkdown } from './gate.js';
+import { readResultClaim } from './tasks/result-claim.js';
 
 export class UnsupportedAmbiguityClassificationError extends Error {
   constructor(classification) {
@@ -195,7 +196,7 @@ function makeTask(candidate, graphRevision, executionState) {
   };
 }
 
-function assertGraphHasOneSelectedPendingTask(graph, packetPath) {
+function assertGraphHasOneSelectedTask(graph, packetPath, executionStates) {
   if (!Number.isInteger(graph.revision) || graph.revision < 1) {
     throw new RouteStructureError('graph.json must contain a positive integer revision');
   }
@@ -206,8 +207,8 @@ function assertGraphHasOneSelectedPendingTask(graph, packetPath) {
     throw new RouteStructureError('graph.json must contain at least one declared task');
   }
   const task = graph.tasks.find((item) => item.id === graph.selected_task);
-  if (task.id !== graph.selected_task || task.execution_state !== 'pending' || task.graph_revision !== graph.revision) {
-    throw new RouteStructureError('graph.json selected task must be pending and bound to the current graph revision');
+  if (task.id !== graph.selected_task || !executionStates.includes(task.execution_state) || task.graph_revision !== graph.revision) {
+    throw new RouteStructureError(`graph.json selected task must be ${executionStates.join(' or ')} and bound to the current graph revision`);
   }
   assertFile(packetPath, 'immutable task packet');
   const tasksDir = path.dirname(path.dirname(packetPath));
@@ -220,6 +221,19 @@ function assertGraphHasOneSelectedPendingTask(graph, packetPath) {
       throw new RouteStructureError('unselected graph tasks must not have task packets');
     }
   }
+}
+
+function recordedGraph(graph, outcome) {
+  const revision = graph.revision + 1;
+  return {
+    ...graph,
+    revision,
+    tasks: graph.tasks.map((task) => ({
+      ...task,
+      execution_state: task.id === graph.selected_task ? outcome : task.execution_state,
+      graph_revision: revision,
+    })),
+  };
 }
 
 function assertBlockedGraph(graph, manifest) {
@@ -340,12 +354,39 @@ export function route(manifest, opts) {
     const graph = readJson(graphPath);
 
     if (graph.selected_task !== null) {
-      assertGraphHasOneSelectedPendingTask(graph, packetPath);
       const decisions = readJson(decisionsPath);
       if (!Array.isArray(decisions.decisions)) {
         throw new RouteStructureError('decisions.json must contain a decisions array');
       }
       assertSelectedDecisionProvenance(graph, decisions, runDir);
+      const selectedTask = graph.tasks.find((task) => task.id === graph.selected_task);
+      if (selectedTask.execution_state === 'pending') {
+        assertGraphHasOneSelectedTask(graph, packetPath, ['pending']);
+        const resultPath = path.join(tasksDir, graph.selected_task, 'result.md');
+        const claim = fs.existsSync(resultPath)
+          ? readResultClaim(fs.readFileSync(resultPath, 'utf8'))
+          : { status: undefined, outcome: undefined };
+        if (claim.status === 'complete') {
+          if (!['succeeded', 'failed'].includes(claim.outcome)) {
+            throw new RouteStructureError('a complete result claim must contain outcome: succeeded or outcome: failed');
+          }
+          const updatedGraph = recordedGraph(graph, claim.outcome);
+          writeJson(graphPath, updatedGraph);
+          return {
+            runId,
+            runDir,
+            created: false,
+            graph: updatedGraph,
+            gatePath: fs.existsSync(gatePath) ? gatePath : null,
+            requestPath,
+            decisionsPath,
+            packetPath,
+            manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+          };
+        }
+      } else {
+        assertGraphHasOneSelectedTask(graph, packetPath, ['succeeded', 'failed']);
+      }
       return {
         runId,
         runDir,
