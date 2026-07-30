@@ -26,5 +26,7 @@ trade-off, an accepted ADR.
   evidence-claim shape and record-only provenance reference.
 - [Slice B verification recording](slice-b-verification.md) — the independent
   verifier result shape and record-only acceptance provenance.
+- [Slice B receipt recording](slice-b-receipt.md) — the immutable run-level
+  summary of already-recorded accepted graph facts.
 
 Future contracts are added only with the phase that makes them observable.

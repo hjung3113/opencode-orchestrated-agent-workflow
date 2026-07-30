@@ -14,6 +14,7 @@ import { GATE_ID, readGateAnswer, renderGateMarkdown } from './gate.js';
 import { readResultClaim } from './tasks/result-claim.js';
 import { readEvidenceClaim } from './tasks/evidence-claim.js';
 import { readVerificationResult } from './verification/verification-result.js';
+import { finalReceipt } from './receipt/final-receipt.js';
 
 export class UnsupportedAmbiguityClassificationError extends Error {
   constructor(classification) {
@@ -364,6 +365,7 @@ export function route(manifest, opts) {
   const selectedCandidate = candidates[0];
   const dependents = candidates.filter((candidate) => candidate.dependencies.includes(selectedCandidate.id)).map((candidate) => candidate.id);
   const packetPath = path.join(tasksDir, selectedCandidate.id, 'packet.md');
+  const receiptPath = path.join(runDir, 'final-receipt.json');
 
   if (fs.existsSync(graphPath)) {
     assertFile(requestPath, 'request artifact');
@@ -439,6 +441,15 @@ export function route(manifest, opts) {
             }
           }
         }
+        if (['passed', 'failed'].includes(selectedTask.acceptance_state) && !fs.existsSync(receiptPath)) {
+          writeJson(receiptPath, finalReceipt(runId, graph));
+          return {
+            runId, runDir, created: false, graph,
+            gatePath: fs.existsSync(gatePath) ? gatePath : null,
+            requestPath, decisionsPath, packetPath, receiptPath,
+            manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+          };
+        }
       }
       return {
         runId,
@@ -449,6 +460,7 @@ export function route(manifest, opts) {
         requestPath,
         decisionsPath,
         packetPath,
+        receiptPath: fs.existsSync(receiptPath) ? receiptPath : null,
         manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
       };
     }

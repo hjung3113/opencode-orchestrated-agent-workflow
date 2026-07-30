@@ -567,6 +567,58 @@ test('a legacy task retains its shape through independent verification recording
   }]);
 });
 
+test('a later pass writes one immutable receipt from an accepted bounded graph', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  const packet = fs.readFileSync(first.packetPath, 'utf8');
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+  const terminal = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task));
+  const accepted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  assert.equal(fs.existsSync(path.join(first.runDir, 'final-receipt.json')), false);
+
+  const receipted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  assert.equal(receipted.receiptPath, path.join(first.runDir, 'final-receipt.json'));
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+  assert.equal(fs.readFileSync(receipted.packetPath, 'utf8'), packet);
+  assert.deepEqual(JSON.parse(fs.readFileSync(receipted.receiptPath, 'utf8')), {
+    run_id: receipted.runId, graph_revision: 3,
+    selected_task: {
+      id: 'task-define-contract', execution_state: 'succeeded', acceptance_state: 'passed',
+      evidence_claim_path: 'tasks/task-define-contract/evidence-claim.json',
+      verification_path: 'tasks/task-define-contract/verification.json',
+    },
+    unrouted_tasks: ['task-update-workflow'],
+  });
+  const receipt = fs.readFileSync(receipted.receiptPath, 'utf8');
+  const rerouted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+  assert.equal(rerouted.graph.revision, 3);
+  assert.equal(fs.readFileSync(rerouted.receiptPath, 'utf8'), receipt);
+  assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a failed and legacy accepted task receive receipts without changing task shape', () => {
+  for (const manifestName of ['bounded-sequence.json', 'executable.json']) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+    writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+    const terminal = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task, 'failed'));
+    const accepted = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const receipted = route(loadFixture(manifestName), { stateRoot, checkoutRoot });
+    const receipt = JSON.parse(fs.readFileSync(receipted.receiptPath, 'utf8'));
+    assert.equal(receipt.selected_task.acceptance_state, 'failed');
+    assert.equal(receipt.selected_task.execution_state, 'failed');
+    assert.deepEqual(receipt.unrouted_tasks, manifestName === 'bounded-sequence.json' ? ['task-update-workflow'] : []);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(accepted.graph.tasks[0].acceptance_state, 'failed');
+  }
+});
+
 test('verification is ignored before a terminal claim and rejected without a recorded evidence claim', () => {
   const pendingRoot = makeTmpStateRoot();
   const pending = route(loadFixture('executable.json'), { stateRoot: pendingRoot, checkoutRoot });
