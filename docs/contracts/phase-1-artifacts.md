@@ -17,7 +17,7 @@ verification result. No claim is accepted merely because it exists.
 | `tasks/<id>/packet.md` | `/route` | One manually chosen worker | Immutable bounded instruction tied to graph revision. | Slice A current: selected task only |
 | `tasks/<id>/result.md` | Worker | Later routing pass | Worker outcome claim; an explicit complete succeeded/failed claim may be recorded as execution state only. | Slice A current |
 | `tasks/<id>/evidence-claim.json` | Worker | Independent verifier | Structurally valid worker claim; `/route` records its path only, never its truth or acceptance. | Slice A current |
-| `tasks/<id>/verification.json` | Independent verifier | Later routing pass | Independent pass/fail evidence for implementation criteria. | Slice B planned |
+| `tasks/<id>/verification.json` | Independent verifier | Later routing pass | Independent pass/fail evidence for implementation criteria. | Slice B current |
 | `final-receipt.json` | `/route` | Maintainer | Evidence-backed final outcome for a completed run. | Slice B planned |
 
 ## Invariants

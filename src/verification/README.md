@@ -1,4 +1,5 @@
-# Verification module location
+# Independent verification result
 
-Reserved for the Slice-B independent-verification contract. Verification is
-separate from worker claims and cannot be implemented as automatic acceptance.
+`verification-result.js` reads only the declared structural shape of the
+independent verifier-owned `verification.json`. `/route` records its verdict;
+it does not judge criteria or evidence.

@@ -88,6 +88,22 @@ function validEvidenceClaim(taskId) {
   };
 }
 
+function writeVerificationResult(routed, result) {
+  const resultPath = path.join(routed.runDir, 'tasks', routed.graph.selected_task, 'verification.json');
+  fs.writeFileSync(resultPath, typeof result === 'string' ? result : `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  return resultPath;
+}
+
+function validVerificationResult(taskId, verdict = 'passed') {
+  return {
+    task_id: taskId,
+    verdict,
+    verified_by: 'independent-verifier',
+    evidence_claim_path: `tasks/${taskId}/evidence-claim.json`,
+    criteria_results: [{ criterion: 'Record the declared graph contract.', result: verdict, evidence: 'Observed graph.json.' }],
+  };
+}
+
 test('clarification-required manifest writes request, empty decisions, revision-one blocked graph, and one unanswered gate', () => {
   const stateRoot = makeTmpStateRoot();
   const manifest = loadFixture('clarification-required.json');
@@ -505,6 +521,103 @@ test('a complete result records one valid evidence-claim reference without accep
   assert.equal(rerouted.graph.revision, 2);
   assert.deepEqual(rerouted.graph.tasks[0].evidence_claim, { path: 'tasks/task-define-contract/evidence-claim.json' });
   assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+});
+
+test('a terminal task records an independent passed or failed verification without changing execution, packet, or later tasks', () => {
+  for (const [outcome, verdict] of [['succeeded', 'passed'], ['failed', 'failed']]) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeResultClaim(first, `## Outcome\n\nstatus: complete\noutcome: ${outcome}\n`);
+    writeEvidenceClaim(first, validEvidenceClaim(first.graph.selected_task));
+    const terminal = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    writeVerificationResult(terminal, validVerificationResult(first.graph.selected_task, verdict));
+
+    const accepted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    assert.equal(accepted.graph.revision, 3);
+    assert.deepEqual(accepted.graph.tasks.map((task) => ({
+      id: task.id, execution_state: task.execution_state, acceptance_state: task.acceptance_state,
+      verification: task.verification, graph_revision: task.graph_revision,
+    })), [
+      { id: 'task-define-contract', execution_state: outcome, acceptance_state: verdict, verification: { path: 'tasks/task-define-contract/verification.json' }, graph_revision: 3 },
+      { id: 'task-update-workflow', execution_state: 'blocked', acceptance_state: 'pending', verification: undefined, graph_revision: 3 },
+    ]);
+    assert.equal(fs.readFileSync(accepted.packetPath, 'utf8'), packet);
+    assert.equal(fs.existsSync(path.join(accepted.runDir, 'tasks', 'task-update-workflow', 'packet.md')), false);
+    assert.equal(fs.existsSync(path.join(accepted.runDir, 'final-receipt.json')), false);
+
+    const rerouted = route(loadFixture('bounded-sequence.json'), { stateRoot, checkoutRoot });
+    assert.equal(rerouted.graph.revision, 3);
+    assert.equal(fs.readFileSync(rerouted.packetPath, 'utf8'), packet);
+  }
+});
+
+test('a legacy task retains its shape through independent verification recording', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+  const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult('task-1'));
+  const accepted = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  assert.deepEqual(accepted.graph.tasks, [{
+    id: 'task-1', execution_state: 'succeeded', acceptance_state: 'passed',
+    evidence_claim: { path: 'tasks/task-1/evidence-claim.json' },
+    verification: { path: 'tasks/task-1/verification.json' }, graph_revision: 3, dependencies: [],
+  }]);
+});
+
+test('verification is ignored before a terminal claim and rejected without a recorded evidence claim', () => {
+  const pendingRoot = makeTmpStateRoot();
+  const pending = route(loadFixture('executable.json'), { stateRoot: pendingRoot, checkoutRoot });
+  writeVerificationResult(pending, validVerificationResult('task-1'));
+  const ignored = route(loadFixture('executable.json'), { stateRoot: pendingRoot, checkoutRoot });
+  assert.equal(ignored.graph.revision, 1);
+  assert.equal(ignored.graph.tasks[0].acceptance_state, 'pending');
+
+  const missingEvidenceRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+  const terminal = route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot });
+  writeVerificationResult(terminal, validVerificationResult('task-1'));
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  assert.throws(() => route(loadFixture('executable.json'), { stateRoot: missingEvidenceRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+});
+
+test('an invalid terminal verification result fails before graph or packet rewrite', () => {
+  const valid = validVerificationResult('task-1');
+  const cases = [
+    '{not json', {}, { ...valid, task_id: 'other-task' }, { ...valid, verdict: 'maybe' },
+    { ...valid, verified_by: ' ' }, { ...valid, evidence_claim_path: 'tasks/task-1/other.json' },
+    { ...valid, criteria_results: [] }, { ...valid, criteria_results: [{ criterion: 'c', result: 'maybe', evidence: 'e' }] },
+    { ...valid, criteria_results: [{ criterion: 'c', result: 'failed', evidence: 'e' }] },
+  ];
+  for (const verification of cases) {
+    const stateRoot = makeTmpStateRoot();
+    const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: succeeded\n');
+    writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+    const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+    const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+    const packet = fs.readFileSync(first.packetPath, 'utf8');
+    writeVerificationResult(terminal, verification);
+    assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+    assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
+    assert.equal(fs.readFileSync(first.packetPath, 'utf8'), packet);
+  }
+});
+
+test('a passed verification requires a succeeded execution state', () => {
+  const stateRoot = makeTmpStateRoot();
+  const first = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  writeResultClaim(first, '## Outcome\n\nstatus: complete\noutcome: failed\n');
+  writeEvidenceClaim(first, validEvidenceClaim('task-1'));
+  const terminal = route(loadFixture('executable.json'), { stateRoot, checkoutRoot });
+  const graph = fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8');
+  writeVerificationResult(terminal, validVerificationResult('task-1', 'passed'));
+  assert.throws(() => route(loadFixture('executable.json'), { stateRoot, checkoutRoot }), RouteStructureError);
+  assert.equal(fs.readFileSync(path.join(first.runDir, 'graph.json'), 'utf8'), graph);
 });
 
 test('a pending task ignores an evidence claim until it has a complete result claim', () => {

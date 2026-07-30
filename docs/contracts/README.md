@@ -24,5 +24,7 @@ trade-off, an accepted ADR.
   worker outcome slot and its record-only `/route` behavior.
 - [Slice A evidence-claim recording](slice-a-evidence-claim.md) — the worker
   evidence-claim shape and record-only provenance reference.
+- [Slice B verification recording](slice-b-verification.md) — the independent
+  verifier result shape and record-only acceptance provenance.
 
 Future contracts are added only with the phase that makes them observable.

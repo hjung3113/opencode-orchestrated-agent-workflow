@@ -13,6 +13,7 @@ import { assertValidStateRoot } from './state-root.js';
 import { GATE_ID, readGateAnswer, renderGateMarkdown } from './gate.js';
 import { readResultClaim } from './tasks/result-claim.js';
 import { readEvidenceClaim } from './tasks/evidence-claim.js';
+import { readVerificationResult } from './verification/verification-result.js';
 
 export class UnsupportedAmbiguityClassificationError extends Error {
   constructor(classification) {
@@ -240,6 +241,17 @@ function recordedGraph(graph, outcome, evidenceClaim) {
   };
 }
 
+function recordedAcceptanceGraph(graph, verificationPath, verdict) {
+  const revision = graph.revision + 1;
+  return {
+    ...graph,
+    revision,
+    tasks: graph.tasks.map((task) => task.id === graph.selected_task
+      ? { ...task, acceptance_state: verdict, verification: { path: verificationPath }, graph_revision: revision }
+      : { ...task, graph_revision: revision }),
+  };
+}
+
 function assertBlockedGraph(graph, manifest) {
   const expectedTasks = manifest.tasks === undefined
     ? []
@@ -401,6 +413,32 @@ export function route(manifest, opts) {
         }
       } else {
         assertGraphHasOneSelectedTask(graph, packetPath, ['succeeded', 'failed']);
+        if (selectedTask.acceptance_state === 'pending') {
+          const verificationPath = path.join(tasksDir, graph.selected_task, 'verification.json');
+          if (fs.existsSync(verificationPath)) {
+            if (selectedTask.evidence_claim === null || typeof selectedTask.evidence_claim?.path !== 'string') {
+              throw new RouteStructureError('verification result requires a recorded evidence claim');
+            }
+            try {
+              const verification = readVerificationResult(
+                fs.readFileSync(verificationPath, 'utf8'),
+                graph.selected_task,
+                selectedTask.evidence_claim.path,
+                selectedTask.execution_state,
+              );
+              const updatedGraph = recordedAcceptanceGraph(graph, `tasks/${graph.selected_task}/verification.json`, verification.verdict);
+              writeJson(graphPath, updatedGraph);
+              return {
+                runId, runDir, created: false, graph: updatedGraph,
+                gatePath: fs.existsSync(gatePath) ? gatePath : null,
+                requestPath, decisionsPath, packetPath,
+                manualHandoff: `Give ${packetPath} to one worker manually. /route did not launch a worker.`,
+              };
+            } catch (err) {
+              throw new RouteStructureError(`invalid verification result: ${err.message}`);
+            }
+          }
+        }
       }
       return {
         runId,
