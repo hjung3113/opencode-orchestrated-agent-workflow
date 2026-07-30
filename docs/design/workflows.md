@@ -60,6 +60,14 @@ Specification does not implement. In Phase 1, `/route` performs only a
 structural exit check: a missing observation method makes the specification
 unroutable. This does not introduce an additional verifier role.
 
+For a Phase 2 candidate behavior, this is future delivery design, not current
+workflow behavior. Specification is not an unconditional next phase. An
+independent read-only readiness gate first identifies named blocking decisions
+for that candidate. Only those gaps receive specification work; when there are
+none, the candidate's contract, implementation, and public evidence must
+co-land in one bounded delivery slice before the behavior is observable. See
+[Phase 2 delivery and readiness](phase-2-delivery.md).
+
 ### 5.5 Ticketing and task-graph compilation
 
 **Goal:** Convert an approved specification into small, independently

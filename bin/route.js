@@ -10,6 +10,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { route } from '../src/route.js';
+import { routeV2 } from '../src/v2/route.js';
+import { V2RouteRefusal } from '../src/v2/declaration.js';
 
 const checkoutRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -29,15 +31,34 @@ function main() {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
   let result;
+  const routeOptions = {
+    stateRoot,
+    checkoutRoot,
+    homeDir: process.env.HOME,
+  };
+  const isV2 = Object.hasOwn(manifest, 'schema_version');
   try {
-    result = route(manifest, {
-      stateRoot,
-      checkoutRoot,
-      homeDir: process.env.HOME,
-    });
+    result = isV2 ? routeV2(manifest, routeOptions) : route(manifest, routeOptions);
   } catch (err) {
+    if (isV2 && err instanceof V2RouteRefusal) {
+      process.stderr.write(`${JSON.stringify({ refusal: err.refusal })}\n`);
+      process.exit(1);
+    }
     process.stderr.write(`${err.name}: ${err.message}\n`);
     process.exit(1);
+  }
+
+  if (isV2) {
+    process.stdout.write(`${JSON.stringify({
+      status: result.status,
+      run_id: result.runId,
+      run_dir: result.runDir,
+      graph_revision: result.graph.revision,
+      run_state: result.graph.run_state,
+      prepared_task_ids: result.preparedTaskIds,
+      attempt_one_packet_paths: result.attemptOnePacketPaths,
+    })}\n`);
+    return;
   }
 
   process.stdout.write(

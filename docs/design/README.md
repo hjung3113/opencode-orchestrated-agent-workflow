@@ -6,6 +6,14 @@ preserves the complete proposal; these files are rationale and roadmap unless
 an ADR or contract explicitly says otherwise. Current observable behavior is
 owned by `docs/contracts/` and public tests.
 
+For Phase 2, [delivery and readiness](phase-2-delivery.md) summarizes how the
+accepted v2 design records are turned into product slices. The
+`phase-2-v2-*.md` records are inputs to that process; they are not a
+whole-phase completion signal or an implementation authorization.
+The [readiness ledger](phase-2-readiness-ledger.md) records the
+candidate-specific, development-time result that routes the next Phase 2
+design or delivery task.
+
 | Former section | Canonical document |
 | --- | --- |
 | Status | [status](status.md) |

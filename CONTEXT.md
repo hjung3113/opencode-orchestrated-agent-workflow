@@ -54,3 +54,51 @@ _Avoid_: Acceptance state
 The status of whether a task claim satisfies its contract: `pending`, `passed`,
 `failed`, or `not_applicable`.
 _Avoid_: Execution state
+
+## Accepted future direction
+
+**Phase 1 behavior (current)** remains the only implemented behavior: `/route`
+prepares one manual packet and never dispatches a worker.
+
+**Phase 2 bounded orchestration (accepted, unimplemented)** is the direction
+recorded in ADR-0003. A later specification may define human-invoked `/start`
+and `/resume`, a version-2 run layout, bounded retry, and conflict-safe parallel
+admission. These terms do not describe current runtime behavior until matching
+contracts and implementation exist.
+
+## Version-2 vocabulary (accepted, unimplemented)
+
+These terms apply only to schema-version-2 runs. They do not replace the
+Phase 1 terms above, which remain authoritative for version-1 runs.
+
+**Version-2 execution state**:
+`blocked`, `queued`, `dispatched`, `succeeded`, or `failed`; `prepared` is the
+initial run-level state for a v2 run declaration.
+_Avoid_: Phase 1 execution state
+
+**V2 run declaration**:
+`run.json`, the v2 compatibility record for one declared run and its baseline
+metadata.
+_Avoid_: Current Phase 1 run record
+
+**Event record**:
+One ordered host-owned v2 run fact at `events/<sequence>.json`.
+_Avoid_: Worker claim, live scheduler state
+
+**Graph summary**:
+The host-owned v2 projection of declared tasks and their recorded summaries.
+_Avoid_: Worker-write target, Phase 1 graph contract
+
+**Attempt**:
+One immutable v2 task directory at `tasks/<id>/attempts/<n>/` containing a host
+packet and task-local worker claims.
+_Avoid_: Packet rewrite, task lifecycle rule
+
+**Typed block**:
+One host-owned named v2 condition at `blocks/<task-id>.json`.
+_Avoid_: Error payload, transition rule
+
+**Unresolved-attempt attestation**:
+The human statement at `gates/attempt-unresolved-<task-id>-<attempt>.md` about
+a prior unresolved v2 attempt.
+_Avoid_: Gate semantics, acceptance decision

@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "run_id": "v2-route-example",
+  "max_concurrency": 1,
+  "tasks": [
+    {
+      "id": "prepare",
+      "objective": "Prepare the first bounded task.",
+      "scope": ["src/v2/**"],
+      "allowed_paths": ["src/v2/**"],
+      "forbidden_paths": [],
+      "non_goals": [],
+      "acceptance_criteria": ["Record an immutable packet."],
+      "evidence_required": ["Public CLI test."],
+      "dependencies": [],
+      "required_decision_references": [],
+      "retry_budget": 2
+    },
+    {
+      "id": "dependent",
+      "objective": "Remain blocked until a later operation.",
+      "scope": ["docs/**"],
+      "allowed_paths": ["docs/**"],
+      "forbidden_paths": [],
+      "non_goals": [],
+      "acceptance_criteria": ["No packet yet."],
+      "evidence_required": ["Graph inspection."],
+      "dependencies": ["prepare"],
+      "required_decision_references": [],
+      "retry_budget": 0
+    }
+  ]
+}
