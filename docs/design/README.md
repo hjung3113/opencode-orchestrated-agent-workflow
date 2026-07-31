@@ -14,6 +14,10 @@ The [readiness ledger](phase-2-readiness-ledger.md) records the
 candidate-specific, development-time result that routes the next Phase 2
 design or delivery task.
 
+[Original design completion roadmap](completion-roadmap.md) records the
+dependency-ordered, evidence-gated path from v2 record-only lifecycle dogfood
+through optional execution, retry, parallel admission, and Phase 3 maintenance.
+
 | Former section | Canonical document |
 | --- | --- |
 | Status | [status](status.md) |
