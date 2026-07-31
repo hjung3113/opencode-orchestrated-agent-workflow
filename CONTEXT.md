@@ -1,7 +1,7 @@
 # OpenCode Orchestrated Agent Workflow
 
 This context defines the terms for the small, human-invoked workflow system
-and the boundary used while dogfooding it in this repository.
+and its boundary from the repository development environment.
 
 ## Language
 
@@ -16,14 +16,14 @@ product harness.
 _Avoid_: Product runtime, harness state
 
 **Run state**:
-Mutable, reconstructable artifacts for one harness or dogfood run, stored under
+Mutable, reconstructable artifacts for one product run, stored under
 the external `ORCHESTRATOR_RUN_STATE_DIR`.
 _Avoid_: Repository knowledge, source of truth
 
-**Dogfood run**:
-A declared run whose product target is this repository and whose artifacts are
-subject to the same gates and evidence requirements as any other run.
-_Avoid_: Untracked experiment, implicit self-test
+**Self-targeted dogfood run**:
+A historical practice in which a run named this repository as its product
+target. It is suspended: repository development must not create one.
+_Avoid_: Current development workflow, implicit self-test
 
 **Routing pass**:
 A human-invoked host operation that validates run artifacts, records run-level

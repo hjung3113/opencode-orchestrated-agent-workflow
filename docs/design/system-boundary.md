@@ -48,7 +48,7 @@ $ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
 This separation prevents generated status, receipts, and recovery artifacts
 from being confused with source-of-truth product decisions.
 
-### 3.2 Development environment and dogfooding
+### 3.2 Development environment and product runs
 
 Developer tooling is a separate, user-owned environment. In particular,
 Matt Pocock engineering skills remain under `/Users/hyojung/.codex/skills` and
@@ -56,10 +56,10 @@ are never implicitly promoted to product skills, runtime prompt inputs, or
 receipt provenance. A future product skill requires an explicit
 repository-owned adoption decision.
 
-Dogfooding applies this workflow to its own checkout without erasing this
-boundary: a dogfood run has an explicit self-target and stores its packet,
-claims, and verification in the external state root. It follows normal scope,
-human-gate, evidence, and independent-verification rules; it does not grant
+Repository development does not apply this workflow to its own checkout and
+does not create self-targeted dogfood runs. It uses the ordinary repository
+workflow. A product run has an explicit non-self target and stores its packet,
+claims, and verification in the external state root; it does not grant
 automatic execution, publication, or access to developer-home tooling.
 
 ### 3.3 Authority order

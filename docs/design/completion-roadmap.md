@@ -16,12 +16,17 @@ Phase 2 direction authority.
 This roadmap orders candidates; [Phase 2 delivery and readiness](phase-2-delivery.md)'s
 readiness gate remains the admission test for each one.
 
+Self-targeted dogfooding is suspended by direct human direction on 2026-07-31.
+The record-only self-target dogfood sequence below is historical planning input,
+not an active delivery plan; do not execute it until a future human direction
+defines a non-self-target product-validation path.
+
 ## Goal and boundary
 
 The original design requires an evidence-driven, human-invoked loop: later
 work receives current decisions and evidence; a failed review becomes a repair
-task; and the final result can be reconstructed from files. The first priority
-is to make that loop usable for a declared self-target dogfood run without
+task; and the final result can be reconstructed from files. Its original first
+priority was to make that loop usable for a declared self-target dogfood run without
 introducing automatic execution.
 
 The roadmap retains these boundaries throughout:
@@ -44,20 +49,26 @@ in [Phase 2A — Record-Only Lifecycle Dogfood](https://github.com/hjung3113/ope
 Before another runtime slice, establish one current-versus-planned authority
 map and resolve the contract gaps for a manual v2 lifecycle:
 
-- **DG-A (open):** approve a later human-invoked `/route` as the reconciler and
-  sole creator of a later first-attempt packet; `/start` and `/resume` remain
-  deferred. Approval requires amending the Reconciliation section of
-  `phase-2-v2-transitions.md`, which currently assigns reconciliation to
-  `/start` and `/resume`.
-- **DG-B:** choose either a finding-bound dynamic repair node or a predeclared
-  repair slot. A repair cannot overwrite history or consume retry budget.
+- **DG-A (approved 2026-07-31):** a later human-invoked `/route` is the
+  reconciler and sole creator of a later first-attempt packet; `/start` and
+  `/resume` remain deferred. Amend the Reconciliation section of
+  `phase-2-v2-transitions.md` accordingly.
+- **DG-B (approved 2026-07-31):** verifier findings create finding-bound
+  dynamic repair nodes. A repair preserves failed history, consumes no retry
+  budget, and never launches automatically.
 - define task kinds and authority, the sole producer of `not_applicable`,
   eligible manual claims and their schemas, decision/gate identity and
-  currency, self-target binding, terminal receipt reconstruction, and repair
+  currency, explicit non-self product-validation target binding, terminal
+  receipt reconstruction, and repair
   supersession/dependency/receipt effects.
 
 This is design and contract work only. It does not change the existing v1 or
 v2 runtime.
+
+The existing admission result for #18 is consumed by this step. Do not create a
+second readiness gate to subdivide #18 or reopen DG-A/DG-B; the next readiness
+gate is for #19 after #18's accepted design and documentation record is
+complete.
 
 ### 1. Co-land the record-only lifecycle and dogfood it
 
