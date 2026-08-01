@@ -15,11 +15,12 @@
   relative paths, paths inside the checkout, and developer-tool directories
   are invalid runtime-state roots. `.orchestrator/` is ignored only as a
   documented local fallback, never as the canonical shared location.
-- **Dogfooding** uses the product workflow to develop this repository, but
-  records each self-run in the external state root with an explicit self-target
-  and follows the same scope, decision-gate, evidence, and independent
-  verification rules. A dogfood run does not authorize automatic spawning,
-  publishing, credential use, or edits outside its declared task.
+- **Development/product separation:** do not use the product workflow to
+  develop this repository and do not create self-targeted dogfood runs. Develop
+  repository assets through the ordinary repository workflow; reserve external
+  run state for product validation against an explicitly declared non-self
+  target. A development task does not authorize automatic spawning, publishing,
+  credential use, or edits outside its declared task.
 
 ## Working rules
 
@@ -41,7 +42,7 @@
   `docs/architecture/system-map.md`, `docs/design/`, and relevant ADRs.
 - **Milestone or future-slice planning:** read `docs/design/delivery-phases.md`
   and `docs/design/phase-1-decisions.md`.
-- **Dogfooding or development environment:** read
+- **Development environment or product-run boundary:** read
   `docs/development-environment.md` and ADR-0001.
 - **Review:** read the same row as the changed surface plus originating issue
   acceptance criteria. Do not treat unrelated design history as scope.

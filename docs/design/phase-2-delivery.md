@@ -39,6 +39,13 @@ The gate records exactly one outcome:
 - `specification-required: <named blocking items>` when the gate identifies
   the missing decisions needed by that candidate.
 
+The gate is an admission check, not a recurring decomposition mechanism. Once
+it has admitted a selected issue or named its blocking decisions, later work
+must execute that result; it must not request another readiness gate merely to
+split the same accepted issue more finely or to reopen a direct human decision.
+The next gate is for a later candidate, or for the same candidate only after a
+named blocker has actually changed.
+
 For example, a nonparallel slice may mark resource admission not applicable
 only while its contract retains `max_concurrency: 1`. Receipt behavior is not
 applicable only when the candidate explicitly excludes terminal task acceptance

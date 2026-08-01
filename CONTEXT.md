@@ -1,7 +1,7 @@
 # OpenCode Orchestrated Agent Workflow
 
 This context defines the terms for the small, human-invoked workflow system
-and the boundary used while dogfooding it in this repository.
+and its boundary from the repository development environment.
 
 ## Language
 
@@ -16,14 +16,14 @@ product harness.
 _Avoid_: Product runtime, harness state
 
 **Run state**:
-Mutable, reconstructable artifacts for one harness or dogfood run, stored under
+Mutable, reconstructable artifacts for one product run, stored under
 the external `ORCHESTRATOR_RUN_STATE_DIR`.
 _Avoid_: Repository knowledge, source of truth
 
-**Dogfood run**:
-A declared run whose product target is this repository and whose artifacts are
-subject to the same gates and evidence requirements as any other run.
-_Avoid_: Untracked experiment, implicit self-test
+**Self-targeted dogfood run**:
+A historical practice in which a run named this repository as its product
+target. It is suspended: repository development must not create one.
+_Avoid_: Current development workflow, implicit self-test
 
 **Routing pass**:
 A human-invoked host operation that validates run artifacts, records run-level
@@ -57,16 +57,17 @@ _Avoid_: Execution state
 
 ## Accepted future direction
 
-**Phase 1 behavior (current)** remains the only implemented behavior: `/route`
-prepares one manual packet and never dispatches a worker.
+**Phase 1 behavior (current)**: schema-less `/route` prepares one manual
+packet and never dispatches a worker.
 
-**Phase 2 bounded orchestration (accepted, unimplemented)** is the direction
-recorded in ADR-0003. A later specification may define human-invoked `/start`
-and `/resume`, a version-2 run layout, bounded retry, and conflict-safe parallel
-admission. These terms do not describe current runtime behavior until matching
-contracts and implementation exist.
+**Phase 2 bounded orchestration** is the direction recorded in ADR-0003. The
+only shipped Phase 2 behavior is schema-version-2 `/route` preparation: it
+creates a prepared run, initial graph, event, and immutable attempt-one packets
+without dispatching work. Human-invoked reconciliation, `/start`, `/resume`,
+retry, verification, receipts, and parallel admission remain planned until
+their matching contracts and implementation co-land.
 
-## Version-2 vocabulary (accepted, unimplemented)
+## Version-2 vocabulary
 
 These terms apply only to schema-version-2 runs. They do not replace the
 Phase 1 terms above, which remain authoritative for version-1 runs.
@@ -102,3 +103,21 @@ _Avoid_: Error payload, transition rule
 The human statement at `gates/attempt-unresolved-<task-id>-<attempt>.md` about
 a prior unresolved v2 attempt.
 _Avoid_: Gate semantics, acceptance decision
+
+**Task kind**:
+An immutable later record-only v2 declaration of either `implementation` or
+`non_implementation`, determining whether independent verification is required
+before dependency satisfaction.
+_Avoid_: Worker-selected role, execution state
+
+**Record-only reconciliation**:
+A later human-invoked `/route` pass that records structurally valid manual
+claims and verifier facts without launching a worker, adapter, retry, or
+parallel admission.
+_Avoid_: `/start`, `/resume`, background polling
+
+**Finding-bound repair node**:
+A new blocked v2 task created from one recorded failed verifier finding. It
+retains the failed attempt, cites that finding, consumes no retry budget, and
+has no packet until a later human-invoked `/route` selects it.
+_Avoid_: Retry attempt, automatic repair, overwritten history

@@ -7,7 +7,7 @@ machine or container.
 | --- | --- | --- |
 | Product harness contracts and source | this checkout | repository |
 | Matt Pocock engineering skills | `/Users/hyojung/.codex/skills` | user development environment |
-| Mutable harness and dogfood runs | `$ORCHESTRATOR_RUN_STATE_DIR` outside this checkout | host/runtime |
+| Mutable product runs | `$ORCHESTRATOR_RUN_STATE_DIR` outside this checkout | host/runtime |
 | Local fallback state | `.orchestrator/` (ignored) | local only; not canonical |
 
 ## Bootstrap
@@ -25,10 +25,12 @@ Matt Pocock engineering skills are development aids only. They may guide work
 on this repository, but are not copied into packets, runtime prompts, receipts,
 or distributable product assets.
 
-## Dogfooding contract
+## Development and product-run contract
 
-Before applying the workflow to itself, create a named directory under
-`$ORCHESTRATOR_RUN_STATE_DIR/runs/` with `request.md`, `decisions.json`,
-`graph.json`, task evidence, and independent verification where applicable.
-Set the target to this checkout explicitly. A completed worker claim is not
-acceptance; the external run record must preserve the verifier's result.
+Do not apply the product workflow to this checkout and do not create a
+self-targeted dogfood run. Repository development uses the ordinary repository
+workflow and its versioned source, tests, and review evidence. Use
+`$ORCHESTRATOR_RUN_STATE_DIR/runs/` only for product validation against an
+explicit non-self target. A completed worker claim is not acceptance; when a
+product run uses external state, its record preserves the applicable verifier
+result.

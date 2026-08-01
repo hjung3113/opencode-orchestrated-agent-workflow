@@ -2,10 +2,11 @@
 
 ## Status and boundary
 
-This is accepted Phase 2 direction, recorded for reference and unimplemented.
-`docs/contracts/` continues to describe Phase 1 only. Phase 2 becomes
-observable only when a later matching contract, implementation, and public
-evidence co-land in one bounded slice; see
+This is accepted direction for later v2 lifecycle behavior and remains
+unimplemented. The shipped v2 `/route` preparation contract covers only
+prepared-run artifacts; it does not make the behavior below current. Phase 2
+becomes observable only when a later matching contract, implementation, and
+public evidence co-land in one bounded slice; see
 [delivery and readiness](phase-2-delivery.md).
 
 ## Artifact and ownership
@@ -17,9 +18,9 @@ sole writer of the separate resulting acceptance fact.
 
 ## Accepted recording facts
 
-Acceptance is a host-recorded fact separate from execution state. On either
-human-invoked `/start` or `/resume`, after `result-observed` reconciliation,
-the host records a structurally valid verifier verdict in its own atomic
+Acceptance is a host-recorded fact separate from execution state. On a later
+human-invoked `/route`, after `result-observed` reconciliation, the host
+records a structurally valid verifier verdict in its own atomic
 `acceptance-recorded` change under the existing one-writer,
 atomic-replacement, single run-local lock invariant. Recording observes that
 verdict; the host does not judge criteria, evidence, or run commands.

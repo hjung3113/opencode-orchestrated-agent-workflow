@@ -2,10 +2,11 @@
 
 ## Status and boundary
 
-This is accepted Phase 2 direction, recorded for reference and unimplemented.
-`docs/contracts/` continues to describe Phase 1 only. Phase 2 becomes
-observable only when a later matching contract, implementation, and public
-evidence co-land in one bounded slice; see
+This is accepted direction for later v2 lifecycle behavior and remains
+unimplemented. The shipped v2 `/route` preparation contract covers only
+prepared-run artifacts; it does not make the behavior below current. Phase 2
+becomes observable only when a later matching contract, implementation, and
+public evidence co-land in one bounded slice; see
 [delivery and readiness](phase-2-delivery.md).
 
 ## Artifact facts and delta

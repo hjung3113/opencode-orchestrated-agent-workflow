@@ -2,36 +2,37 @@
 
 ## Status and boundary
 
-This is accepted Phase 2 direction, recorded for reference and unimplemented.
-`docs/contracts/` continues to describe Phase 1 only. Phase 2 becomes
-observable only when a later matching contract, implementation, and public
-evidence co-land in one bounded slice; see
+This is accepted Phase 2 direction and ownership vocabulary. The prepared-run
+portion is current through the [v2 `/route` preparation contract](../contracts/phase-2-v2-route-preparation.md):
+the host writes `run.json`, revision-one `graph.json`, `events/1.json`, and
+initially admissible attempt-one packets. The remaining rows stay planned.
+Phase 2 behavior becomes observable only when its matching contract,
+implementation, and public evidence co-land in one bounded slice; see
 [delivery and readiness](phase-2-delivery.md).
 
-This record names v2 artifacts and ownership; it defines no behavior. The
-current Phase 1 runtime, vocabulary, contracts, workflows, and artifacts stay
-unchanged.
+This record names v2 artifacts and ownership; it defines no additional
+behavior. The existing Phase 1 runtime, vocabulary, workflows, and artifacts
+stay unchanged.
 
 ## Accepted v2 artifacts
 
-Every row has status: **Phase 2 accepted, unimplemented**.
-
-| Artifact | Path | Sole writer | Primary consumer | Authority |
-| --- | --- | --- | --- | --- |
-| v2 run declaration | `run.json` | Host orchestrator | Host and readers | Compatibility record for one schema-version-2 run |
-| Event record | `events/<sequence>.json` | Host orchestrator | Host and readers | Ordered run fact |
-| Graph summary | `graph.json` | Host orchestrator | Host and readers | Recorded task and attempt summary |
-| Attempt | `tasks/<id>/attempts/<n>/` | Host packet; selected worker `result.md` and `evidence-claim.json` | Host and selected worker | Immutable task-local packet and claims directory |
-| Typed block | `blocks/<task-id>.json` | Host orchestrator | Host and readers | Named observed-condition record |
-| Unresolved-attempt attestation | `gates/attempt-unresolved-<task-id>-<attempt>.md` | Host creates; human fills answer slot | Host | Human statement about a prior unresolved attempt |
-| Decision record | Gate-record naming remains deferred | Host orchestrator | Host and readers | Recorded decision provenance for one schema-version-2 run ([decision provenance](phase-2-v2-decisions.md); [decision currency](phase-2-v2-decision-currency.md)) |
-| Verification result | Per attempt under `tasks/<id>/attempts/<n>/` | Independent verifier | Host | Verification verdict for one attempt ([verification](phase-2-v2-verification.md)) |
+| Artifact | Path | Sole writer | Primary consumer | Authority | Delivery status |
+| --- | --- | --- | --- | --- | --- |
+| v2 run declaration | `run.json` | Host orchestrator | Host and readers | Compatibility record for one schema-version-2 run | Current prepared-run record |
+| Event record | `events/<sequence>.json` | Host orchestrator | Host and readers | Ordered run fact | Current only for preparation event 1 |
+| Graph summary | `graph.json` | Host orchestrator | Host and readers | Recorded task and attempt summary | Current only at revision 1 / `prepared` |
+| Attempt | `tasks/<id>/attempts/<n>/` | Host packet; selected worker `result.md` and `evidence-claim.json` | Host and selected worker | Immutable task-local packet and claims directory | Current only for initially admissible attempt-one packets |
+| Typed block | `blocks/<task-id>.json` | Host orchestrator | Host and readers | Named observed-condition record | Planned |
+| Unresolved-attempt attestation | `gates/attempt-unresolved-<task-id>-<attempt>.md` | Host creates; human fills answer slot | Host | Human statement about a prior unresolved attempt | Planned |
+| Decision record | Gate-record naming remains deferred | Host orchestrator | Host and readers | Recorded decision provenance for one schema-version-2 run ([decision provenance](phase-2-v2-decisions.md); [decision currency](phase-2-v2-decision-currency.md)) | Planned |
+| Verification result | Per attempt under `tasks/<id>/attempts/<n>/` | Independent verifier | Host | Verification verdict for one attempt ([verification](phase-2-v2-verification.md)) | Planned |
+| Final receipt | `final-receipt.json` | Host orchestrator | Maintainer | Immutable summary of recorded terminal graph facts | Planned |
 
 An independent verifier owns only its verification result. This statement
 records ownership only; verifier behavior remains a later slice.
 
-The receipt row remains absent and deferred: no accepted receipt content,
-trigger, or v2 run-terminal condition exists.
+The record-only lifecycle decision gives the planned receipt its terminal
+predicate and copy-only boundary; it does not make receipt writing current.
 
 ## Baseline invariants
 

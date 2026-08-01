@@ -2,10 +2,11 @@
 
 ## Status and boundary
 
-This is accepted Phase 2 direction, recorded for reference and unimplemented.
-`docs/contracts/` continues to describe Phase 1 only. Phase 2 becomes
-observable only when a later matching contract, implementation, and public
-evidence co-land in one bounded slice; see
+This is accepted direction for later v2 lifecycle behavior and remains
+unimplemented. The shipped v2 `/route` preparation contract covers only
+prepared-run artifacts; it does not make the behavior below current. Phase 2
+becomes observable only when a later matching contract, implementation, and
+public evidence co-land in one bounded slice; see
 [delivery and readiness](phase-2-delivery.md).
 
 ## Artifact and ownership
@@ -30,9 +31,9 @@ automatic admission, promotion, dispatch, packet, retry or repair task,
 receipt, or increase above `max_concurrency: 1`. The host does not choose
 product direction when it creates a decision-conflict gate.
 
-`/route` consumes decision references and `/start` requires current required
-decisions as already stated in the transition baseline. What makes a decision
-current remains deferred.
+The later record-only `/route` consumes required decision references before it
+reconciles or creates a later first-attempt packet. What makes a decision
+current is defined by the decision-currency record.
 
 ## Version relation and baseline gap
 
@@ -40,9 +41,10 @@ Version-1 runs retain the Phase-1 `decisions.json` form and `/route`
 answer-ingestion behavior, are never migrated in place, and this v2 statement
 is additive.
 
-The v2 baseline artifact table has no decision-record row, alongside its
-standing verifier and receipt row gap. A later authorized baseline-touching
-slice owns that row; this record leaves the baseline byte-identical.
+The v2 baseline decision-record row is planned and its gate-record naming
+remains deferred. Its verifier and receipt rows are also planned; the
+record-only lifecycle decision defines only the receipt terminal predicate. A
+later authorized baseline-touching slice owns their artifact shapes.
 
 ## Provenance
 
