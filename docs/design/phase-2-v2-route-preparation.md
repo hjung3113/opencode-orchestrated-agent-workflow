@@ -2,10 +2,11 @@
 
 ## Status and boundary
 
-This record is the bounded specification input selected by the v2 `/route`
-preparation readiness result. It is not a product contract or implementation.
-The behavior becomes observable only when a later bounded slice co-lands its
-matching contract, implementation, and public evidence.
+This record was the bounded specification input selected by the v2 `/route`
+preparation readiness result. The resulting behavior is now current through
+the [v2 `/route` preparation contract](../contracts/phase-2-v2-route-preparation.md)
+and `test/v2-route.test.js`. It changes neither the schema-less Phase 1 path
+nor any later v2 lifecycle behavior.
 
 The public discriminator is the presence of `schema_version`: an input with
 no such field follows the existing Phase-1 manifest and `/route` path
@@ -49,9 +50,10 @@ lock and atomic-replacement invariant to write `run.json`, `graph.json`, and
 admissible task. The graph marks the run `prepared`, every task `blocked`,
 and every acceptance state `pending`. Every immutable packet is bound to the
 declaration and initial graph revision and renders the task's declared bounded
-facts, decision references, retry budget, run id, and attempt number. Only
-`/start` may later move an admitted prepared task from `blocked` to
-`queued`.
+facts, decision references, retry budget, run id, and attempt number. No
+current operation moves a prepared task from `blocked`. The later record-only
+lifecycle assigns reconciliation and later first-packet creation to `/route`;
+`/start` remains deferred.
 
 Declaration equality is byte-independent canonical JSON equality: recursively
 sort object keys, retain array order, serialize without insignificant
@@ -84,10 +86,10 @@ The later product contract owns exact numeric exit codes and operator-facing
 text. Its public tests must observe each refusal family, JSON channel,
 non-zero outcome, and mutation boundary at the CLI seam.
 
-## Co-landing implementation plan
+## Delivered co-landing record
 
-After a fresh independent review returns `implementation-ready`, one bounded
-delivery slice must co-land:
+After the independent readiness review returned `implementation-ready`, one
+bounded delivery slice co-landed:
 
 1. A v2 `/route` contract freezing this declaration, prepared artifacts,
    repeatability rule, output, and refusal families.
@@ -98,15 +100,16 @@ delivery slice must co-land:
    initially admissible tasks, and absence of dispatch, claims, retries,
    verification, receipts, and later-attempt packets.
 
-The co-landing fixture retains `max_concurrency: 1`. It must not use parallel
-admission as evidence. The delivery slice may include only its v2 contract,
+The co-landing fixture retains `max_concurrency: 1` and does not use parallel
+admission as evidence. The delivered slice contains only its v2 contract,
 source/CLI integration, focused fixtures and tests, and minimal supporting
 documentation.
 
 ## Explicit deferrals
 
-This record adds no contract, source, test, runtime state, or Phase-1 behavior.
-It does not define `/start` or `/resume`, decision currency, adapter
-execution, typed-block payloads, gates, retry-packet deltas, verification,
-receipt reconstruction, resource admission above one, filesystem recovery, or
-version-1 migration.
+At its original design-input point, this record added no contract, source,
+test, runtime state, or Phase-1 behavior. Its bounded `/route` behavior is now
+delivered; it still does not define `/start` or `/resume`, decision currency,
+adapter execution, typed-block payloads, gates, retry-packet deltas,
+verification, receipt reconstruction, resource admission above one,
+filesystem recovery, or version-1 migration.

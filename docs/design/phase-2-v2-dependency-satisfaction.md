@@ -2,21 +2,23 @@
 
 ## Status and boundary
 
-This is accepted Phase 2 direction, recorded for reference and unimplemented.
-`docs/contracts/` continues to describe Phase 1 only. Phase 2 becomes
-observable only when a later matching contract, implementation, and public
-evidence co-land in one bounded slice; see
+This is accepted direction for later v2 lifecycle behavior and remains
+unimplemented. The shipped v2 `/route` preparation contract covers only
+prepared-run artifacts; it does not make the behavior below current. Phase 2
+becomes observable only when a later matching contract, implementation, and
+public evidence co-land in one bounded slice; see
 [delivery and readiness](phase-2-delivery.md).
 
-This record fills only the declared dependency condition that `/start` already
-checks. It adds no operation, artifact, interface, or runtime behavior.
+This record fills only the declared dependency condition that a later
+record-only `/route` checks. It adds no operation, artifact, interface, or
+runtime behavior.
 
 ## Accepted satisfaction facts
 
 A declared dependency condition is satisfied only by the depended-on task's
 host-recorded terminal facts. A worker claim, elapsed time, silence, or reviewer
-opinion does not satisfy it. This completes the `/start` precondition named in
-the [transition baseline](phase-2-v2-transitions.md).
+opinion does not satisfy it. This completes the later record-only `/route`
+precondition named in the [transition baseline](phase-2-v2-transitions.md).
 
 For an implementation task, satisfaction requires host-recorded execution
 state `succeeded` and host-recorded acceptance `passed`. The acceptance fact is
@@ -28,7 +30,8 @@ For a non-implementation task, no independent verifier is required merely for
 the task to be consumed. Satisfaction instead requires host-recorded execution
 state `succeeded` and the existing non-verifier acceptance value
 `not_applicable`. This is the Phase-1 authority-class precedent, carried
-forward without a task-kind field or verification requirement.
+forward through the immutable declaration-owned task kind without a verifier
+requirement.
 
 Neither a `failed` or `blocked` execution state, nor `dispatched`, acceptance
 `pending` or `failed`, an unresolved attempt, a typed block on the depended-on
@@ -37,8 +40,9 @@ satisfies a dependency.
 
 ## Admission block and operation boundary
 
-When a dependent task's declared dependency condition is false at `/start`
-admission, the host records the dependency-acceptance typed block. It has the
+When a dependent task's declared dependency condition is false at later
+record-only `/route` selection, the host records the dependency-acceptance
+typed block. It has the
 admission-block family, execution-state, and stop effect already authorized by
 the [typed-block catalog](phase-2-v2-blocks.md): the dependent is blocked and
 admission stops. This names no payload or lifecycle and does not duplicate the
