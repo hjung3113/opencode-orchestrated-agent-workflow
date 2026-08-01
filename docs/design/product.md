@@ -24,6 +24,10 @@ A completed run has:
 
 Prompt, graph, or packet generation alone is preparation, never completion.
 
+While a run is active, the same compact interface exposes durable status,
+whether material input is required, cancellation, and file-backed resume.
+These operations address run ids, not OpenCode conversation history.
+
 ## Authority
 
 The human owns intent and material product direction. The orchestrator owns
@@ -36,6 +40,18 @@ changes user intent, durable product direction, or an irreversible external
 effect. Readiness, formatting, and routine workflow transitions are not human
 gates.
 
+Models propose interpretations, plans, task packets, and verification
+judgments. A deterministic orchestration kernel alone admits proposals,
+grants capabilities, changes run state, and publishes authoritative runtime
+artifacts. Determinism governs admission and state mutation; it does not turn
+model judgment about design or correctness into mathematical proof.
+
+Effective authority is the intersection of mandatory product guarantees,
+explicit human authorization, repository policy, the accepted run policy,
+the task packet, and capabilities the runtime can actually enforce. A lower
+layer may narrow authority or request an explicit expansion, never silently
+widen it.
+
 ## Non-goals
 
 - A generic lifecycle or project-management platform.
@@ -44,3 +60,5 @@ gates.
 - Unbounded retries, blanket approval gates, or speculative safety/control
   layers.
 - Treating a worker's self-report as verification.
+- Treating model output, OpenCode session state, or schema conformance alone as
+  authority to execute or accept work.
