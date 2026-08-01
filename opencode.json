@@ -2,8 +2,5 @@
   "$schema": "https://opencode.ai/config.json",
   "instructions": [
     "./third_party/llm-wiki/plugins/llm-wiki-opencode/skills/wiki-query/SKILL.md"
-  ],
-  "plugin": [
-    "@dietrichgebert/ponytail"
   ]
 }

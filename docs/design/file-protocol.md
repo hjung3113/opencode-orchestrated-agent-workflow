@@ -1,47 +1,60 @@
-## 7. File protocol
+# File protocol
 
-### 7.1 Run layout
+Files are the complete inter-agent protocol. They provide the durable evidence
+needed to resume, review, and replan without private chat history.
 
-```text
-$ORCHESTRATOR_RUN_STATE_DIR/runs/<run-id>/
+## Ownership
+
+Repository knowledge is versioned:
+
+~~~text
+AGENTS.md
+docs/design/
+decisions/
+~~~
+
+Run state is mutable and lives outside the checkout:
+
+~~~text
+runs/<run-id>/
   request.md
-  decisions.json
+  decisions.md
   graph.json
-  gates/<gate-id>.md
   tasks/<task-id>/
     packet.md
     result.md
-    evidence-claim.json
-    verification.json       # implementation tasks only
-  final-receipt.json
-```
+    evidence.json
+    review.md
+  receipt.md
+~~~
 
-`result.md` and `evidence-claim.json` are task claims. A routing pass records
-execution and acceptance state after checking the applicable contract; an
-implementation task needs independent `verification.json` before acceptance.
-Schemas stay small and machine-checkable. A missing required artifact prevents
-the task from being routed as complete.
+The exact state root is configuration, never a developer-home path embedded in
+product logic.
 
-The task entry in `graph.json` is the host-owned location for
-`execution_state` and `acceptance_state`; workers do not write either field.
+## Minimum artifacts
 
-### 7.2 Slice A0 route contract
+- Request: objective, scope, exclusions, ambiguity classification, and
+  recorded assumptions.
+- Decision: id, status, rationale, scope, and authoritative source.
+- Packet: objective, allowed/forbidden paths, acceptance criteria, accepted
+  decisions, selected evidence, skill composition, deliverables, and
+  escalation condition.
+- Graph: task ids, dependencies, read/write paths, workflow, and terminal
+  state.
+- Result and evidence: changed outputs, commands or observations, and
+  provenance for each claim.
+- Review: verifier verdict, contract evaluated, supporting evidence, and
+  focused findings.
+- Receipt: input and artifact references, decisions used, graph, agent and
+  skill identities, verification outcome, final status, and limitations.
 
-Slice A0 takes a validated, structured intake manifest as input. It does not
-infer ambiguity or call a model: an intake adapter is a later Slice-A concern.
-The manifest contains the human request, objective, scope, allowed paths,
-forbidden paths, non-goals, exclusions, safe assumptions, and one declared
-ambiguity classification.
+## Provenance and replay
 
-For `clarification-required`, `/route` creates `request.md`, an empty
-`decisions.json`, a revision-one blocked `graph.json`, and exactly one gate;
-then it stops without selecting a task or rendering a packet. Re-running the
-unchanged manifest is idempotent: it creates no second gate and does not change
-the graph revision.
+Every artifact references the task and inputs that produced it. llm-wiki
+retrieval results reference these artifacts; they cannot become a second source
+of truth. The orchestrator can reconstruct a run by reading the receipt,
+following graph edges, and loading referenced files.
 
-After a recorded gate answer, `/route` records its decision provenance,
-selects at most one `pending` task, and renders that task's immutable packet.
-It prints the manual worker handoff but never launches a process. The A0 test
-fixtures must cover: blocked ambiguous input, idempotent re-route, answered
-gate, executable input, absent required artifact, and the absence of worker
-processes or `result.md` files.
+Artifacts are intentionally small. A new schema field is justified only when
+an end-to-end failure shows that the existing packet cannot select, execute, or
+verify the next task correctly.

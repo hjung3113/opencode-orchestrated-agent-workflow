@@ -1,74 +1,63 @@
 # Repository rules
 
-## Development environment and product harness boundary
+## Product purpose
 
-- **Product assets** are the versioned workflow contracts, source, tests, and
-  repository-owned skills under this checkout. Do not treat a developer tool as
-  a product asset or make product behaviour depend on a developer-home path.
-- **Development environment** is user-owned tooling outside this checkout,
-  including `/Users/hyojung/.codex/skills` and `/Users/hyojung/.agents`.
-  Matt Pocock skills belong there. Do not copy, vendor, hash, emit, or install
-  them as runtime inputs unless a future product requirement explicitly adopts
-  one as a repository-owned product skill.
-- **Harness runtime state** is mutable run data, not repository knowledge. It
-  must use an absolute `ORCHESTRATOR_RUN_STATE_DIR` outside this checkout;
-  relative paths, paths inside the checkout, and developer-tool directories
-  are invalid runtime-state roots. `.orchestrator/` is ignored only as a
-  documented local fallback, never as the canonical shared location.
-- **Development/product separation:** do not use the product workflow to
-  develop this repository and do not create self-targeted dogfood runs. Develop
-  repository assets through the ordinary repository workflow; reserve external
-  run state for product validation against an explicitly declared non-self
-  target. A development task does not authorize automatic spawning, publishing,
-  credential use, or edits outside its declared task.
+Build an orchestrated agent system that turns one human request into a
+verified, maintainable project result.
 
-## Working rules
+The orchestrator interprets the request with meta-prompting and repository
+knowledge, compiles context, selects and composes workflows and skills,
+decomposes work into a dependency-aware graph, dispatches agents, and replans
+from their artifacts. Research, design, specification, ticketing,
+implementation, verification, repair, and maintenance are distinct workflows,
+not one long prompt.
 
-- Read `CONTEXT.md`, accepted ADRs, and the named issue or specification before
-  changing product behaviour. Then read the task-matched documents below;
-  `docs/design/` is rationale and roadmap, while contracts and ADRs govern
-  current behavior.
-- Root `HANDOFF.md` is the only continuation handoff for this checkout; do not
-  create a parallel handoff. An absent future design document is not a defect
-  unless the active issue explicitly requires it.
-- **Routing, gates, graph, run-state, or artifact ownership:** read
-  `docs/contracts/phase-1-artifacts.md`, the applicable slice contract,
-  `docs/workflows/README.md`, and ADR-0001/0002.
-- **Workflow role or handoff:** read `docs/workflows/README.md`, the affected
-  artifact contract, and the lifecycle/design section for the active phase.
-- **Packet, scope, evidence, or acceptance:** read the task-packet contract,
-  artifact ownership contract, and the named specification.
-- **Architecture or durable product direction:** read
-  `docs/architecture/system-map.md`, `docs/design/`, and relevant ADRs.
-- **Milestone or future-slice planning:** read `docs/design/delivery-phases.md`
-  and `docs/design/phase-1-decisions.md`.
-- **Development environment or product-run boundary:** read
-  `docs/development-environment.md` and ADR-0001.
-- **Review:** read the same row as the changed surface plus originating issue
-  acceptance criteria. Do not treat unrelated design history as scope.
-- Treat the named issue's acceptance criteria as the implementation ceiling.
-  Do not add tamper resistance, recovery, validation, or lifecycle hardening
-  for malformed or externally modified run state unless that behaviour is
-  explicitly required by the issue or an accepted design decision. In review,
-  distinguish a normal-flow acceptance gap from optional hardening; defer the
-  latter rather than expanding the slice.
-- Preserve unrelated changes and third-party submodules. Do not modify
-  `third_party/llm-wiki` without an explicit gitlink update decision.
-- Keep the Phase-1 boundary: `/route` prepares artifacts and prompts; it does
-  not automatically launch workers or grow a lifecycle/control plane.
+Preparation of prompts, packets, manifests, or graphs without executing the
+selected workflow is not completed orchestration. Success is independently
+verified completion through one compact human interface, with a control plane
+smaller than a general-purpose workflow platform.
 
-## Agent skills
+## Product operating model
 
-### Issue tracker
+1. Intake turns the human request into a faithful request contract: objective,
+   scope, exclusions, ambiguity, and safe assumptions.
+2. The orchestrator compiles the smallest sufficient context packet from
+   accepted decisions, evidence, open questions, and relevant failure history.
+3. It selects a workflow and its explicit skill composition, creates the
+   smallest useful graph, dispatches compatible tasks, and serializes
+   overlapping writes.
+4. An independent verifier evaluates evidence against the relevant contract.
+5. Results and findings re-enter the loop as focused research, bounded repair,
+   a material decision request, or completion.
 
-Issues live in this repository's GitHub Issues. See
-`docs/agents/issue-tracker.md`.
+## Core rules
 
-### Triage labels
-
-Use the five default canonical labels. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This is a single-context repository: use root `CONTEXT.md` and `docs/adr/`.
-See `docs/agents/domain.md`.
+- The normal input is a human request, never a caller-authored graph, manifest,
+  or manual handoff sequence.
+- The orchestrator owns intake, context compilation, workflow and skill
+  selection, task decomposition, graph planning, dispatch, scheduling,
+  replanning, repair routing, and completion.
+- Files are the authoritative inter-agent protocol. Requests, decisions,
+  packets, graph edges, results, evidence, reviews, repairs, and receipts are
+  inspectable and replayable; private chat is never workflow state.
+- llm-wiki is the repository knowledge and context-retrieval layer. It
+  retrieves relevant decisions, evidence, questions, and failure history for a
+  packet, and every retrieved claim cites its authoritative file artifact.
+- Skills are explicit, composable workflow building blocks. The selected
+  workflow, skills, constraints, and versions are visible in the packet or
+  receipt. Product behaviour must not depend on undeclared developer-home
+  paths.
+- The orchestrator routes from accepted decisions and evidence; it must not
+  silently invent material product direction or claim verification it did not
+  observe.
+- Continue automatically through reversible work. Ask a human only when
+  missing authority or ambiguity would materially change user intent, durable
+  product direction, or an irreversible external effect.
+- A worker result is a claim. Only evidence and independent verification close
+  implementation work. Failure becomes focused research, bounded repair, or a
+  concise material decision request, never an endless retry or informal manual
+  loop.
+- Versioned repository knowledge and mutable run state stay separate. Keep
+  packets relevant, graphs no larger than the current work requires, and add
+  artifacts, gates, schemas, or control-plane machinery only after a
+  demonstrated end-to-end need.
