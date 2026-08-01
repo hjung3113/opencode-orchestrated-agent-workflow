@@ -37,8 +37,8 @@ next task.
 
 A workflow specifies the kind of work, required inputs and outputs, and
 verification expectation. Skill adapters name the concrete skills used for
-that workflow, including Matt Pocock skills. They are explicit packet inputs,
-not implicit developer-tool state.
+that workflow. They are explicit packet inputs, not implicit developer-tool
+state.
 
 ### Graph compiler and executor
 

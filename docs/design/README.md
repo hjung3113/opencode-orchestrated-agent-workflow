@@ -1,9 +1,8 @@
-# Design baseline
+# Product design
 
-These documents define the restart baseline. They are derived from the
-earliest proposal at commit 75b0673 and from the explicit decision that the
-product dispatches selected agents rather than only preparing prompts for a
-human.
+These documents define the product's purpose, observable behaviour, authority,
+workflows, and durable protocol. They do not prescribe an implementation
+sequence or delivery roadmap.
 
 Read in this order:
 
@@ -11,8 +10,6 @@ Read in this order:
 2. [architecture.md](architecture.md) — the one-request-to-receipt system.
 3. [workflows.md](workflows.md) — workflow selection, dispatch, and replan.
 4. [file-protocol.md](file-protocol.md) — durable, replayable handoffs.
-5. [delivery-plan.md](delivery-plan.md) — the smallest proof sequence.
 
-AGENTS.md is the concise repository-wide rule set. These files hold the design
-detail; no other design, contract, workflow, or ADR document exists until a
-demonstrated need requires one.
+Historical implementation roadmaps are retained under
+[`docs/archive/`](../archive/) and are not product-design authority.

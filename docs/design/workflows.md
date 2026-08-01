@@ -16,6 +16,9 @@ conditions; workflow order is not a fixed user-operated checklist.
 | Repair | Verification finding | Narrow correction and new evidence | Diagnosis and implementation |
 | Maintenance | Evidence of drift or debt | Bounded candidate or repair task | Inspection and review |
 
+Maintenance is not a bypass: any candidate it produces re-enters the same
+intake, task, and independent-verification loop before it can be delivered.
+
 ## Selection and dispatch
 
 1. Load the request, accepted and proposed decisions, completed artifacts,

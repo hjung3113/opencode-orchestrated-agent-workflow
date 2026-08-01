@@ -32,6 +32,10 @@ smaller than a general-purpose workflow platform.
 
 ## Core rules
 
+- Treat a user's proposal as an input to evaluate against repository evidence,
+  stated product direction, constraints, and alternatives. Do not agree by
+  default; identify a material conflict or risk plainly and recommend the
+  evidence-supported course.
 - The normal input is a human request, never a caller-authored graph, manifest,
   or manual handoff sequence.
 - The orchestrator owns intake, context compilation, workflow and skill

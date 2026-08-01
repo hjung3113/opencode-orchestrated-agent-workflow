@@ -55,6 +55,4 @@ retrieval results reference these artifacts; they cannot become a second source
 of truth. The orchestrator can reconstruct a run by reading the receipt,
 following graph edges, and loading referenced files.
 
-Artifacts are intentionally small. A new schema field is justified only when
-an end-to-end failure shows that the existing packet cannot select, execute, or
-verify the next task correctly.
+Artifacts are intentionally small.

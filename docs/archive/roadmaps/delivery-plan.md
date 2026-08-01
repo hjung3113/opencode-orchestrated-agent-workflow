@@ -1,4 +1,9 @@
-# Delivery plan
+# Archived delivery plan
+
+> Historical implementation roadmap. This document is retained for context,
+> not as product-design authority or a required implementation sequence.
+
+## Original document
 
 Build only vertical slices that prove the user-visible product loop. Do not
 first build a generic state machine, lifecycle service, gate system, or

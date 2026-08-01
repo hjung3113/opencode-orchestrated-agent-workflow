@@ -8,6 +8,6 @@ The design baseline is in [docs/design](docs/design/README.md). The earliest
 proposal remains available in Git at commit 75b0673; the current design resolves
 its former dispatch question in favour of real agent dispatch.
 
-There is intentionally no implementation yet. The first implementation must
-prove one natural-language request through dispatch and independent
-verification; manual packet preparation is not a product slice.
+There is intentionally no implementation yet. The product requires real agent
+dispatch and independent verification; manual packet preparation alone is not
+a product result.
