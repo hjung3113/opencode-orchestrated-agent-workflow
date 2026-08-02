@@ -32,14 +32,16 @@ Results and findings belong to their task artifacts.
 
 `requires` is the only v1 edge. A node is ready when every required task has
 published its authoritative workflow artifact. The consuming packet references
-the exact artifact and digest it needs. Acceptance of a delivery result is a
+the exact artifact and digest it needs. Acceptance of a result is a
 separate review relation, not an implicit requirement-edge condition. Fan-out
 and fan-in require no additional edge type.
 
 Other relationships remain artifact references:
 
-- a verifier packet identifies its target task and output snapshot;
-- a repair packet identifies its finding;
+- a verification packet identifies the authoritative result artifact for its
+  target task and the exact output snapshot;
+- a repair packet identifies the containing review, the immutable finding
+  within it, and the output snapshot on which the finding was made;
 - a consuming packet identifies its input artifacts;
 - a revision record identifies artifacts invalidated by new evidence.
 
@@ -80,13 +82,14 @@ planned -> dispatched -> running -> artifacts_published
 ~~~
 
 `artifacts_published` and every state on the second line are terminal for that
-execution. Readiness is derived, not persisted. Delivery acceptance and the
+execution. Readiness is derived, not persisted. Result acceptance and the
 need for repair are derived evaluations of admitted review artifacts, not
 states recursively applied to verifier nodes. A verifier that publishes a
 finding completed its verification workflow while preventing receipt creation.
 
-A repair is a new task and normally a new graph revision. It links to one
-immutable finding and produces a new output snapshot. Run completion requires
+A repair is a new worker-role task with workflow `repair` and normally a new
+graph revision. It links to one immutable finding and produces a new output
+snapshot. Run completion requires
 an admitted verifier pass over the current unchanged output snapshot and every
 receipt-required exit condition.
 

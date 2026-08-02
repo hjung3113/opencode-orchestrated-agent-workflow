@@ -18,13 +18,16 @@ schema and exact digests.
 4. Graph revision 2 adds verifier `t2`, requiring `t1` and targeting `S1`.
    Fresh verifier session `s2` publishes finding `F1`. The kernel admits the
    review but refuses completion.
-5. Graph revision 3 adds repair `t3` linked to `F1`. Fresh session `s3`
-   produces `S2`; the original result and review remain immutable.
+5. Graph revision 3 adds worker-role repair task `t3`, whose packet identifies
+   the containing review, `F1`, and `S1`. Fresh session `s3` produces `S2`; the
+   original result and review remain immutable.
 6. Graph revision 4 adds verifier `t4`. Its distinct session reviews `S2` and
    proposes pass. The kernel confirms `S2` is still current, atomically updates
    the harness-owned result ref to the verified tree by compare-and-swap, and commits a
    receipt. The receipt identifies every graph revision, packet, OpenCode
-   session, result, review, promotion, effective policy, and limitation.
+   session, result, review, promotion, effective policy, limitation, and exact
+   result ref. The operator reports a Verified Result and makes no claim that
+   the user's branch, pull request, deployment, or working tree was updated.
 
 This trace proves real dispatch, independent verification, finding-bound
 repair, protected user changes, immutable history, and current-snapshot
@@ -48,7 +51,10 @@ The following observations must not become successful receipts:
 ## Inspect-only contrast
 
 For the same repository, an `inspect@1` run may use research and design
-workflows but receives no local-write capability and creates no implementation
-node. Its outcome cites observed facts and limitations. Calling that result a
-delivered code change or skipping its declared evidence requirements is a
-protocol violation, not a preset override.
+workflows but receives only repository-read capability and creates no
+implementation node. A separate verifier reviews the cited result artifact;
+an admitted pass is required before the receipt cites the observed facts and
+limitations. No promotion or Git result ref is created. Calling that result a
+Applied Result, admitting network access, or skipping the existing
+independent verification requirement is a protocol violation, not a preset
+override.

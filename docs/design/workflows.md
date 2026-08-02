@@ -19,16 +19,17 @@ graph is the only representation of actual work order.
 | --- | --- | --- | --- |
 | Intake | Human request | Request contract, ambiguities, assumptions, routing recommendation | Meta-prompt framing |
 | Research | Bounded question and context packet | Cited facts, limitations, unknowns | Research and documentation analysis |
-| Design | Request, research, accepted decisions | Options, recommendation, proposed decisions | Design and ADR analysis |
-| Specification | Accepted direction | Testable contract and acceptance criteria | Specification authoring |
+| Design | Request, research, determined direction | Options, recommendation, proposed Material Decisions | Design and ADR analysis |
+| Specification | Determined direction | Testable contract and acceptance criteria | Specification authoring |
 | Ticketing | Contract and context | Small dependency-aware graph | Planning and graph compilation |
-| Implementation | One approved task packet | Scoped changes, result, evidence | TDD and implementation |
+| Implementation | One admitted task packet | Scoped changes, result, evidence | TDD and implementation |
 | Verification | Contract, changes, evidence | Pass, findings, or block | Independent review |
 | Repair | Verification finding | Narrow correction and new evidence | Diagnosis and implementation |
 | Maintenance | Evidence of drift or debt | Bounded candidate or repair task | Inspection and review |
 
 Maintenance is not a bypass: any candidate it produces re-enters the same
-intake, task, and independent-verification loop before it can be delivered.
+intake, task, and independent-verification loop before it can contribute to a
+receipt.
 
 ## Baseline presets
 
@@ -37,8 +38,8 @@ completion envelopes.
 
 | Preset | Default capability | Completion |
 | --- | --- | --- |
-| `inspect@1` | Repository read and admitted external reads; no local writes | Cited result with limitations; no delivery claim |
-| `local-change@1` | Repository read, isolated declared local writes, admitted commands; no external mutation | Current output snapshot independently verified and receipted |
+| `inspect@1` | Repository read; no local writes or network | Independently verified cited result with limitations; no application claim |
+| `local-change@1` | Repository read, isolated declared local writes, admitted commands; no external mutation | Verified Result preserved under harness control and receipted; no application claim |
 
 Bug fixing, feature development, refactoring, CI diagnosis, and documentation
 work are routing signals, not separate presets until observed traces require a
@@ -56,10 +57,11 @@ material-decision rule.
 
 ## Selection and dispatch
 
-1. Load the request, accepted and proposed decisions, completed artifacts,
-   verifier findings, and unresolved questions.
-2. Check whether a material decision is genuinely required. If not, choose the
-   smallest workflow that reduces the current uncertainty or advances delivery.
+1. Load the request, accepted and proposed Material Decisions, completed
+   artifacts, verifier findings, and unresolved questions.
+2. Check whether a Material Decision is genuinely required. If not, choose the
+   smallest workflow that reduces the current uncertainty or advances the Run
+   toward a receipt.
 3. Compile a packet with only the relevant constraints and evidence.
 4. Select the workflow's skill composition and record it in the packet.
 5. Compile a task or compatible task set. Dependencies and overlapping writes
@@ -67,8 +69,8 @@ material-decision rule.
 6. Submit the proposed graph revision and packets to deterministic admission.
 7. Dispatch admitted tasks and wait for runtime observations and staged
    terminal artifacts.
-8. Admit valid artifacts, verify delivery work independently, then re-enter
-   selection.
+8. Admit valid artifacts, verify result-producing work independently, then
+   re-enter selection.
 
 ## Exit rules
 
@@ -76,12 +78,14 @@ material-decision rule.
   recorded assumptions.
 - Research exits when its evidence answers the bounded question or clearly
   states what remains unknown.
-- Design exits only with an accepted direction or a concise material decision
-  request.
+- Design exits when direction is determined by the admitted request, policy,
+  and evidence, or with a concise Material Decision request.
 - Implementation exits only to independent verification.
 - A verification finding exits to one focused repair task; a repeated
   same-cause failure exits to a typed block.
-- Completion requires a receipt, not an agent declaration.
+- Completion requires a receipt, not an agent declaration. For
+  `local-change@1`, the receipt exposes the Verified Result and must not claim
+  that it is an Applied Result.
 
 Runtime completion is distinct from workflow completion. An OpenCode session
 may become idle while the task remains blocked by missing artifacts, invalid

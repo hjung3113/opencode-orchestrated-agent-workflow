@@ -40,10 +40,11 @@ verification.
 
 ## Attempt and session binding
 
-Each planner, worker, verifier, and repair attempt receives a fresh OpenCode session.
+Each planner attempt, worker attempt (including a repair-workflow attempt), and
+verifier attempt receives a fresh OpenCode session.
 A retry is a successor attempt with a new session; a repair is a new task
-linked to a finding. The baseline never continues or forks a worker's chat to
-perform verification.
+with worker role and workflow `repair`, linked to a finding. The baseline never
+continues or forks a worker's chat to perform verification.
 
 Every binding records the session id and an `agent_identity` derived from the
 resolved role-specific agent configuration, excluding the session id. Review
@@ -73,6 +74,10 @@ repository OpenCode configuration in place. A missing pinned dependency, such
 as an uninitialized knowledge submodule, produces `dependency_unavailable` or
 an explicitly authorized setup action; retrieval is never claimed silently.
 
+Although `network` remains a protocol enum value for wire compatibility, no v1
+preset admits it. V1 inspect work uses repository reads only; support for
+declared external read targets is outside the baseline.
+
 ## Capabilities and side effects
 
 The kernel grants capabilities; the adapter translates them into the most
@@ -85,7 +90,7 @@ baseline capability classes are:
 | `local_write` | Modify only declared local resources. |
 | `command_execute` | Request an exact command from the kernel-owned command runner. |
 | `local_commit` | Create a local commit when explicitly included in the run policy. |
-| `network` | Reach declared external read targets. |
+| `network` | Reserved wire value; v1 admission rejects it. |
 | `external_mutation` | Push, mutate issues or PRs, deploy, migrate, or perform another durable external effect. |
 
 OpenCode permissions are only one enforcement layer. The v1 adapter denies
@@ -130,7 +135,10 @@ produces `target_snapshot_changed`; the kernel does not update the user's
 current branch or working tree. The delivered tree digest must equal the
 verified snapshot digest. A successful promotion records the ref, its old and
 new object ids, and the verified/delivered tree digest and is required for a
-`local-change@1` receipt. Non-Git targets support `inspect@1` only in v1.
+`local-change@1` receipt. This is a Verified Result, not an Applied Result;
+operator output must expose the result ref and must not imply branch, pull
+request, deployment, or working-tree application. Non-Git targets support
+`inspect@1` only in v1.
 
 Before the ref update, the kernel prepares the immutable promotion record. It
 then performs the ref compare-and-swap and commits the transition in
@@ -148,7 +156,7 @@ The compact operator interface is:
 run(human request) -> run id
 inspect(run id) -> durable state and active runtime binding
 cancel(run id) -> reconciled cancellation result
-resume(run id) -> next admitted action or terminal outcome
+resume(run id) -> next admitted action, resumable checkpoint, or terminal state
 ~~~
 
 `inspect` derives product state from validated run artifacts and augments it
@@ -163,7 +171,8 @@ policy-bounded successor attempt or repair without mutating its predecessor.
 ## Baseline limits
 
 The first vertical slice uses one active attempt, at most four execution
-attempts across worker, verifier, and repair roles, at most five planner
+attempts across worker attempts (including repair-workflow attempts) and
+verifier attempts, at most five planner
 attempts, at most four graph revisions, no automatic runtime retry, and at most
 one repair for a finding fingerprint. Every attempt has a configured deadline.
 Budget exhaustion produces a resumable typed block. Token and monetary usage

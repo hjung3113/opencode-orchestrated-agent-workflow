@@ -63,18 +63,27 @@ recorded repository snapshot, repository-relative path, and content digest.
 
 - Request: objective, scope, exclusions, ambiguities, recorded assumptions,
   target snapshot, and proposed preset.
-- Decision: status, rationale, authority source, scope, and any superseded
-  decision record. A status change is an immutable successor. Only a recorded
-  human event may accept a material decision; policy-authorized low-risk
-  assumptions remain request assumptions.
+- Decision: a Material Decision's status, rationale, authority source, scope,
+  and any superseded decision record. A status change is an immutable
+  successor. Only a recorded human event may accept a Material Decision;
+  policy-authorized local reversible choices remain request assumptions or
+  task rationale and never create routine approval gates. An accepted
+  decision's authority reference identifies the corresponding Material
+  Decision request or the explicit request contract that already supplied the
+  choice.
 - Graph: immutable revision, parent and trigger references, bounded nodes,
   `requires` dependencies, and scheduling resource sets. Execution state is
   not copied into graph files.
 - Packet: role, workflow, objective, acceptance criteria, allowed and forbidden
   resources, selected inputs, skills, capability envelope, deadline, and
   escalation condition. Commands are exact argv arrays with a
-  repository-relative working directory; shell strings are invalid. Verifier
-  and repair packets carry target or finding references.
+  repository-relative working directory; shell strings are invalid. A
+  verification packet has verifier role and carries `target_task_ref` and
+  `target_snapshot`; the compatibility-named `target_task_ref` resolves to the
+  target task's authoritative result artifact, whose task id the kernel checks.
+  A repair packet has worker role and carries `finding_ref`, `finding_id`, and
+  `target_snapshot`; `finding_ref` resolves to the containing review and
+  `finding_id` selects its immutable finding.
 - Runtime observation: adapter-observed OpenCode identity, events, complete
   workspace diff, canonical output snapshot, and exit reason for one attempt.
 - Result: worker claims, evidence with provenance, claimed output snapshot,
@@ -82,17 +91,39 @@ recorded repository snapshot, repository-relative path, and content digest.
 - Review: target task and exact output snapshot, verifier identity, verdict,
   evidence, focused findings, and its exact runtime-observation reference.
 - Promotion: verified isolated snapshot, harness-owned Git result ref, expected
-  and delivered ref object ids, and the equal delivered tree snapshot.
-- Outcome record: exactly one of receipt, material decision request, or typed block.
+  and promoted ref object ids, and the equal promoted tree snapshot. It
+  preserves a Verified Result; it does not represent application to a
+  user-designated target.
+- Outcome record: exactly one of receipt, Material Decision request, or typed block.
   A receipt links the accepted request, decisions, graph, tasks, runtime
   bindings, effective policy, current output snapshot, required promotion,
   verification, and known limitations. Resuming appends a new outcome record;
   it never overwrites an earlier request or block.
 
+A receipt moves the run to `completed`. A Material Decision request and typed
+block are resumable checkpoint records corresponding to
+`material_decision_required` and `blocked`; they are not terminal outcomes.
+Confirmed cancellation is recorded by the `run.json` status and transition log
+without another outcome-artifact kind.
+
 For `local-change@1`, the receipt must reference a promotion and repeat its
 verified and delivered tree digests. The kernel admits the receipt only when
 the review target, promotion's verified tree, promotion's delivered tree, and
 receipt snapshots are identical.
+
+At receipt admission, `accepted_snapshot` is the kernel-current canonical
+repository snapshot. For `inspect@1`, it equals the input target snapshot and
+the independently verified report is linked through artifact references. For
+`local-change@1`, `accepted_snapshot`, `verified_snapshot`, and
+`delivered_snapshot` are equal.
+
+The compatibility fields `delivered_ref_oid` and `delivered_snapshot` identify
+the object and tree digest stored at the harness-owned result ref.
+`applied_resources` identifies paths materialized in that result snapshot, not
+paths applied to a user-designated target. The receipt exposes the exact
+location through `promotion_ref` to `promotion.result_ref`. Product prose and
+operator output call the outcome a Verified Result to avoid implying an
+Applied Result.
 
 ## Ownership and publication
 

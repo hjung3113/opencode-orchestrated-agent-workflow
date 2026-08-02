@@ -274,8 +274,16 @@
             "authority_ref": { "$ref": "#/$defs/reference" },
             "supersedes": { "$ref": "#/$defs/reference" }
           },
-          "if": { "properties": { "status": { "const": "accepted" } } },
-          "then": { "properties": { "producer": { "$ref": "#/$defs/humanProducer" } } }
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "accepted" } } },
+              "then": { "properties": { "producer": { "$ref": "#/$defs/humanProducer" } } }
+            },
+            {
+              "if": { "properties": { "status": { "enum": ["superseded", "invalidated"] } } },
+              "then": { "required": ["supersedes"] }
+            }
+          ]
         }
       ],
       "unevaluatedProperties": false
@@ -329,8 +337,25 @@
             "escalation_condition": { "type": "string", "minLength": 1 },
             "target_task_ref": { "$ref": "#/$defs/reference" },
             "target_snapshot": { "$ref": "#/$defs/digest" },
-            "finding_ref": { "$ref": "#/$defs/reference" }
-          }
+            "finding_ref": { "$ref": "#/$defs/reference" },
+            "finding_id": { "$ref": "#/$defs/id" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "workflow": { "const": "verification" } } },
+              "then": {
+                "required": ["target_task_ref", "target_snapshot"],
+                "properties": { "role": { "const": "verifier" } }
+              }
+            },
+            {
+              "if": { "properties": { "workflow": { "const": "repair" } } },
+              "then": {
+                "required": ["finding_ref", "finding_id", "target_snapshot"],
+                "properties": { "role": { "const": "worker" } }
+              }
+            }
+          ]
         }
       ],
       "unevaluatedProperties": false
@@ -391,9 +416,19 @@
                 { "type": "null" }
               ]
             },
-            "delivered_ref_oid": { "$ref": "#/$defs/gitOid" },
-            "applied_resources": { "type": "array", "items": { "$ref": "#/$defs/resourcePath" } },
-            "delivered_snapshot": { "$ref": "#/$defs/digest" }
+            "delivered_ref_oid": {
+              "$ref": "#/$defs/gitOid",
+              "description": "Compatibility name for the object stored at the harness-owned result ref."
+            },
+            "applied_resources": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/resourcePath" },
+              "description": "Compatibility name for paths materialized in the result snapshot, not paths applied to a user target."
+            },
+            "delivered_snapshot": {
+              "$ref": "#/$defs/digest",
+              "description": "Compatibility name for the tree digest stored at the harness-owned result ref."
+            }
           }
         }
       ],
@@ -424,7 +459,16 @@
           "allOf": [
             {
               "if": { "properties": { "status": { "const": "receipt" } } },
-              "then": { "required": ["accepted_snapshot"] }
+              "then": {
+                "required": ["accepted_snapshot"],
+                "not": {
+                  "anyOf": [
+                    { "required": ["question"] },
+                    { "required": ["block_type"] },
+                    { "required": ["resume_condition"] }
+                  ]
+                }
+              }
             },
             {
               "if": {
@@ -438,11 +482,34 @@
             },
             {
               "if": { "properties": { "status": { "const": "material_decision_request" } } },
-              "then": { "required": ["question"] }
+              "then": {
+                "required": ["question"],
+                "not": {
+                  "anyOf": [
+                    { "required": ["block_type"] },
+                    { "required": ["resume_condition"] },
+                    { "required": ["accepted_snapshot"] },
+                    { "required": ["verified_snapshot"] },
+                    { "required": ["delivered_snapshot"] },
+                    { "required": ["promotion_ref"] }
+                  ]
+                }
+              }
             },
             {
               "if": { "properties": { "status": { "const": "block" } } },
-              "then": { "required": ["block_type", "resume_condition"] }
+              "then": {
+                "required": ["block_type", "resume_condition"],
+                "not": {
+                  "anyOf": [
+                    { "required": ["question"] },
+                    { "required": ["accepted_snapshot"] },
+                    { "required": ["verified_snapshot"] },
+                    { "required": ["delivered_snapshot"] },
+                    { "required": ["promotion_ref"] }
+                  ]
+                }
+              }
             }
           ]
         }
@@ -477,6 +544,7 @@
       }
     },
     "capability": {
+      "description": "The network value is reserved for wire compatibility and is rejected by every v1 preset.",
       "enum": ["repository_read", "local_write", "command_execute", "local_commit", "network", "external_mutation"]
     },
     "command": {

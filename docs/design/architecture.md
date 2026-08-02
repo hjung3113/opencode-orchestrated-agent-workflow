@@ -57,7 +57,8 @@ intersection, artifact publication, and output-snapshot consistency. Whether
 a design is good or evidence is persuasive remains a bounded planner or
 verifier judgment recorded with its evidence.
 
-For local-change runs, delivery has a second deterministic seam:
+For local-change runs, preserving the Verified Result has a second
+deterministic seam:
 
 ~~~text
 promote(verified snapshot, expected result ref)
@@ -66,9 +67,10 @@ promote(verified snapshot, expected result ref)
 
 Promotion writes the verified tree to a harness-owned Git result ref after a
 compare-and-swap check against that ref's recorded value. Git ref update is the
-single atomic delivery point; the delivered tree digest must equal the verified
-snapshot. The user's existing branch and dirty working tree remain untouched.
-Automatic application into that working tree is not part of v1.
+single atomic preservation point; the promoted tree digest must equal the
+verified snapshot. The user's existing branch and dirty working tree remain
+untouched. Promotion creates a Verified Result, not an Applied Result;
+automatic application to a user-designated target is not part of v1.
 
 ### Intake and context compiler
 
