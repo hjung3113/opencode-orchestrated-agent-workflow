@@ -338,7 +338,12 @@
             "target_task_ref": { "$ref": "#/$defs/reference" },
             "target_snapshot": { "$ref": "#/$defs/digest" },
             "finding_ref": { "$ref": "#/$defs/reference" },
-            "finding_id": { "$ref": "#/$defs/id" }
+            "finding_id": { "$ref": "#/$defs/id" },
+            "external_read_targets": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/externalReadTarget" }
+            }
           },
           "allOf": [
             {
@@ -353,6 +358,37 @@
               "then": {
                 "required": ["finding_ref", "finding_id", "target_snapshot"],
                 "properties": { "role": { "const": "worker" } }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "capabilities": { "contains": { "const": "network" } }
+                },
+                "required": ["capabilities"]
+              },
+              "then": {
+                "required": ["external_read_targets"],
+                "properties": {
+                  "role": { "const": "worker" },
+                  "workflow": { "const": "research" },
+                  "commands": { "maxItems": 0 },
+                  "capabilities": {
+                    "not": {
+                      "contains": {
+                        "enum": ["local_write", "command_execute", "local_commit", "external_mutation"]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": { "required": ["external_read_targets"] },
+              "then": {
+                "properties": {
+                  "capabilities": { "contains": { "const": "network" } }
+                }
               }
             }
           ]
@@ -544,8 +580,57 @@
       }
     },
     "capability": {
-      "description": "The network value is reserved for wire compatibility and is rejected by every v1 preset.",
+      "description": "The network value permits credential-free webfetch of exact External Read Targets in an inspect@1 Research packet.",
       "enum": ["repository_read", "local_write", "command_execute", "local_commit", "network", "external_mutation"]
+    },
+    "externalReadUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://(?![^/?#]*@)[^\\s/?#*{}\\[\\]]+(?:/[^\\s*?{}\\[\\]#]*)?$"
+    },
+    "externalReadTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_id", "url"],
+      "properties": {
+        "target_id": { "$ref": "#/$defs/id" },
+        "url": { "$ref": "#/$defs/externalReadUrl" }
+      }
+    },
+    "externalReadObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_id", "requested_url", "message_id", "status"],
+      "properties": {
+        "target_id": { "$ref": "#/$defs/id" },
+        "requested_url": { "$ref": "#/$defs/externalReadUrl" },
+        "message_id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["succeeded", "failed", "denied"] },
+        "content": { "type": "string" },
+        "content_digest": { "$ref": "#/$defs/digest" },
+        "error": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "succeeded" } } },
+          "then": {
+            "required": ["content", "content_digest"],
+            "not": { "required": ["error"] }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "enum": ["failed", "denied"] } } },
+          "then": {
+            "required": ["error"],
+            "not": {
+              "anyOf": [
+                { "required": ["content"] },
+                { "required": ["content_digest"] }
+              ]
+            }
+          }
+        }
+      ]
     },
     "command": {
       "type": "object",
@@ -643,7 +728,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "attempt_id", "role", "opencode_version", "configuration_digest", "session_id", "agent_identity", "message_ids", "agent", "permission_events", "observed_changes", "observed_output_snapshot", "exit_reason"],
+          "required": ["kind", "attempt_id", "role", "opencode_version", "configuration_digest", "session_id", "agent_identity", "message_ids", "agent", "permission_events", "observed_changes", "observed_output_snapshot", "external_reads", "exit_reason"],
           "properties": {
             "kind": { "const": "runtime_observation" },
             "producer": { "$ref": "#/$defs/runtimeProducer" },
@@ -660,6 +745,10 @@
             "permission_events": { "type": "array", "items": { "type": "string" } },
             "observed_changes": { "type": "array", "items": { "$ref": "#/$defs/diffEntry" } },
             "observed_output_snapshot": { "$ref": "#/$defs/digest" },
+            "external_reads": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/externalReadObservation" }
+            },
             "exit_reason": { "enum": ["idle", "runtime_error", "runtime_unreachable", "cancelled", "cancel_unconfirmed", "deadline_exceeded"] }
           },
           "if": { "properties": { "role": { "enum": ["worker", "verifier"] } } },

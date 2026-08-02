@@ -44,6 +44,9 @@ The following observations must not become successful receipts:
 | Global OpenCode plugin, MCP tool, instruction, or permission survives preflight undeclared | Reject dispatch with `runtime_configuration_conflict`. |
 | Worker and verifier runtime identities are equal | Reject the review with `verifier_not_independent`. |
 | Output changes after a passing review | Mark the review stale and refuse receipt creation. |
+| A packet requests `network` without exact External Read Targets | Reject packet admission; do not dispatch or ask the human. |
+| `webfetch` requests an undeclared URL | Deny the request and record `policy_violation`. |
+| Result evidence cites an External Read without a successful matching runtime observation | Reject result publication for missing provenance. |
 | Cancellation is requested but the session cannot be confirmed stopped | Record `cancel_unconfirmed`; do not dispatch a successor into the same workspace. |
 | The process stops after staging but before kernel publication | On resume, keep staging non-authoritative and either revalidate it as the same event or create a successor attempt. |
 | The knowledge submodule or selected skill is unavailable | Record `dependency_unavailable`; do not claim retrieval or silently install it. |
@@ -51,10 +54,17 @@ The following observations must not become successful receipts:
 ## Inspect-only contrast
 
 For the same repository, an `inspect@1` run may use research and design
-workflows but receives only repository-read capability and creates no
-implementation node. A separate verifier reviews the cited result artifact;
-an admitted pass is required before the receipt cites the observed facts and
-limitations. No promotion or Git result ref is created. Calling that result a
-Applied Result, admitting network access, or skipping the existing
-independent verification requirement is a protocol violation, not a preset
-override.
+workflows but receives no write capability and creates no
+implementation node. When current external documentation is required, a
+Research packet may additionally declare exact External Read Targets and the
+`network` capability. The adapter permits `webfetch` only for those requested
+URLs and preserves the exact content shown to the worker in the runtime
+observation. Result evidence names the target id, and the separate verifier
+reviews the frozen observation rather than refetching a possibly changed page.
+
+An admitted pass is required before the receipt cites the observed facts and
+limitations. No promotion or Git result ref is created. Calling that result an
+Applied Result, using an undeclared URL, using search, browser, MCP, shell, or
+credentials for network access, citing uncaptured external content, or skipping
+the existing independent verification requirement is a protocol violation,
+not a preset override.

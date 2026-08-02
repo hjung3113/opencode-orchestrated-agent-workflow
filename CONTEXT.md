@@ -36,3 +36,8 @@ _Avoid_: Approval step, routine confirmation
 A recorded, local, reversible choice that preserves the admitted contract and
 allows a Run to continue without human authority.
 _Avoid_: Material decision, silent guess, approval
+
+**External Read Target**:
+One canonical HTTP(S) URL that an inspect Run may read without credentials and
+whose agent-visible content is preserved as immutable runtime evidence.
+_Avoid_: Network access, allowed host, source root

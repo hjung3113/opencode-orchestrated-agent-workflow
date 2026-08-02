@@ -74,9 +74,11 @@ repository OpenCode configuration in place. A missing pinned dependency, such
 as an uninitialized knowledge submodule, produces `dependency_unavailable` or
 an explicitly authorized setup action; retrieval is never claimed silently.
 
-Although `network` remains a protocol enum value for wire compatibility, no v1
-preset admits it. V1 inspect work uses repository reads only; support for
-declared external read targets is outside the baseline.
+For `inspect@1` Research, preflight additionally requires an OpenCode version
+that can restrict `webfetch` by requested URL and expose the corresponding tool
+request and agent-visible output through its message or event interfaces. If
+those observations cannot be correlated to the attempt, dispatch fails with
+`unsupported_capability_enforcement`.
 
 ## Capabilities and side effects
 
@@ -90,7 +92,7 @@ baseline capability classes are:
 | `local_write` | Modify only declared local resources. |
 | `command_execute` | Request an exact command from the kernel-owned command runner. |
 | `local_commit` | Create a local commit when explicitly included in the run policy. |
-| `network` | Reserved wire value; v1 admission rejects it. |
+| `network` | Credential-free `webfetch` of exact External Read Targets in an `inspect@1` Research packet. |
 | `external_mutation` | Push, mutate issues or PRs, deploy, migrate, or perform another durable external effect. |
 
 OpenCode permissions are only one enforcement layer. The v1 adapter denies
@@ -112,6 +114,35 @@ human question only when the existing material-decision rule requires one.
 Unsupported enforcement produces `unsupported_capability_enforcement` rather
 than broad permission or a prompt-driven bypass.
 
+### Declared external reads
+
+The Kernel admits `network` only for a worker-role `inspect@1` Research packet
+with a non-empty list of exact External Read Targets. That packet has no local
+write, command execution, commit, or external-mutation capability and declares
+no commands. The adapter denies `webfetch` by default, allows only the admitted
+canonical requested URLs, and keeps `websearch`, browser, MCP, plugin, and shell
+network paths unavailable.
+
+An External Read Target is an absolute HTTP(S) URL without user information,
+query, fragment, wildcard, headers, cookies, request body, or credentials.
+Query-bearing URLs are excluded because OpenCode permission patterns interpret
+`?` as a wildcard and therefore cannot grant them as exact targets. Target ids
+and canonical URLs are unique within a packet. The model may request each
+target through `webfetch`; an undeclared requested URL is a `policy_violation`,
+not a permission prompt or Material Decision request.
+
+For every attempted declared read, the adapter records the target id, requested
+URL, OpenCode message id, status, and either the typed error or the exact bounded
+text exposed to the model with its digest. The Kernel recomputes that digest
+before publication. Result evidence can cite only a successful read in its own
+runtime observation, and the verifier reviews the preserved content without a
+live refetch.
+
+This contract controls and records the URL requested through OpenCode. It does
+not claim DNS, TCP, or redirect-chain containment, or that the captured page
+remains current. V1 does not support URL discovery, search, path-prefix or host
+wildcards, authenticated content, browser execution, or external mutation.
+
 ## Terminal and failure semantics
 
 When a session becomes idle or fails, the adapter stops execution and returns
@@ -121,6 +152,7 @@ provenance, budget, and capability compliance. It records a typed failure for:
 - missing or malformed terminal artifacts;
 - an undeclared write or external effect attempt;
 - denied or unsupported capability enforcement;
+- missing or mismatched External Read provenance;
 - runtime error, loss, deadline, or unconfirmed cancellation;
 - a reported output snapshot that differs from the observed workspace.
 

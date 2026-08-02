@@ -28,6 +28,10 @@ Skill composition, acceptance criteria, capabilities, and expected outputs
 belong to the packet. Runtime identities belong to run dispatch records.
 Results and findings belong to their task artifacts.
 
+External Read Targets are packet capability constraints, not scheduling
+resources. They do not create graph edges or participate in repository
+read/write overlap checks.
+
 ## Dependency semantics
 
 `requires` is the only v1 edge. A node is ready when every required task has

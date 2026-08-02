@@ -83,9 +83,14 @@ recorded repository snapshot, repository-relative path, and content digest.
   target task's authoritative result artifact, whose task id the kernel checks.
   A repair packet has worker role and carries `finding_ref`, `finding_id`, and
   `target_snapshot`; `finding_ref` resolves to the containing review and
-  `finding_id` selects its immutable finding.
+  `finding_id` selects its immutable finding. An `inspect@1` Research packet
+  with `network` carries one or more exact `external_read_targets`; no other v1
+  packet may carry them.
 - Runtime observation: adapter-observed OpenCode identity, events, complete
-  workspace diff, canonical output snapshot, and exit reason for one attempt.
+  workspace diff, canonical output snapshot, External Read observations, and
+  exit reason for one attempt. Each successful External Read preserves the
+  declared target id, requested URL, message id, exact agent-visible content,
+  and its digest. Failed or denied reads preserve a typed error instead.
 - Result: worker claims, evidence with provenance, claimed output snapshot,
   changed resources, and its exact runtime-observation reference.
 - Review: target task and exact output snapshot, verifier identity, verdict,
@@ -150,6 +155,14 @@ machines. They produce a typed rejection, focused successor proposal, or block.
 Completed artifacts are never repaired in place. Finding closure is expressed
 by a successor repair and review referencing the original finding; the finding
 inside its original review never changes status.
+
+For external evidence, `evidence.source` uses
+`external-read:<target-id>`. The Kernel admits it only when the Result's exact
+runtime observation contains a successful matching read, the requested URL
+matches the packet target, and the digest recomputed from the preserved content
+matches. The verifier reviews that immutable content and does not refetch the
+live URL. The artifact records a point-in-time observation, not a claim that the
+external page remains current.
 
 ## Replay and resume
 

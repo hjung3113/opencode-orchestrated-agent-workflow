@@ -102,8 +102,10 @@ graph contract and its deferred features are defined in
 One admitted task attempt maps to one fresh OpenCode session. The adapter
 executes a kernel-issued attempt specification and returns observations; it
 does not schedule graph work, grant authority, publish artifacts, or declare
-success. OpenCode parent/child sessions are correlation metadata, never graph
-edges or workflow state. See [opencode-runtime.md](opencode-runtime.md).
+success. For an admitted External Read Target, the same runtime observation
+also preserves the requested URL and exact content exposed to the agent.
+OpenCode parent/child sessions are correlation metadata, never graph edges or
+workflow state. See [opencode-runtime.md](opencode-runtime.md).
 
 ### File store and llm-wiki
 

@@ -38,8 +38,8 @@ completion envelopes.
 
 | Preset | Default capability | Completion |
 | --- | --- | --- |
-| `inspect@1` | Repository read; no local writes or network | Independently verified cited result with limitations; no application claim |
-| `local-change@1` | Repository read, isolated declared local writes, admitted commands; no external mutation | Verified Result preserved under harness control and receipted; no application claim |
+| `inspect@1` | Repository read and optional declared exact external reads; no local writes | Independently verified cited result with limitations; no application claim |
+| `local-change@1` | Repository read, isolated declared local writes, admitted commands; no network or external mutation | Verified Result preserved under harness control and receipted; no application claim |
 
 Bug fixing, feature development, refactoring, CI diagnosis, and documentation
 work are routing signals, not separate presets until observed traces require a
@@ -54,6 +54,11 @@ narrowing override. The kernel admits the effective policy and records the
 selection evidence, defaults, deviations, and rationale in the run and
 receipt. A preset cannot weaken independent verification, provenance, or the
 material-decision rule.
+
+An `inspect@1` Research packet may request `network` only with one or more
+exact External Read Targets. No other v1 workflow or preset admits `network`.
+Target selection is planner judgment recorded in the packet; target admission,
+runtime use, and evidence provenance are deterministic Kernel checks.
 
 ## Selection and dispatch
 
