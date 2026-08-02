@@ -5,7 +5,7 @@
 The product has one deep interface:
 
 ~~~text
-human request -> verified receipt | focused material-decision request | typed block
+human request -> verified Receipt | focused Material Decision Request | Typed Block
 ~~~
 
 The caller supplies intent. All phase routing, graph construction, agent
@@ -23,17 +23,17 @@ request
   -> runtime observation + staged worker artifacts
   -> deterministic admission
   -> independent verifier proposal
-  -> replan | receipt | focused decision request | typed block
+  -> replan | Receipt | focused Material Decision Request | Typed Block
 ~~~
 
 ## Deterministic kernel module
 
-The kernel is the single authority for run-state mutation. Its deep interface
-is:
+The Kernel is the single holder of Publication Authority for Run State
+mutation. Its deep interface is:
 
 ~~~text
 advance(canonical snapshot, validated event)
-  -> committed(next state, records, runtime commands)
+  -> committed(next Run State, records, runtime commands)
    | rejected(reason)
    | material decision required(question)
    | blocked(reason)
@@ -41,17 +41,18 @@ advance(canonical snapshot, validated event)
 
 Events include a model proposal, a runtime observation, a recorded human
 decision, and a cancellation request. Every event carries an idempotency key
-and the expected state version. A repeated event has no additional effect; a
-stale state version is rejected without mutation. The same snapshot, policy
+and the expected Run State version. A repeated event has no additional effect;
+a stale Run State version is rejected without mutation. The same snapshot, policy
 version, and event produce the same decision.
 
 Models may propose request contracts, graph revisions with packets, and review
-verdicts. They cannot publish an accepted graph, grant a capability, change a
-state, accept a decision, mark their own output verified, or overwrite a
-terminal artifact. Syntactic normalization is allowed during admission;
+verdicts. They cannot exercise Decision, Execution, or Publication Authority:
+they cannot publish an accepted graph, grant a capability, mutate Run State,
+accept a decision, mark their own output verified, or overwrite a Terminal
+Artifact. Syntactic normalization is allowed during admission;
 semantic repair requires a new proposal.
 
-The kernel deterministically enforces schema and reference validity, state
+The Kernel deterministically enforces schema and reference validity, Run State
 transitions, graph readiness, budgets, actor separation, capability
 intersection, artifact publication, and output-snapshot consistency. Whether
 a design is good or evidence is persuasive remains a bounded planner or
@@ -61,16 +62,16 @@ For local-change runs, preserving the Verified Result has a second
 deterministic seam:
 
 ~~~text
-promote(verified snapshot, expected result ref)
-  -> atomically updated result ref | target drift block
+promote(verified snapshot, expected Result Ref)
+  -> atomically updated Result Ref | target drift block
 ~~~
 
-Promotion writes the verified tree to a harness-owned Git result ref after a
+Promotion writes the verified tree to a harness-owned Git Result Ref after a
 compare-and-swap check against that ref's recorded value. Git ref update is the
 single atomic preservation point; the promoted tree digest must equal the
 verified snapshot. The user's existing branch and dirty working tree remain
-untouched. Promotion creates a Verified Result, not an Applied Result;
-automatic application to a user-designated target is not part of v1.
+untouched. Promotion creates a Verified Result, never an Applied Result;
+automatic Application to a user-designated target is not part of v1.
 
 ### Intake and context compiler
 
@@ -81,16 +82,16 @@ next task.
 
 ### Workflow registry and skill adapters
 
-A workflow specifies the kind of work, required inputs and outputs, and
+A Workflow Definition specifies the kind of work, required inputs and outputs, and
 verification expectation. Skill adapters name the concrete skills used for
-that workflow. They are explicit packet inputs, not implicit developer-tool
+that Workflow Definition. They are explicit Packet inputs, not implicit developer-tool
 state.
 
 ### Graph compiler and executor
 
 The compiler creates small tasks with dependencies and declared read/write
 paths. The executor dispatches compatible tasks, serializes overlapping writes,
-collects their terminal artifacts, and requests the next routing pass. The
+collects their Terminal Artifacts, and requests the next routing pass. The
 graph is rebuilt from evidence; it is not a caller-authored static manifest.
 
 The first executable version is deliberately serial. The complete minimal
@@ -101,11 +102,11 @@ graph contract and its deferred features are defined in
 
 One admitted task attempt maps to one fresh OpenCode session. The adapter
 executes a kernel-issued attempt specification and returns observations; it
-does not schedule graph work, grant authority, publish artifacts, or declare
-success. For an admitted External Read Target, the same runtime observation
+does not schedule graph work, grant Execution Authority, exercise Publication
+Authority, or declare success. For an admitted External Read Target, the same runtime observation
 also preserves the requested URL and exact content exposed to the agent.
 OpenCode parent/child sessions are correlation metadata, never graph edges or
-workflow state. See [opencode-runtime.md](opencode-runtime.md).
+workflow truth. See [opencode-runtime.md](opencode-runtime.md).
 
 ### File store and llm-wiki
 
@@ -116,12 +117,12 @@ without a source artifact path is unusable.
 
 ### Verifier
 
-The verifier receives the contract, changed outputs, and evidence independently
-of the worker's reasoning. It returns pass, finding, or block. A finding
-creates a focused repair task; repeated same-cause failure becomes a typed
-block rather than an unbounded loop.
+The Verifier receives the contract, changed outputs, and Evidence independently
+of the worker's reasoning. Its Review proposes a Verdict of pass, finding, or
+block. A Finding creates a focused Repair Task; repeated same-cause failure
+becomes a Typed Block rather than an unbounded loop.
 
-Worker and verifier attempts use different runtime identities and sessions. A
-verifier verdict is an independently produced judgment proposal. The kernel
-accepts it only when identity separation, required evidence, and the reviewed
-output snapshot validate. Any later output change invalidates the verdict.
+Worker and Verifier Attempts use different runtime identities and sessions. A
+Verifier's Verdict is an independently produced judgment proposal. The Kernel
+accepts it only when identity separation, required Evidence, and the reviewed
+Output Snapshot validate. Any later output change invalidates the Verdict.
