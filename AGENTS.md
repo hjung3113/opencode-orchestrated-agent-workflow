@@ -65,3 +65,17 @@ smaller than a general-purpose workflow platform.
   packets relevant, graphs no larger than the current work requires, and add
   artifacts, gates, schemas, or control-plane machinery only after a
   demonstrated end-to-end need.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context domain layout. See `docs/agents/domain.md`.
