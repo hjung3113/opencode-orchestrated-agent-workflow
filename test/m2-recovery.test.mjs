@@ -591,9 +591,18 @@ test("Result-only continuation replays graph and verifier boundaries one action 
         ? ["review_admitted", "receipt_admitted"]
         : ["graph_revision_2_admitted", "verification_dispatched", "review_admitted", "receipt_admitted"];
       const seen = [];
+      let resumeCount = 0;
+      const resumeOneAction = () => {
+        const usePublicCli = resumeCount === 0
+          && ["after_graph_two_packet_publication", "after_graph_two_publication"].includes(crashAt);
+        resumeCount += 1;
+        return usePublicCli
+          ? Promise.resolve(cliResume(workspace, runRoot, runId))
+          : resumeRun(runDir, { workspace, runtime });
+      };
       for (const expected of expectedActions) {
         const before = JSON.parse(readFileSync(join(runDir, "run.json")));
-        const resumed = await resumeRun(runDir, { workspace, runtime });
+        const resumed = await resumeOneAction();
         const after = JSON.parse(readFileSync(join(runDir, "run.json")));
         const newEvents = after.transitions.slice(before.transitions.length).map(({ event_kind }) => event_kind);
         assert.deepEqual(newEvents, [expected], `${crashAt}: ${expected}`);
