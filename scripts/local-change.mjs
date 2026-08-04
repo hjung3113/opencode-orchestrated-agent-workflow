@@ -209,6 +209,14 @@ function reference(artifactId, artifactPath, artifact) {
   };
 }
 
+function sameArtifactReference(left, right) {
+  return left?.reference_kind === "artifact"
+    && right?.reference_kind === "artifact"
+    && left.artifact_id === right.artifact_id
+    && left.path === right.path
+    && left.digest === right.digest;
+}
+
 function artifactPath(path) {
   return `artifacts/${path}`;
 }
@@ -1871,7 +1879,7 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
   );
   const receiptTransition = state.transitions.find(({ event_kind, record_refs }) =>
     event_kind === "receipt_admitted"
-      && record_refs.some((recordRef) => recordRef.digest === receiptRef.digest));
+      && record_refs.some((recordRef) => sameArtifactReference(recordRef, receiptRef)));
   if (!receiptTransition) throw new Error("completed Run Receipt is not admitted by Run State");
   const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
   const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
@@ -1896,23 +1904,37 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     || resultRuntime.agent_identity === reviewRuntime.agent_identity
     || workerBinding?.role !== "worker"
     || verifierBinding?.role !== "verifier"
+    || resultRuntime.task_id !== resultArtifact.task_id
+    || resultRuntime.attempt !== resultArtifact.attempt
+    || reviewRuntime.task_id !== review.task_id
+    || reviewRuntime.attempt !== review.attempt
+    || workerBinding?.task_id !== resultArtifact.task_id
+    || workerBinding?.attempt !== resultArtifact.attempt
+    || workerBinding?.session_id !== resultRuntime.session_id
+    || verifierBinding?.task_id !== review.task_id
+    || verifierBinding?.attempt !== review.attempt
+    || verifierBinding?.session_id !== reviewRuntime.session_id
     || workerBinding.agent_identity !== resultRuntime.agent_identity
     || verifierBinding.agent_identity !== reviewRuntime.agent_identity) {
     throw new Error("completed Run producer/runtime identities do not preserve independent worker and verifier roles");
   }
-  if (review.target_task_ref.digest !== resultArtifactRef.digest
+  if (!sameArtifactReference(review.target_task_ref, resultArtifactRef)
     || review.target_snapshot !== resultArtifact.output_snapshot) {
     throw new Error("completed Run Review does not match the admitted Result");
   }
+  if (resultRuntime.observed_output_snapshot !== resultArtifact.output_snapshot
+    || reviewRuntime.observed_output_snapshot !== review.target_snapshot) {
+    throw new Error("completed Run Runtime Observations do not reproduce their admitted Output Snapshots");
+  }
   if (!receipt.promotion_ref) throw new Error("completed Run requires an admitted Promotion");
   const promotion = resolveArtifactReference(ctx, receipt.promotion_ref);
-  if (!promotion.input_refs.some((recordRef) => recordRef.digest === resultArtifactRef.digest)
-    || !promotion.input_refs.some((recordRef) => recordRef.digest === reviewArtifactRef.digest)) {
+  if (!promotion.input_refs.some((recordRef) => sameArtifactReference(recordRef, resultArtifactRef))
+    || !promotion.input_refs.some((recordRef) => sameArtifactReference(recordRef, reviewArtifactRef))) {
     throw new Error("completed Run Promotion does not reference the admitted Result and Review");
   }
   const requiredReceiptRefs = [resultArtifactRef, reviewArtifactRef, receipt.promotion_ref];
   if (requiredReceiptRefs.some((recordRef) =>
-    !receipt.artifact_refs.some((receiptRefValue) => receiptRefValue.digest === recordRef.digest))) {
+    !receipt.artifact_refs.some((receiptRefValue) => sameArtifactReference(receiptRefValue, recordRef)))) {
     throw new Error("completed Run Receipt is missing an admitted artifact reference");
   }
   const resultRepo = join(ctx.runDir, "result-repository.git");

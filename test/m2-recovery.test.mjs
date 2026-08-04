@@ -292,6 +292,43 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       mutate: ({ result }) => { result.output_snapshot = digest("tampered-output-snapshot"); },
       expected: /snapshot|Result/i,
     },
+    {
+      name: "Result Runtime task identity",
+      mutate: ({ resultRuntime }) => { resultRuntime.task_id = "wrong-task"; },
+      expected: /runtime|task|provenance/i,
+    },
+    {
+      name: "Review Runtime attempt identity",
+      mutate: ({ reviewRuntime }) => { reviewRuntime.attempt = 2; },
+      expected: /runtime|attempt|provenance/i,
+    },
+    {
+      name: "Result Runtime session binding",
+      mutate: ({ resultRuntime }) => { resultRuntime.session_id = "wrong-session"; },
+      expected: /runtime|session|binding/i,
+    },
+    {
+      name: "Review Runtime observed snapshot",
+      mutate: ({ reviewRuntime }) => { reviewRuntime.observed_output_snapshot = digest("wrong-observed-snapshot"); },
+      expected: /runtime|snapshot|provenance/i,
+    },
+    {
+      name: "Promotion child reference path",
+      mutate: ({ promotion, result }) => {
+        promotion.input_refs[0] = { ...promotion.input_refs[0], path: "artifacts/tasks/verification-1/attempts/1/review.json" };
+        promotion.input_refs[0].artifact_id = result.artifact_id;
+      },
+      expected: /Promotion|Result|reference|exact/i,
+    },
+    {
+      name: "Receipt child reference path",
+      mutate: ({ receipt, result }) => {
+        const child = receipt.artifact_refs.find(({ path }) => path.endsWith("attempts/1/result.json"));
+        child.path = "artifacts/tasks/verification-1/attempts/1/review.json";
+        child.artifact_id = result.artifact_id;
+      },
+      expected: /Receipt|reference|exact/i,
+    },
   ];
   for (const testCase of cases) {
     const { workspace, runRoot } = fixture();
@@ -308,9 +345,16 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       const reviewPath = join(run.run_dir, state.tasks["verification-1"].artifact_ref.path);
       const result = JSON.parse(readFileSync(resultPath, "utf8"));
       const review = JSON.parse(readFileSync(reviewPath, "utf8"));
-      testCase.mutate({ result, review });
-      writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
-      writeFileSync(reviewPath, `${JSON.stringify(review, null, 2)}\n`);
+      const resultRuntimePath = join(run.run_dir, result.runtime_ref.path);
+      const reviewRuntimePath = join(run.run_dir, review.runtime_ref.path);
+      const promotionRef = JSON.parse(readFileSync(join(run.run_dir, "artifacts/outcomes/0001.json"), "utf8")).promotion_ref;
+      const promotionPath = join(run.run_dir, promotionRef.path);
+      const promotion = JSON.parse(readFileSync(promotionPath, "utf8"));
+      const receiptPath = join(run.run_dir, "artifacts/outcomes/0001.json");
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      const resultRuntime = JSON.parse(readFileSync(resultRuntimePath, "utf8"));
+      const reviewRuntime = JSON.parse(readFileSync(reviewRuntimePath, "utf8"));
+      testCase.mutate({ result, review, resultRuntime, reviewRuntime, promotion, receipt });
       const replaceRefs = (value, path, next) => {
         if (Array.isArray(value)) return value.forEach((item) => replaceRefs(item, path, next));
         if (!value || typeof value !== "object") return;
@@ -320,18 +364,26 @@ test("public inspect rejects semantically malformed completed artifacts", async 
         }
         Object.values(value).forEach((item) => replaceRefs(item, path, next));
       };
-      replaceRefs(state, resultPath.slice(`${run.run_dir}/`.length), {
-        reference_kind: "artifact",
-        artifact_id: result.artifact_id,
-        path: state.tasks["implementation-1"].artifact_ref.path,
-        digest: digest(result),
-      });
-      replaceRefs(state, reviewPath.slice(`${run.run_dir}/`.length), {
-        reference_kind: "artifact",
-        artifact_id: review.artifact_id,
-        path: state.tasks["verification-1"].artifact_ref.path,
-        digest: digest(review),
-      });
+      const containers = [state, result, review, promotion, receipt];
+      const artifacts = [
+        [resultRuntimePath, resultRuntime],
+        [reviewRuntimePath, reviewRuntime],
+        [resultPath, result],
+        [reviewPath, review],
+        [promotionPath, promotion],
+        [receiptPath, receipt],
+      ];
+      for (const [absolutePath, artifact] of artifacts) {
+        const path = absolutePath.slice(`${run.run_dir}/`.length);
+        const nextRef = {
+          reference_kind: "artifact",
+          artifact_id: artifact.artifact_id,
+          path,
+          digest: digest(artifact),
+        };
+        containers.forEach((value) => replaceRefs(value, path, nextRef));
+      }
+      artifacts.forEach(([absolutePath, artifact]) => writeFileSync(absolutePath, `${JSON.stringify(artifact, null, 2)}\n`));
       writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
       assert.throws(() => execFileSync(process.execPath, [
         "scripts/local-change.mjs", "inspect", "--workspace", workspace,
