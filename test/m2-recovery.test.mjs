@@ -16,6 +16,7 @@ class Runtime {
     this.configurationDigest = digest("m2-config");
     this.attemptDeadlineSeconds = 3;
     this.sequence = 0;
+    this.executionSequence = 0;
   }
   async start() {}
   async stop() {}
@@ -28,7 +29,7 @@ class Runtime {
     };
     return { binding };
   }
-  observation({ attemptId, role, binding, snapshot, taskId, attempt }) {
+  observation({ attemptId, role, binding, snapshot, taskId, attempt, executionNumber = 0 }) {
     return {
       schema_version: "1.0", kind: "runtime_observation", artifact_id: `runtime-${attemptId}`,
       run_id: this.runId, producer: { role: "runtime", actor_id: "m2-runtime" }, input_refs: [],
@@ -36,8 +37,13 @@ class Runtime {
       ...(taskId ? { task_id: taskId } : {}),
       ...(role === "worker" || role === "verifier" ? { attempt } : {}),
       role, opencode_version: "fake", configuration_digest: this.configurationDigest,
-      session_id: binding.session_id, agent_identity: binding.agent_identity, message_ids: [],
-      agent: binding.agent, model: binding.model, runtime_permission_events: [], command_executions: [],
+      session_id: binding.session_id,
+      agent_identity: binding.agent_identity,
+      message_ids: executionNumber === 0 ? [] : [`m2-message-${attemptId}-${executionNumber}`],
+      agent: binding.agent,
+      model: binding.model,
+      runtime_permission_events: executionNumber === 0 ? [] : [`m2-permission-${attemptId}-${executionNumber}`],
+      command_executions: [],
       observed_changes: [], observed_output_snapshot: snapshot.digest, external_reads: [], exit_reason: "idle",
     };
   }
@@ -45,6 +51,7 @@ class Runtime {
     return this.observation({ attemptId, role, binding, snapshot: this.baselineSnapshot });
   }
   async execute({ role, attemptId, taskId, attempt, binding, beforeSnapshot }) {
+    this.executionSequence += 1;
     let text;
     let workerProposalPhase = false;
     if (attemptId === "planner-request") text = JSON.stringify({
@@ -91,7 +98,14 @@ class Runtime {
       proposal.output_snapshot = snapshot.digest;
       text = JSON.stringify(proposal);
     }
-    return { binding: { ...binding, binding_state: "idle" }, text, snapshot, observation: this.observation({ attemptId, role, binding, snapshot, taskId, attempt }) };
+    return {
+      binding: { ...binding, binding_state: "idle" },
+      text,
+      snapshot,
+      observation: this.observation({
+        attemptId, role, binding, snapshot, taskId, attempt, executionNumber: this.executionSequence,
+      }),
+    };
   }
 
   async cancelAttempt({ binding, runDir }) {
@@ -762,6 +776,17 @@ test("worker Result fields are authored by the worker proposal", async () => {
     const workerRuntime = JSON.parse(readFileSync(join(run.run_dir, result.runtime_ref.path)));
     assert.equal(result.output_snapshot, workerRuntime.observed_output_snapshot);
     assert.equal(result.evidence.some(({ source }) => source.startsWith("command:")), false);
+    const editRuntimePath = join(run.run_dir, "artifacts/runtime/worker-implementation-1-edit.json");
+    assert.equal(existsSync(editRuntimePath), true);
+    const editRuntime = JSON.parse(readFileSync(editRuntimePath, "utf8"));
+    assert.equal(editRuntime.producer.role, "runtime");
+    assert.equal(editRuntime.attempt_id, workerRuntime.attempt_id);
+    assert.equal(editRuntime.session_id, workerRuntime.session_id);
+    assert.equal(editRuntime.agent_identity, workerRuntime.agent_identity);
+    assert.notEqual(editRuntime.artifact_id, workerRuntime.artifact_id);
+    assert.notDeepEqual(editRuntime.message_ids, workerRuntime.message_ids);
+    assert.notDeepEqual(editRuntime.runtime_permission_events, workerRuntime.runtime_permission_events);
+    assert.equal(result.input_refs.some(({ path }) => path === "artifacts/runtime/worker-implementation-1-edit.json"), true);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

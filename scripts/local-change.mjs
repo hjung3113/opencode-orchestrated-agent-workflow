@@ -2449,6 +2449,11 @@ export async function runLocalChange({
       deadlineSeconds: implementation.packet.deadline_seconds,
     });
     admitAttemptExecution(ctx, workerExecution, "implementation worker Attempt");
+    const workerEditObservation = {
+      ...workerExecution.observation,
+      artifact_id: "runtime-worker-implementation-1-edit",
+    };
+    const workerEditRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-edit.json", workerEditObservation);
     const commandExecution = runCommand(taskWorkspace, admittedCommand);
     const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
     const workerChanges = diffEntries(taskBaseline, preCommitSnapshot);
@@ -2500,7 +2505,7 @@ export async function runLocalChange({
       attempt: 1,
       producer: workerProducer(workerAttempt.binding.agent_identity),
       runtime_ref: workerRuntimeRef,
-      inputRefs: [implementationPacketRef],
+      inputRefs: [implementationPacketRef, workerEditRuntimeRef],
       createdAt: now(),
       claims: workerProposal.claims,
       evidence: workerProposal.evidence,
@@ -2521,7 +2526,7 @@ export async function runLocalChange({
       tasks: {
         "implementation-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultArtifactRef },
       },
-      }, [workerRuntimeRef, resultArtifactRef]);
+    }, [workerEditRuntimeRef, workerRuntimeRef, resultArtifactRef]);
     } else {
       resultArtifactRef = state.tasks["implementation-1"].artifact_ref;
       const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
