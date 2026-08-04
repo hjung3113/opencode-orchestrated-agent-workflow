@@ -56,7 +56,20 @@ class Runtime {
       preset_selection: { preset: "local-change@1", selection_evidence: [{ claim: "bounded", source: "intake", observation: "local" }], proposed_narrowing: null, rationale: "bounded" },
     });
     else if (attemptId === "planner-graph-1") text = JSON.stringify({ graph: { nodes: [{ task_id: "implementation-1", workflow_definition: "implementation" }] }, packet: { acceptance_criteria: ["target exists"], deadline_seconds: 3 } });
-    else if (attemptId === "worker-implementation-1") { writeFileSync(join(this.workspace, this.targetFile), this.expectedContent); text = "implemented"; }
+    else if (attemptId === "worker-implementation-1") {
+      writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
+      text = this.scenario === "worker-proposal"
+        ? JSON.stringify({
+          claims: ["worker-authored claim"],
+          evidence: [{ claim: "worker observed the requested edit", source: "worker-report", observation: "the target was written" }],
+          changed_resources: [this.targetFile],
+        })
+        : JSON.stringify({
+          claims: ["implemented"],
+          evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
+          changed_resources: [this.targetFile],
+        });
+    }
     else if (attemptId === "planner-graph-2") text = JSON.stringify({ carry_forward_task_id: "implementation-1", verifier_task: { task_id: "verification-1" }, verifier_packet: { acceptance_criteria: ["target matches"], deadline_seconds: 3 } });
     else text = JSON.stringify({ verdict: "pass", findings: [], evidence: [{ claim: "matches", source: "verifier-read", observation: "target matches" }] });
     const snapshot = (await import("../scripts/local-change.mjs")).workspaceSnapshot(this.workspace);
@@ -123,6 +136,9 @@ test("resume reconstructs a terminal Run idempotently and rejects invalid durabl
     writeFileSync(statePath, "{}\n");
     assert.throws(() => execFileSync(process.execPath, [
       "scripts/local-change.mjs", "resume", "--workspace", workspace, "--run-root", runRoot, "--run-id", run.run_id,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    assert.throws(() => execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "inspect", "--workspace", workspace, "--run-root", runRoot, "--run-id", run.run_id,
     ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
@@ -330,13 +346,15 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
 });
 
 test("crash boundaries are deterministic and repeated resume is idempotent", async () => {
-  for (const crashAt of [
-    "before_promotion_preparation",
-    "after_promotion_preparation",
-    "before_result_ref_update",
-    "after_result_ref_update",
-    "before_run_state_replacement:receipt_admitted",
-    "after_run_state_replacement:receipt_admitted",
+    for (const crashAt of [
+      "before_promotion_preparation",
+      "after_promotion_preparation",
+      "before_result_ref_update",
+      "after_result_ref_update",
+      "after_result_publication",
+      "after_review_publication",
+      "before_run_state_replacement:receipt_admitted",
+      "after_run_state_replacement:receipt_admitted",
   ]) {
     const { workspace, runRoot } = fixture();
     try {
@@ -438,6 +456,43 @@ test("resume reconciles a cancelling Run through the durable runtime binding sea
   }
 });
 
+test("resume reconnects a cancel_unconfirmed Run without dispatching a successor", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    const crash = new Error("simulated process death");
+    crash.code = "simulated_crash";
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        runtime.cancelConfirmed = true;
+        return runtime;
+      },
+      hooks: { afterWorkerDispatch: async () => { throw crash; } },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const blocked = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "cancel", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", runId,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(blocked.lifecycle_state, "blocked");
+    const before = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const resumed = await resumeRun(runDir, { runtime });
+    assert.equal(resumed.lifecycle_state, "cancelled");
+    const after = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.equal(after.transitions.some(({ event_kind }) => event_kind === "successor_dispatched"), false);
+    assert.equal(after.runtime_bindings.at(-1).binding_state, "cancelled");
+    assert.equal(after.transitions.length, before.transitions.length + 1);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("cumulative Run limit exhaustion is a typed block", async () => {
   const { workspace, runRoot } = fixture();
   try {
@@ -485,18 +540,45 @@ test("paired low-risk ambiguity records an Assumption and continues", async () =
   }
 });
 
-test("Material Decision Request survives restart and admits exactly one human successor", async () => {
+test("worker Result fields are authored by the worker proposal", async () => {
   const { workspace, runRoot } = fixture();
   try {
     const run = await runLocalChange({
       workspace,
       runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "worker-proposal" }),
+    });
+    const state = JSON.parse(readFileSync(join(run.run_dir, "run.json")));
+    const result = JSON.parse(readFileSync(join(run.run_dir, state.tasks["implementation-1"].artifact_ref.path)));
+    assert.deepEqual(result.claims, ["worker-authored claim"]);
+    assert.deepEqual(result.changed_resources, ["change.txt"]);
+    assert.equal(result.evidence[0].source, "worker-report");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("Material Decision Request survives restart and admits exactly one human successor", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
       requestText: "Please update the file using the bounded local workflow.",
-      runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
+      runtimeFactory: (options) => {
+        runtime = new Runtime({ ...options, scenario: "material" });
+        return runtime;
+      },
     });
     const runDir = run.run_dir;
     const requestOutcome = JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json")));
     assert.equal(requestOutcome.outcome_kind, "material_decision_request");
+    assert.equal(runtime.sequence, 1);
+    assert.equal(existsSync(join(runDir, "artifacts/graphs/0001.json")), false);
+    assert.equal(existsSync(join(runDir, "artifacts/promotions/promotion-1.json")), false);
     const checkpoint = JSON.parse(execFileSync(process.execPath, [
       "scripts/local-change.mjs", "resume", "--workspace", workspace,
       "--run-root", runRoot, "--run-id", run.run_id,

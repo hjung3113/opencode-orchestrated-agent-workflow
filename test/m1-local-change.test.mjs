@@ -196,7 +196,11 @@ class FakeRuntime {
     } else if (attemptId === "worker-implementation-1") {
       if (!scenario.idleWithoutResult) writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
       if (scenario.undeclaredPathChange) writeFileSync(join(this.workspace, "unexpected.txt"), "unexpected\n");
-      text = "fake worker completed";
+      text = JSON.stringify({
+        claims: ["fake worker completed"],
+        evidence: [{ claim: "the requested file was written", source: "worker-report", observation: "the target was written" }],
+        changed_resources: scenario.idleWithoutResult ? [] : [this.targetFile],
+      });
     } else if (attemptId === "planner-graph-2") {
       text = JSON.stringify({
         carry_forward_task_id: "implementation-1",
@@ -659,4 +663,71 @@ test("M1 admission preserves policy, evidence, deadline, and run-root boundaries
     rmSync(linked.runRoot, { recursive: true, force: true });
     rmSync(aliasRoot, { recursive: true, force: true });
   }
+});
+
+test("bootstrap cites the repository policy used for intake", { timeout: 30_000 }, async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    writeFileSync(join(workspace, "AGENTS.md"), "# Repository policy\nKeep the change local.\n");
+    git(workspace, ["add", "AGENTS.md"]);
+    git(workspace, ["commit", "-qm", "repository policy"]);
+    const result = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt with the requested local change.",
+      runtimeFactory: fakeFactory({}),
+    });
+    const state = JSON.parse(readFileSync(join(result.run_dir, "run.json")));
+    const bootstrap = readArtifact(result.run_dir, state.bootstrap_ref);
+    assert.equal(bootstrap.repository_policy_refs.length, 1);
+    assert.deepEqual(bootstrap.repository_policy_refs[0], {
+      reference_kind: "repository",
+      repository_snapshot: bootstrap.repository_policy_refs[0].repository_snapshot,
+      path: "AGENTS.md",
+      digest: digest(readFileSync(join(workspace, "AGENTS.md"))),
+    });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("public run rejects caller-authored execution controls", () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    assert.throws(() => execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "run", "--workspace", workspace,
+      "--run-root", runRoot, "--request", "Add the requested local change.",
+      "--target-file", "caller-controlled.txt", "--content", "caller-controlled",
+    ], { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /execution controls/i);
+    assert.equal(statSync(join(runRoot, "runs"), { throwIfNoEntry: false }), undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("command Evidence binds its declared source to the admitted command", { timeout: 30_000 }, async () => {
+  const evidence = await assertBlockedScenario({
+    hooks: {
+      beforeResultAdmission: ({ workerResult }) => {
+        workerResult.evidence.find(({ source }) => source.startsWith("command:")).source = "command:undeclared";
+      },
+    },
+  });
+  assert.match(evidence.failure.summary, /command Evidence/i);
+});
+
+test("the production command seam denies outbound network access", { timeout: 30_000 }, async () => {
+  const network = await assertBlockedScenario({
+    hooks: {
+      commandOverride: () => ({
+        command_id: "verify-change",
+        argv: [process.execPath, "-e", "require('node:net').connect(80, '1.1.1.1')"],
+        cwd: ".",
+        timeout_seconds: 3,
+      }),
+    },
+  });
+  assert.match(network.failure.summary, /admitted command failed|unsupported_capability_enforcement/i);
 });

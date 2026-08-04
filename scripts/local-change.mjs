@@ -263,12 +263,25 @@ function resolveArtifactReferences(ctx, value, seen = new Set()) {
 }
 
 function validateCommandEvidence(ctx, artifact) {
+  const packet = (artifact.input_refs ?? [])
+    .filter(isArtifactReference)
+    .map((inputRef) => resolveArtifactReference(ctx, inputRef))
+    .find(({ kind }) => kind === "packet");
   for (const evidence of artifact.evidence ?? []) {
     if (!evidence.command_ref) continue;
+    const expectedSource = `command:${evidence.command_ref.command_id}`;
+    const admitted = packet?.admitted_commands?.find(({ command_id }) =>
+      command_id === evidence.command_ref.command_id);
     const observation = resolveArtifactReference(ctx, evidence.command_ref.runtime_ref);
     const execution = observation.command_executions.find(({ command_id }) =>
       command_id === evidence.command_ref.command_id);
-    if (!execution || execution.output_digest !== evidence.command_ref.output_digest) {
+    if (evidence.source !== expectedSource
+      || !admitted
+      || !execution
+      || execution.output_digest !== evidence.command_ref.output_digest
+      || canonicalJson(execution.argv) !== canonicalJson(admitted.argv)
+      || execution.cwd !== admitted.cwd
+      || execution.environment_policy_id !== environmentPolicyId) {
       throw new Error(`command Evidence does not match Runtime Observation: ${evidence.command_ref.command_id}`);
     }
   }
@@ -965,7 +978,16 @@ function commandSpec(targetFile, expectedContent) {
 }
 
 function runCommand(workspace, command) {
-  const result = spawnSync(command.argv[0], command.argv.slice(1), {
+  const sandbox = "/usr/bin/sandbox-exec";
+  if (!existsSync(sandbox)) {
+    const error = new Error("local-change command runner cannot enforce outbound network denial");
+    error.code = "unsupported_capability_enforcement";
+    throw error;
+  }
+  const result = spawnSync(sandbox, [
+    "-p", "(version 1) (allow default) (deny network*)",
+    ...command.argv,
+  ], {
     cwd: workspace,
     encoding: "utf8",
     env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
@@ -1143,6 +1165,20 @@ function parseReview(parsed) {
   };
 }
 
+function parseResultProposal(parsed) {
+  if (!Array.isArray(parsed?.claims)
+    || !Array.isArray(parsed?.evidence)
+    || !Array.isArray(parsed?.changed_resources)) {
+    throw new Error("worker did not author a structured Result proposal");
+  }
+  return {
+    claims: validStringArray(parsed.claims, "worker Result claims"),
+    evidence: validEvidenceArray(parsed.evidence),
+    changed_resources: validStringArray(parsed.changed_resources, "worker Result changed_resources"),
+    ...(typeof parsed.output_snapshot === "string" ? { output_snapshot: parsed.output_snapshot } : {}),
+  };
+}
+
 export class AttemptFailure extends Error {
   constructor(code, message) {
     super(message);
@@ -1246,7 +1282,8 @@ function runtimeForBinding(runDir, binding) {
 }
 
 function cancellationBinding(state) {
-  return [...(state.runtime_bindings ?? [])].reverse()[0] ?? {
+  return [...(state.runtime_bindings ?? [])].reverse().find(({ binding_state }) =>
+    ["active", "unreachable"].includes(binding_state)) ?? {
     attempt_id: `cancel-${state.run_id}`,
     role: "planner",
     agent_identity: digest("unavailable-after-process-death"),
@@ -1256,6 +1293,28 @@ function cancellationBinding(state) {
     session_id: `unavailable-${state.run_id}`,
     binding_state: "unreachable",
   };
+}
+
+function cancellationObservation(ctx, state, binding, result) {
+  const observation = result?.observation ?? (runtimeForBinding(ctx.runDir, binding)
+    ? {
+      ...runtimeForBinding(ctx.runDir, binding),
+      artifact_id: `runtime-${binding.attempt_id}-cancel`,
+      runtime_permission_events: ["operator.cancel"],
+      exit_reason: result?.confirmed ? "cancelled" : "cancel_unconfirmed",
+    }
+    : fallbackCancellationObservation(state, binding, result?.confirmed === true));
+  let artifactId = observation.artifact_id;
+  let path = `artifacts/runtime/${artifactId}.json`;
+  let suffix = 1;
+  while (existsSync(join(ctx.runDir, path))) {
+    artifactId = `${observation.artifact_id}-reconcile-${suffix}`;
+    path = `artifacts/runtime/${artifactId}.json`;
+    suffix += 1;
+  }
+  const durableObservation = artifactId === observation.artifact_id
+    ? observation : { ...observation, artifact_id: artifactId };
+  return { observation: durableObservation, observationRef: writeArtifact(ctx, path, durableObservation) };
 }
 
 function fallbackCancellationObservation(state, binding, confirmed = false) {
@@ -1313,13 +1372,16 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
-  if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
+  const cancelBlock = latestOutcome(runDir)?.block_type === "cancel_unconfirmed";
+  if (["completed", "cancelled"].includes(state.lifecycle_state)
+    || (state.lifecycle_state === "blocked" && !cancelBlock)) {
     return { ...inspect, next_action: null };
   }
 
   const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
-  const active = [...state.runtime_bindings].reverse().find(({ binding_state }) => binding_state === "active");
-  let next = state.lifecycle_state === "cancelling"
+  const active = [...state.runtime_bindings].reverse().find(({ binding_state }) =>
+    ["active", "unreachable"].includes(binding_state));
+  let next = ["cancelling", "blocked"].includes(state.lifecycle_state)
     ? state
     : applyTransition(ctx, state, "cancel_requested", { lifecycle_state: "cancelling" });
   crashAt(ctx, "before_runtime_abort");
@@ -1332,19 +1394,12 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
   }
   crashAt(ctx, "after_runtime_abort");
 
-  const observation = result?.observation ?? (active && runtimeForBinding(runDir, active)
-    ? {
-      ...runtimeForBinding(runDir, active),
-      artifact_id: `runtime-${active.attempt_id}-cancel`,
-      runtime_permission_events: ["operator.cancel"],
-      exit_reason: result?.confirmed ? "cancelled" : "cancel_unconfirmed",
-    }
-    : fallbackCancellationObservation(state, cancellationBinding(state), active && result?.confirmed === true));
-  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
+  const durableBinding = active ?? cancellationBinding(state);
+  const { observation, observationRef } = cancellationObservation(ctx, state, durableBinding, result);
   if (result?.confirmed === true && observation.exit_reason === "cancelled") {
     next = applyTransition(ctx, next, "cancel_confirmed", {
       lifecycle_state: "cancelled",
-      runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === active?.attempt_id
+      runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === durableBinding.attempt_id
         ? { ...binding, binding_state: "cancelled" } : binding),
     }, [observationRef]);
     return { ...inspectRun(runDir), next_action: null };
@@ -1352,7 +1407,7 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
   const blockRef = cancellationBlock(ctx, next, observationRef);
   next = applyTransition(ctx, next, "cancel_unconfirmed", {
     lifecycle_state: "blocked",
-    runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === active?.attempt_id
+    runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === durableBinding.attempt_id
       ? { ...binding, binding_state: "unreachable" } : binding),
   }, [observationRef, blockRef]);
   return { ...inspectRun(runDir), next_action: null, checkpoint: "cancel_unconfirmed" };
@@ -1703,19 +1758,74 @@ function latestOutcome(runDir) {
   return files.length === 0 ? null : JSON.parse(readFileSync(join(outcomeDir, files.at(-1))));
 }
 
+function reconcilePreparedTaskArtifacts(ctx, state) {
+  let next = state;
+  const prepared = [
+    {
+      taskId: "implementation-1",
+      path: "artifacts/tasks/implementation-1/attempts/1/result.json",
+      eventKind: "implementation_result_admitted",
+    },
+    {
+      taskId: "verification-1",
+      path: "artifacts/tasks/verification-1/attempts/1/review.json",
+      eventKind: "review_admitted",
+    },
+  ];
+  for (const { taskId, path, eventKind } of prepared) {
+    if (!existsSync(join(ctx.runDir, path))) continue;
+    const artifact = JSON.parse(readFileSync(join(ctx.runDir, path), "utf8"));
+    validateProtocol(artifact, artifact.kind);
+    const artifactRef = reference(artifact.artifact_id, path, artifact);
+    const projection = next.tasks?.[taskId];
+    if (!projection) continue;
+    if (projection.artifact_ref) {
+      if (projection.artifact_ref.digest !== artifactRef.digest) {
+        throw new AttemptFailure("prepared_artifact_conflict", `${taskId} publication conflicts with Run State`);
+      }
+      continue;
+    }
+    const runtime = resolveArtifactReference(ctx, artifact.runtime_ref);
+    next = applyTransition(ctx, next, eventKind, {
+      runtime_bindings: next.runtime_bindings.map((binding) =>
+        binding.attempt_id === runtime.attempt_id ? { ...binding, binding_state: "idle" } : binding),
+      tasks: {
+        ...next.tasks,
+        [taskId]: { task_state: "artifacts_published", attempts: projection.attempts, artifact_ref: artifactRef },
+      },
+    }, [artifact.runtime_ref, artifactRef]);
+  }
+  return next;
+}
+
 export function inspectRun(runDir) {
+  const ctx = { runDir };
   const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+  validateProtocol(state, "run state");
+  resolveArtifactReferences(ctx, state);
   const outcome = latestOutcome(runDir);
+  if (outcome) validateProtocol(outcome, "latest outcome");
+  let resultRef = null;
+  if (outcome?.promotion_ref) {
+    const promotion = resolveArtifactReference(ctx, outcome.promotion_ref);
+    resultRef = promotion.result_ref;
+  } else if (state.prepared_promotion_ref) {
+    resultRef = resolveArtifactReference(ctx, state.prepared_promotion_ref).result_ref;
+  }
   return {
     run_id: state.run_id,
     state_version: state.state_version,
     lifecycle_state: state.lifecycle_state,
     derived_status: state.lifecycle_state === "completed"
       ? "completed" : state.lifecycle_state,
+    runtime_bindings: state.runtime_bindings,
+    active_runtime_bindings: state.runtime_bindings.filter(({ binding_state }) => binding_state === "active"),
+    result_ref: resultRef,
     receipt: outcome?.outcome_kind === "receipt" ? {
       artifact_id: outcome.artifact_id,
       outcome_kind: outcome.outcome_kind,
       promotion_ref: outcome.promotion_ref,
+      artifact_refs: outcome.artifact_refs,
     } : null,
   };
 }
@@ -1725,10 +1835,19 @@ export async function resumeRun(runDir, { decision, decisionDisposition, runtime
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
-  if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
+  if (["completed", "cancelled"].includes(state.lifecycle_state)
+    || (state.lifecycle_state === "blocked" && latestOutcome(runDir)?.block_type !== "cancel_unconfirmed")) {
     return { ...inspect, next_action: null };
   }
   if (state.lifecycle_state === "cancelling") {
+    try {
+      return await cancelRun(runDir, { runtime, hooks });
+    } catch (error) {
+      if (error.code !== "simulated_crash") throw error;
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
+  if (state.lifecycle_state === "blocked" && latestOutcome(runDir)?.block_type === "cancel_unconfirmed") {
     try {
       return await cancelRun(runDir, { runtime, hooks });
     } catch (error) {
@@ -1755,6 +1874,14 @@ export async function resumeRun(runDir, { decision, decisionDisposition, runtime
       if (error.code !== "simulated_crash") recordFailure(ctx, state, error);
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
+  }
+  const reconciliationCtx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
+  try {
+    state = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
+  } catch (error) {
+    if (!error.code) throw error;
+    if (error.code !== "simulated_crash") recordFailure(reconciliationCtx, state, error);
+    return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
   }
   const promotionPath = "artifacts/promotions/promotion-1.json";
   const resultRepoPath = join(runDir, "result-repository.git");
@@ -1840,6 +1967,21 @@ function skillRecord(workspace) {
   return { id: name, version, source: skillSource, digest: fileDigest(path) };
 }
 
+function repositoryPolicyRecord(workspace, snapshot) {
+  const path = "AGENTS.md";
+  const fullPath = join(workspace, path);
+  if (!existsSync(fullPath)) return { refs: [], content: "No repository-local AGENTS.md was present." };
+  return {
+    refs: [{
+      reference_kind: "repository",
+      repository_snapshot: snapshot.digest,
+      path,
+      digest: fileDigest(fullPath),
+    }],
+    content: readFileSync(fullPath, "utf8"),
+  };
+}
+
 function parseOption(argv, name, fallback) {
   const index = argv.indexOf(name);
   return index === -1 ? fallback : argv[index + 1];
@@ -1881,6 +2023,7 @@ export async function runLocalChange({
     throw new Error(`target file already exists in the intake snapshot: ${targetFile}`);
   }
   const skill = skillRecord(workspace);
+  const repositoryPolicy = repositoryPolicyRecord(workspace, baselineTarget);
   const taskWorkspace = mkdtempSync(join(runDir, "task-workspace-"));
   let adapter;
   let state;
@@ -1943,7 +2086,7 @@ export async function runLocalChange({
       role: "planner",
       workflow_definition: "intake",
       raw_request: requestText,
-      repository_policy_refs: [],
+      repository_policy_refs: repositoryPolicy.refs,
       capabilities: ["repository_read"],
       admitted_commands: [],
       deadline_seconds: admittedAttemptDeadlineSeconds,
@@ -1962,9 +2105,12 @@ export async function runLocalChange({
     writeRunState(ctx, state);
 
     const requestPrompt = [
-      "Return exactly one JSON object and no Markdown for the Request proposal. Do not inspect or read any file and do not use any tool; all intake facts are below.",
+      "Return exactly one JSON object and no Markdown for the Request proposal. Do not inspect or read any file and do not use any tool; all intake facts and the Kernel-derived repository policy are below.",
       `Raw human request: ${requestText}`,
       `Target snapshot digest: ${taskBaseline.digest}`,
+      `Repository policy references: ${JSON.stringify(bootstrap.repository_policy_refs)}`,
+      `Repository policy content:\n${repositoryPolicy.content}`,
+      "Treat the cited repository policy as authoritative intake context; do not invent policy from model confidence.",
       "Select local-change@1 with no proposed narrowing.",
       "Materiality is a protocol fact, not model uncertainty: record a material: ambiguity only when the raw human request explicitly leaves a durable scope or Decision Authority choice unresolved; never invent one from neutral wording or confidence. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
       "Use this shape: {\"objective\":\"...\",\"scope\":[\"...\"],\"exclusions\":[\"...\"],\"ambiguities\":[],\"assumptions\":[],\"target_snapshot\":\"...\",\"preset_selection\":{\"preset\":\"local-change@1\",\"selection_evidence\":[{\"claim\":\"...\",\"source\":\"intake\",\"observation\":\"...\"}],\"proposed_narrowing\":null,\"rationale\":\"...\"}}",
@@ -2009,6 +2155,8 @@ export async function runLocalChange({
 
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
+    const admittedCommand = hooks.commandOverride?.({ targetFile, expectedContent })
+      ?? commandSpec(targetFile, expectedContent);
     const graphOneAttempt = await adapter.newAttempt({
       role: "planner",
       attemptId: "planner-graph-1",
@@ -2034,7 +2182,7 @@ export async function runLocalChange({
     const implementation = implementationPlan(responseObject(graphOneExecution.text, "revision 1 planner"), {
       targetFile,
       skill,
-      command: commandSpec(targetFile, expectedContent),
+      command: admittedCommand,
       requestText,
       attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
     });
@@ -2088,7 +2236,7 @@ export async function runLocalChange({
       `Implement the admitted local-change Packet. Modify exactly ${targetFile}.`,
       `Create it with exactly this UTF-8 content: ${JSON.stringify(expectedContent)}.`,
       "Do not modify protected unrelated files, the Git metadata, the skill file, or any other path.",
-      "Use your edit/write tool, never shell or network. After editing, report what changed in plain text.",
+      "Use your edit/write tool, never shell or network. After editing, return exactly one JSON object and no Markdown with claims, evidence, changed_resources, and optional output_snapshot fields. The Result proposal fields must be authored by you; do not return prose.",
     ].join("\n");
     const workerExecution = await adapter.execute({
       role: "worker",
@@ -2101,7 +2249,7 @@ export async function runLocalChange({
       deadlineSeconds: implementation.packet.deadline_seconds,
     });
     admitAttemptExecution(ctx, workerExecution, "implementation worker Attempt");
-    const commandExecution = runCommand(taskWorkspace, commandSpec(targetFile, expectedContent));
+    const commandExecution = runCommand(taskWorkspace, admittedCommand);
     const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
     const workerChanges = diffEntries(taskBaseline, preCommitSnapshot);
     const allowedChanges = new Set([targetFile]);
@@ -2112,6 +2260,14 @@ export async function runLocalChange({
     git(taskWorkspace, ["commit", "-qm", "M1 local-change Result"]);
     const resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
     const workerSnapshot = workspaceSnapshot(taskWorkspace);
+    const workerProposal = parseResultProposal(responseObject(workerExecution.text, "worker Result proposal"));
+    const observedResources = workerChanges.map(({ path }) => path);
+    if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
+      throw new Error("worker Result proposal changed_resources do not match the observed diff");
+    }
+    if (workerProposal.output_snapshot && workerProposal.output_snapshot !== workerSnapshot.digest) {
+      throw new Error("worker Result proposal output_snapshot does not match the observed snapshot");
+    }
     const workerObservation = {
       ...workerExecution.observation,
       observed_changes: workerChanges,
@@ -2130,8 +2286,8 @@ export async function runLocalChange({
       runtime_ref: workerRuntimeRef,
       inputRefs: [implementationPacketRef],
       createdAt: now(),
-      claims: [workerExecution.text || `created ${targetFile}`],
-      evidence: [{
+      claims: workerProposal.claims,
+      evidence: [...workerProposal.evidence, {
         claim: "the admitted command confirmed the requested file content",
         source: `command:${commandExecution.command_id}`,
         observation: "kernel runner returned succeeded",
@@ -2142,7 +2298,7 @@ export async function runLocalChange({
           output_digest: commandExecution.output_digest,
         },
       }],
-      changed_resources: workerChanges.map(({ path }) => path),
+      changed_resources: workerProposal.changed_resources,
       output_snapshot: workerSnapshot.digest,
       result_commit: resultCommit,
     });
@@ -2151,6 +2307,7 @@ export async function runLocalChange({
     const resultRepo = join(runDir, "result-repository.git");
     if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
     git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
+    crashAt(ctx, "after_result_publication");
     const resultRefName = `refs/orchestrator/results/${runId}`;
     state = applyTransition(ctx, state, "implementation_result_admitted", {
       runtime_bindings: state.runtime_bindings.map((binding) =>
@@ -2168,8 +2325,8 @@ export async function runLocalChange({
       attempt: 3,
     });
     const graphTwoPrompt = [
-      "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the Result ref.",
-      "Carry forward implementation-1 by its Result ref and add exactly one independent verification task.",
+      "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
+      "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
       "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
     ].join("\n");
     const graphTwoExecution = await adapter.execute({
@@ -2244,7 +2401,7 @@ export async function runLocalChange({
     const verifierPrompt = [
       `Use your read tool exactly once on ${targetFile}; do not read any other path and do not use edit, write, shell, network, or delegation.`,
       `The expected UTF-8 content is ${JSON.stringify(expectedContent)}.`,
-      `Independently inspect the frozen Result/Output Snapshot: Result ref ${resultRef.path} (${resultRef.digest}), declared output snapshot ${workerSnapshot.digest}, changed resource ${targetFile}.`,
+      `Independently inspect the frozen Result/Output Snapshot: worker Result artifact reference ${resultRef.path} (${resultRef.digest}), declared output snapshot ${workerSnapshot.digest}, changed resource ${targetFile}.`,
       "After the read, do not call another tool. Your final response MUST be exactly one JSON object and no Markdown, with this shape: {\"verdict\":\"pass\",\"findings\":[],\"evidence\":[{\"claim\":\"the declared change is present\",\"source\":\"verifier-read\",\"observation\":\"the named target bytes match the frozen Result Output Snapshot\"}]}",
     ].join("\n");
     const verifierExecution = await adapter.execute({
@@ -2289,6 +2446,7 @@ export async function runLocalChange({
       findings: reviewProposal.findings,
     });
     const reviewRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/review.json", review);
+    crashAt(ctx, "after_review_publication");
     state = applyTransition(ctx, state, "review_admitted", {
       runtime_bindings: state.runtime_bindings.map((binding) =>
         binding.attempt_id === verifierExecution.binding.attempt_id ? verifierExecution.binding : binding),
@@ -2391,10 +2549,11 @@ async function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
+  if (["--target-file", "--content"].some((option) => argv.includes(option))) {
+    throw new Error("execution controls are not public; provide one natural-language --request");
+  }
   const requestText = parseOption(argv, "--request", "Add change.txt with the requested local change.");
-  const targetFile = parseOption(argv, "--target-file", "change.txt");
-  const expectedContent = parseOption(argv, "--content", "local change completed\\n").replaceAll("\\n", "\n");
-  const result = await runLocalChange({ workspace, runRoot, requestText, targetFile, expectedContent });
+  const result = await runLocalChange({ workspace, runRoot, requestText });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
