@@ -707,6 +707,19 @@ test("public run rejects caller-authored execution controls", () => {
   }
 });
 
+test("public run requires an explicit human request and creates no Run when omitted", () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    assert.throws(() => execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "run", "--workspace", workspace, "--run-root", runRoot,
+    ], { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /--request|usage/i);
+    assert.equal(statSync(join(runRoot, "runs"), { throwIfNoEntry: false }), undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("command Evidence binds its declared source to the admitted command", { timeout: 30_000 }, async () => {
   const evidence = await assertBlockedScenario({
     hooks: {

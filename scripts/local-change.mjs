@@ -2603,7 +2603,10 @@ async function main() {
   if (["--target-file", "--content"].some((option) => argv.includes(option))) {
     throw new Error("execution controls are not public; provide one natural-language --request");
   }
-  const requestText = parseOption(argv, "--request", "Add change.txt with the requested local change.");
+  const requestText = parseOption(argv, "--request");
+  if (typeof requestText !== "string" || requestText.trim().length === 0) {
+    throw new Error("usage: local-change.mjs run --workspace <dir> --run-root <dir> --request <text>");
+  }
   const result = await runLocalChange({ workspace, runRoot, requestText });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
