@@ -1229,6 +1229,13 @@ export class AttemptFailure extends Error {
   }
 }
 
+function isRecoverableProviderFailure(error) {
+  if (["provider_unavailable", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(error?.code)) return true;
+  const message = String(error?.message ?? "");
+  return /OpenCode (HTTP (429|5\d\d)|server exited|server health did not match)/i.test(message)
+    || /fetch failed|network timeout/i.test(message);
+}
+
 export class BudgetExceeded extends Error {
   constructor(kind, limit) {
     super(`${kind} budget exhausted at ${limit}`);
@@ -1288,6 +1295,7 @@ async function recordFailure(ctx, state, error) {
   if (!durableState
     || ["cancelling", "cancelled", "material_decision_required"].includes(durableState.lifecycle_state)
     || existsSync(join(ctx.runDir, "artifacts/outcomes/failure.json"))) return;
+  const recoverableProviderFailure = isRecoverableProviderFailure(error);
   const outcome = envelope({
     kind: "outcome",
     artifactId: "outcome-failure",
@@ -1296,13 +1304,15 @@ async function recordFailure(ctx, state, error) {
     inputRefs: [...ctx.admittedRefs],
     createdAt: now(),
     preset: "local-change@1",
-    ...(state.effective_policy ? { effective_policy: state.effective_policy } : {}),
+    ...(durableState.effective_policy ? { effective_policy: durableState.effective_policy } : {}),
     outcome_kind: "block",
     summary: `Run blocked: ${error.message}`,
     artifact_refs: [...ctx.admittedRefs],
     limitations: ["No Result, Promotion, or Receipt is published after this blocked Attempt."],
-    block_type: error.code ?? error.name ?? "runtime_error",
-    resume_condition: "A new bounded Run must re-admit the request after the blocking condition is resolved.",
+    block_type: recoverableProviderFailure ? "runtime_provider_failure" : error.code ?? error.name ?? "runtime_error",
+    resume_condition: recoverableProviderFailure
+      ? "Reconnect the provider or adapter, then resume this Run without dispatching a duplicate Attempt."
+      : "A new bounded Run must re-admit the request after the blocking condition is resolved.",
   });
   const outcomeRef = writeArtifact(ctx, "artifacts/outcomes/failure.json", outcome);
   applyTransition(ctx, durableState, "run_blocked", { lifecycle_state: "blocked" }, [outcomeRef]);
@@ -1670,9 +1680,13 @@ function receiptFor(ctx, state, {
 function outcomeEntries(runDir) {
   const outcomeDir = join(runDir, "artifacts/outcomes");
   if (!existsSync(outcomeDir)) return [];
-  return readdirSync(outcomeDir)
+  const files = readdirSync(outcomeDir).filter((file) => file.endsWith(".json"));
+  let state = null;
+  try { state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")); } catch { /* state is not published yet */ }
+  const numbered = files.filter((file) => /^\d{4}\.json$/.test(file)).sort();
+  const fixed = files.filter((file) => !/^\d{4}\.json$/.test(file)).sort();
+  return [...(state?.lifecycle_state === "blocked" ? numbered : fixed), ...(state?.lifecycle_state === "blocked" ? fixed : numbered)]
     .filter((file) => file.endsWith(".json"))
-    .sort()
     .map((file) => ({
       file,
       outcome: JSON.parse(readFileSync(join(outcomeDir, file), "utf8")),
@@ -1800,10 +1814,7 @@ function acceptMaterialDecision(ctx, state, { response, disposition }) {
 }
 
 function latestOutcome(runDir) {
-  const outcomeDir = join(runDir, "artifacts/outcomes");
-  if (!existsSync(outcomeDir)) return null;
-  const files = readdirSync(outcomeDir).filter((file) => file.endsWith(".json")).sort();
-  return files.length === 0 ? null : JSON.parse(readFileSync(join(outcomeDir, files.at(-1))));
+  return outcomeEntries(runDir).at(-1)?.outcome ?? null;
 }
 
 function reconcilePreparedTaskArtifacts(ctx, state) {
@@ -1963,15 +1974,23 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
+  const resumableProviderBlock = state.lifecycle_state === "blocked"
+    && latestOutcome(runDir)?.block_type === "runtime_provider_failure";
   if (["completed", "cancelled"].includes(state.lifecycle_state)
-    || (state.lifecycle_state === "blocked" && latestOutcome(runDir)?.block_type !== "cancel_unconfirmed")) {
+    || (state.lifecycle_state === "blocked"
+      && !["cancel_unconfirmed", "runtime_provider_failure"].includes(latestOutcome(runDir)?.block_type))) {
     return { ...inspect, next_action: null };
   }
   if (state.lifecycle_state === "cancelling") {
     try {
       return await cancelRun(runDir, { runtime, hooks });
     } catch (error) {
-      if (error.code !== "simulated_crash") throw error;
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        throw error;
+      }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -1979,7 +1998,12 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
     try {
       return await cancelRun(runDir, { runtime, hooks });
     } catch (error) {
-      if (error.code !== "simulated_crash") throw error;
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        throw error;
+      }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -2003,7 +2027,7 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
-  if (state.lifecycle_state === "active"
+  if ((state.lifecycle_state === "active" || resumableProviderBlock)
     && (state.decision_refs ?? []).length > 0
     && !state.tasks?.["implementation-1"]) {
     if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "accepted Decision resume requires the target workspace");
@@ -2021,7 +2045,12 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       });
       return { ...resumed.inspect, next_action: null, ...resumed };
     } catch (error) {
-      if (error.code !== "simulated_crash") throw error;
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        throw error;
+      }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -2061,7 +2090,12 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       });
       return { ...resumed.inspect, next_action: null, ...resumed };
     } catch (error) {
-      if (error.code !== "simulated_crash") throw error;
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        throw error;
+      }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -2117,7 +2151,11 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       });
       return { ...inspectRun(runDir), next_action: null, lifecycle_state: completedState.lifecycle_state };
     } catch (error) {
-      if (!error.code) throw error;
+      if (!error.code && !isRecoverableProviderFailure(error)) throw error;
+      if (isRecoverableProviderFailure(error)) {
+        if (!existsSync(join(runDir, "artifacts/outcomes/failure.json"))) recordFailure(ctx, state, error);
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+      }
       if (error.code !== "simulated_crash") recordFailure(ctx, state, error);
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }

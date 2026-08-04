@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -149,6 +149,17 @@ function cliResume(workspace, runRoot, runId, extra = []) {
     "scripts/local-change.mjs", "resume", "--workspace", workspace,
     "--run-root", runRoot, "--run-id", runId, ...extra,
   ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+}
+
+function cliResumeWithEnv(workspace, runRoot, runId, env, extra = []) {
+  return JSON.parse(execFileSync(process.execPath, [
+    "scripts/local-change.mjs", "resume", "--workspace", workspace,
+    "--run-root", runRoot, "--run-id", runId, ...extra,
+  ], {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  }));
 }
 
 function actionSnapshot(runDir, runId) {
@@ -734,6 +745,181 @@ test("prepared Review replay admits one action before Promotion and Receipt", as
     assert.equal(receiptStep.lifecycle_state, "completed");
     assert.equal(existsSync(receiptPath), true);
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("recoverable provider failure is a typed durable checkpoint and resumes without duplicate artifacts", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    let failProvider = true;
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        const execute = runtime.execute.bind(runtime);
+        runtime.execute = async (execution) => {
+          if (failProvider && execution.attemptId === "planner-graph-2") {
+            failProvider = false;
+            throw Object.assign(new Error("provider temporarily unavailable"), { code: "provider_unavailable" });
+          }
+          return execute(execution);
+        };
+        return runtime;
+      },
+      hooks: { crashAt: "after_result_publication" },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    await resumeRun(runDir, { workspace, runtime });
+    const executionSequence = runtime.executionSequence;
+    const blocked = await resumeRun(runDir, { workspace, runtime });
+    assert.equal(blocked.lifecycle_state, "blocked");
+    assert.equal(blocked.checkpoint, "runtime_provider_failure");
+    const failurePath = join(runDir, "artifacts/outcomes/failure.json");
+    const failureBefore = readFileSync(failurePath, "utf8");
+    assert.equal(JSON.parse(failureBefore).block_type, "runtime_provider_failure");
+    assert.equal(existsSync(join(runDir, "artifacts/runtime/planner-graph-2.json")), false);
+    assert.equal(existsSync(join(runDir, "artifacts/graphs/0002.json")), false);
+
+    const recovered = await resumeRun(runDir, { workspace, runtime });
+    assert.equal(recovered.checkpoint, "graph_revision_2_admitted");
+    assert.equal(runtime.executionSequence, executionSequence + 1);
+    assert.equal(readFileSync(failurePath, "utf8"), failureBefore);
+    assert.equal(existsSync(join(runDir, "artifacts/runtime/planner-graph-2.json")), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("public CLI provider failure is durable and the next public resumes continue", async () => {
+  const { workspace, runRoot } = fixture();
+  const fakeBin = mkdtempSync(join(tmpdir(), "m2-provider-bin-"));
+  try {
+    let runtime;
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        return runtime;
+      },
+      hooks: { crashAt: "after_result_publication" },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    assert.equal(cliResume(workspace, runRoot, runId).checkpoint, "implementation_result_admitted");
+
+    const providerState = join(fakeBin, "provider-state.json");
+    writeFileSync(providerState, "0\n");
+    const fakeOpencode = join(fakeBin, "opencode");
+    writeFileSync(fakeOpencode, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const args = process.argv.slice(2);
+const statePath = process.env.M2_FAKE_PROVIDER_STATE;
+const readCount = () => {
+  try { return Number(readFileSync(statePath, "utf8")); } catch { return 0; }
+};
+const writeCount = (count) => writeFileSync(statePath, String(count));
+const send = (response, status, body) => {
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify(body));
+};
+const readBody = (request) => new Promise((resolve) => {
+  let raw = "";
+  request.on("data", (chunk) => { raw += chunk; });
+  request.on("end", () => resolve(raw.length === 0 ? {} : JSON.parse(raw)));
+});
+
+if (args[0] === "--version") {
+  process.stdout.write("m2-fake-opencode\\n");
+} else if (args[0] === "debug") {
+  process.stdout.write(JSON.stringify({ instructions: [], plugin: [], mcp: {}, agent: {}, command: {}, provider: {} }) + "\\n");
+} else if (args[0] === "serve") {
+  const sessions = new Map();
+  let nextSession = 1;
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname === "/global/health") return send(response, 200, { healthy: true, version: "m2-fake-opencode" });
+    if (url.pathname === "/agent") return send(response, 200, ["planner", "worker", "verifier"].map((role) => ({ name: "m1-" + role, model: { providerID: "fake", modelID: "model" } })));
+    if (url.pathname === "/event") {
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/event-stream");
+      response.write(": ready\\n\\n");
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/session") {
+      return send(response, 200, { id: "session-" + nextSession++ });
+    }
+    if (request.method === "GET" && url.pathname === "/session/status") {
+      return send(response, 200, Object.fromEntries([...sessions.keys()].map((id) => [id, { type: "idle" }])));
+    }
+    const sessionMatch = url.pathname.match(/^\\/session\\/([^/]+)\\/message$/);
+    if (sessionMatch && request.method === "GET") {
+      const message = sessions.get(sessionMatch[1]);
+      return send(response, 200, message ? [message] : []);
+    }
+    if (sessionMatch && request.method === "POST") {
+      const payload = await readBody(request);
+      const prompt = payload.parts?.[0]?.text ?? "";
+      const count = readCount();
+      if (count === 0) {
+        writeCount(1);
+        return send(response, 503, { error: "temporary provider failure" });
+      }
+      writeCount(count + 1);
+      const text = prompt.includes("graph revision 2")
+        ? JSON.stringify({ carry_forward_task_id: "implementation-1", verifier_task: { task_id: "verification-1", workflow_definition: "verification", requires: ["implementation-1"], read_resources: ["change.txt"], write_resources: [] }, verifier_packet: { objective: "verify", acceptance_criteria: ["target matches"], allowed_resources: ["change.txt"], forbidden_resources: [".git"], capabilities: ["repository_read"], admitted_commands: [], deadline_seconds: 3, escalation_condition: "mismatch" } })
+        : JSON.stringify({ verdict: "pass", findings: [], evidence: [{ claim: "the target matches", source: "verifier-read", observation: "the target bytes match" }] });
+      const message = { info: { id: "fake-message-" + count }, parts: [{ type: "text", text }] };
+      sessions.set(sessionMatch[1], message);
+      return send(response, 200, message);
+    }
+    return send(response, 404, { error: "not found" });
+  });
+  const port = Number(args[args.indexOf("--port") + 1]);
+  server.listen(port, "127.0.0.1");
+}
+`);
+    chmodSync(fakeOpencode, 0o755);
+    const env = {
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      M2_FAKE_PROVIDER_STATE: providerState,
+    };
+    const failed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(failed.lifecycle_state, "blocked");
+    assert.equal(failed.checkpoint, "runtime_provider_failure");
+    const failurePath = join(runDir, "artifacts/outcomes/failure.json");
+    const failureBefore = readFileSync(failurePath, "utf8");
+    assert.equal(JSON.parse(failureBefore).block_type, "runtime_provider_failure");
+    const runtimeBefore = readdirSync(join(runDir, "artifacts/runtime")).sort();
+    assert.equal(existsSync(join(runDir, "artifacts/graphs/0002.json")), false);
+
+    let resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "graph_revision_2_admitted");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "verification_dispatched");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "review_admitted");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "promotion_prepared");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "result_ref_promoted");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.lifecycle_state, "completed");
+    assert.equal(readFileSync(failurePath, "utf8"), failureBefore);
+    assert.deepEqual(readdirSync(join(runDir, "artifacts/runtime")).filter((path) => runtimeBefore.includes(path)), runtimeBefore);
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
   }
