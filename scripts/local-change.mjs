@@ -318,6 +318,38 @@ function writeArtifact(ctx, path, artifact) {
   return admitArtifact(ctx, path, artifact);
 }
 
+function preparedExecutionPath(ctx, attemptId) {
+  return join(ctx.runDir, "staging", "recovery", `${attemptId}.json`);
+}
+
+function writePreparedExecution(ctx, attemptId, execution) {
+  writeJson(preparedExecutionPath(ctx, attemptId), {
+    attempt_id: attemptId,
+    binding: execution.binding,
+    text: execution.text,
+  });
+}
+
+function readPreparedExecution(ctx, attemptId) {
+  const path = preparedExecutionPath(ctx, attemptId);
+  if (!existsSync(path)) {
+    throw new AttemptFailure("runtime_reconciliation_required", `prepared ${attemptId} execution is missing`);
+  }
+  const prepared = JSON.parse(readFileSync(path, "utf8"));
+  if (prepared.attempt_id !== attemptId
+    || typeof prepared.text !== "string"
+    || !prepared.binding
+    || prepared.binding.attempt_id !== attemptId) {
+    throw new AttemptFailure("runtime_reconciliation_required", `prepared ${attemptId} execution is invalid`);
+  }
+  return prepared;
+}
+
+function clearPreparedExecution(ctx, attemptId) {
+  const path = preparedExecutionPath(ctx, attemptId);
+  if (existsSync(path)) unlinkSync(path);
+}
+
 function writeRunState(ctx, state) {
   validateProtocol(state, "run state");
   resolveArtifactReferences(ctx, state);
@@ -1541,6 +1573,7 @@ function reconcilePromotion(ctx, {
   if (currentRefOid !== promotion.expected_ref_oid && currentRefOid !== promotion.promoted_ref_oid) {
     throw new AttemptFailure("result_ref_drift", "Result Ref is neither the prepared expected value nor the prepared promoted value");
   }
+  let refUpdated = false;
   if (currentRefOid === promotion.expected_ref_oid) {
     crashAt(ctx, "before_result_ref_update");
     ctx.hooks?.beforeResultRefCas?.({ resultRepo, resultRefName, resultCommit, taskWorkspace });
@@ -1549,6 +1582,7 @@ function reconcilePromotion(ctx, {
     } catch (error) {
       throw new AttemptFailure("result_ref_drift", `Result Ref CAS failed: ${error.message}`);
     }
+    refUpdated = true;
     ctx.hooks?.afterResultRefCas?.({ resultRepo, resultRefName, resultCommit, taskWorkspace });
     crashAt(ctx, "after_result_ref_update");
   }
@@ -1561,7 +1595,7 @@ function reconcilePromotion(ctx, {
     || promotedSnapshot !== promotion.verified_snapshot) {
     throw new AttemptFailure("promotion_snapshot_mismatch", "Promotion tree does not match the verified snapshot");
   }
-  return { promotion, promotedRefOid, promotedSnapshot };
+  return { promotion, promotedRefOid, promotedSnapshot, refUpdated };
 }
 
 function nextOutcomePath(runDir) {
@@ -1808,8 +1842,10 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
         [taskId]: { task_state: "artifacts_published", attempts: projection.attempts, artifact_ref: artifactRef },
       },
     }, [artifact.runtime_ref, artifactRef]);
+    crashAt(ctx, `after_prepared_${taskId}_admission`);
+    return { state: next, eventKind, taskId };
   }
-  return next;
+  return { state: next, eventKind: null, taskId: null };
 }
 
 function validateCompletedRun(ctx, state, outcomeEntry) {
@@ -1991,7 +2027,15 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   }
   const reconciliationCtx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
   try {
-    state = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
+    const reconciliation = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
+    state = reconciliation.state;
+    if (reconciliation.eventKind) {
+      return {
+        ...inspectRun(runDir),
+        next_action: null,
+        checkpoint: reconciliation.eventKind,
+      };
+    }
   } catch (error) {
     if (!error.code) throw error;
     if (error.code !== "simulated_crash") recordFailure(reconciliationCtx, state, error);
@@ -2028,6 +2072,7 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       const review = resolveArtifactReference(ctx, reviewArtifactRef);
       let promotion;
       let promotionRef;
+      let promotionWasPrepared = false;
       if (existsSync(join(runDir, promotionPath))) {
         promotion = JSON.parse(readFileSync(join(runDir, promotionPath), "utf8"));
         promotionRef = reference(promotion.artifact_id, promotionPath, promotion);
@@ -2044,17 +2089,24 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
         });
         promotion = prepared.promotion;
         promotionRef = prepared.promotionRef;
+        promotionWasPrepared = true;
       } else {
         return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_reconciliation_required" };
       }
+      if (promotionWasPrepared) {
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "promotion_prepared" };
+      }
       ctx.admittedRefs.push(promotionRef);
-      const { promotedSnapshot } = reconcilePromotion(ctx, {
+      const { promotedSnapshot, refUpdated } = reconcilePromotion(ctx, {
         resultRepo: resultRepoPath,
         resultRefName: promotion.result_ref,
         resultCommit: resultArtifact.result_commit ?? promotion.promoted_ref_oid,
         promotionRef,
         taskWorkspace: null,
       });
+      if (refUpdated) {
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "result_ref_promoted" };
+      }
       const { state: completedState } = receiptFor(ctx, state, {
         requestRef: state.request_ref,
         graphRef: state.active_graph_ref,
@@ -2555,6 +2607,7 @@ export async function runLocalChange({
     const verificationPacketPath = "artifacts/tasks/verification-1/attempts/1/packet.json";
     const graphTwoAdmitted = state.active_graph_ref?.path === graphTwoPath;
     if (graphTwoAdmitted) {
+      clearPreparedExecution(ctx, "planner-graph-2");
       graphTwoRef = state.active_graph_ref;
       graphTwo = resolveArtifactReference(ctx, graphTwoRef);
       verificationPacketRef = graphTwo.nodes.find(({ task_id }) => task_id === "verification-1")?.packet_ref;
@@ -2603,6 +2656,30 @@ export async function runLocalChange({
           configuration_digest: plannerRuntime.configuration_digest,
           binding_state: "idle",
         };
+      } else if (continuingResult && existsSync(join(runDir, "artifacts/runtime/planner-graph-2.json"))) {
+        const prepared = readPreparedExecution(ctx, "planner-graph-2");
+        const plannerRuntimePath = "artifacts/runtime/planner-graph-2.json";
+        const plannerRuntime = JSON.parse(readFileSync(join(runDir, plannerRuntimePath), "utf8"));
+        validateProtocol(plannerRuntime, "graph revision 2 planner Runtime Observation");
+        graphTwoRuntimeRef = reference(plannerRuntime.artifact_id, plannerRuntimePath, plannerRuntime);
+        graphTwoBinding = prepared.binding;
+        verification = verificationPlan(responseObject(prepared.text, "revision 2 planner"), {
+          targetFile,
+          requestText,
+          attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
+        });
+        const verificationPacket = makePacket({
+          runId,
+          graphRevision: 2,
+          taskId: "verification-1",
+          packet: verification.packet,
+          runtimeRef: graphTwoRuntimeRef,
+          artifactId: "packet-verification-1",
+          targetTaskRef: resultArtifactRef,
+          targetSnapshot: workerSnapshot.digest,
+          actorId: graphTwoBinding.agent_identity,
+        });
+        verificationPacketRef = writeArtifact(ctx, verificationPacketPath, verificationPacket);
       } else {
         admitBudget(state, "planner_attempt");
         admitBudget(state, "graph_revision");
@@ -2626,7 +2703,9 @@ export async function runLocalChange({
           deadlineSeconds: admittedAttemptDeadlineSeconds,
         });
         admitAttemptExecution(ctx, graphTwoExecution, "graph revision 2 planner Attempt");
+        writePreparedExecution(ctx, "planner-graph-2", graphTwoExecution);
         graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
+        crashAt(ctx, "after_graph_two_runtime_publication");
         verification = verificationPlan(responseObject(graphTwoExecution.text, "revision 2 planner"), {
           targetFile,
           requestText,
@@ -2671,6 +2750,7 @@ export async function runLocalChange({
           "verification-1": { task_state: "planned", attempts: 0 },
         },
       }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
+      clearPreparedExecution(ctx, "planner-graph-2");
       if (continuingResult) {
         return {
           run_id: runId,
@@ -2702,6 +2782,7 @@ export async function runLocalChange({
           "verification-1": { task_state: "planned", attempts: 0 },
         },
       }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
+      clearPreparedExecution(ctx, "planner-graph-2");
       if (continuingResult) {
         return {
           run_id: runId,
@@ -2749,29 +2830,58 @@ export async function runLocalChange({
       `Independently inspect the frozen Result/Output Snapshot: worker Result artifact reference ${resultArtifactRef.path} (${resultArtifactRef.digest}), declared output snapshot ${workerSnapshot.digest}, changed resource ${targetFile}.`,
       "After the read, do not call another tool. Your final response MUST be exactly one JSON object and no Markdown, with this shape: {\"verdict\":\"pass\",\"findings\":[],\"evidence\":[{\"claim\":\"the declared change is present\",\"source\":\"verifier-read\",\"observation\":\"the named target bytes match the frozen Result Output Snapshot\"}]}",
     ].join("\n");
-    const verifierExecution = await adapter.execute({
-      role: "verifier",
-      attemptId: "verifier-1",
-      taskId: "verification-1",
-      attempt: 1,
-      binding: verifierBinding,
-      prompt: verifierPrompt,
-      beforeSnapshot: workerSnapshot,
-      deadlineSeconds: verification.packet.deadline_seconds,
-    });
-    admitAttemptExecution(ctx, verifierExecution, "independent verifier Attempt");
-    const observedVerifierSnapshot = workspaceSnapshot(taskWorkspace);
-    if (observedVerifierSnapshot.digest !== workerSnapshot.digest) {
-      throw new Error(`Output Snapshot changed during verification: ${JSON.stringify(diffEntries(workerSnapshot, observedVerifierSnapshot))}`);
+    let verifierExecution;
+    let verifierRuntimeRef;
+    const verifierRuntimePath = "artifacts/runtime/verifier-1.json";
+    if (existsSync(join(runDir, verifierRuntimePath))) {
+      const prepared = readPreparedExecution(ctx, "verifier-1");
+      const verifierRuntime = JSON.parse(readFileSync(join(runDir, verifierRuntimePath), "utf8"));
+      validateProtocol(verifierRuntime, "verifier Runtime Observation");
+      if (prepared.binding.session_id !== verifierRuntime.session_id
+        || prepared.binding.agent_identity !== verifierRuntime.agent_identity
+        || verifierRuntime.attempt_id !== "verifier-1") {
+        throw new AttemptFailure("runtime_reconciliation_required", "prepared verifier execution does not match its Runtime Observation");
+      }
+      const observedVerifierSnapshot = workspaceSnapshot(taskWorkspace);
+      if (observedVerifierSnapshot.digest !== workerSnapshot.digest
+        || verifierRuntime.observed_output_snapshot !== workerSnapshot.digest) {
+        throw new AttemptFailure("result_snapshot_mismatch", "verifier Runtime Observation does not reproduce the verified Output Snapshot");
+      }
+      verifierExecution = {
+        binding: prepared.binding,
+        text: prepared.text,
+        snapshot: observedVerifierSnapshot,
+        changes: verifierRuntime.observed_changes,
+        observation: verifierRuntime,
+      };
+      verifierRuntimeRef = reference(verifierRuntime.artifact_id, verifierRuntimePath, verifierRuntime);
+    } else {
+      verifierExecution = await adapter.execute({
+        role: "verifier",
+        attemptId: "verifier-1",
+        taskId: "verification-1",
+        attempt: 1,
+        binding: verifierBinding,
+        prompt: verifierPrompt,
+        beforeSnapshot: workerSnapshot,
+        deadlineSeconds: verification.packet.deadline_seconds,
+      });
+      admitAttemptExecution(ctx, verifierExecution, "independent verifier Attempt");
+      const observedVerifierSnapshot = workspaceSnapshot(taskWorkspace);
+      if (observedVerifierSnapshot.digest !== workerSnapshot.digest) {
+        throw new Error(`Output Snapshot changed during verification: ${JSON.stringify(diffEntries(workerSnapshot, observedVerifierSnapshot))}`);
+      }
+      verifierExecution.snapshot = observedVerifierSnapshot;
+      verifierExecution.changes = diffEntries(workerSnapshot, observedVerifierSnapshot);
+      verifierExecution.observation = {
+        ...verifierExecution.observation,
+        observed_changes: verifierExecution.changes,
+        observed_output_snapshot: observedVerifierSnapshot.digest,
+      };
+      writePreparedExecution(ctx, "verifier-1", verifierExecution);
+      verifierRuntimeRef = writeArtifact(ctx, verifierRuntimePath, verifierExecution.observation);
+      crashAt(ctx, "after_verifier_runtime_publication");
     }
-    verifierExecution.snapshot = observedVerifierSnapshot;
-    verifierExecution.changes = diffEntries(workerSnapshot, observedVerifierSnapshot);
-    verifierExecution.observation = {
-      ...verifierExecution.observation,
-      observed_changes: verifierExecution.changes,
-      observed_output_snapshot: observedVerifierSnapshot.digest,
-    };
-    const verifierRuntimeRef = writeArtifact(ctx, "artifacts/runtime/verifier-1.json", verifierExecution.observation);
     const reviewProposal = parseReview(responseObject(verifierExecution.text, "verifier"));
     const review = envelope({
       kind: "review",
@@ -2800,6 +2910,7 @@ export async function runLocalChange({
         "verification-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewArtifactRef },
       },
     }, [verifierRuntimeRef, reviewArtifactRef]);
+    clearPreparedExecution(ctx, "verifier-1");
     if (continuingResult) {
       return {
         run_id: runId,
