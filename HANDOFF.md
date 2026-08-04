@@ -9,8 +9,8 @@
   natural-language public execution input, Result Ref vocabulary, native
   network denial, pre-dispatch material Decision gating, publication
   reconciliation, cancellation reconciliation, worker-authored Result
-  proposals, fail-closed inspect, complete command Evidence validation, and
-  honest M0 cancellation capability reporting.
+  proposals, fail-closed inspect, complete command Evidence validation, and a
+  live M0 process-death/reconnect cancellation probe.
 - `cancel` records intent before abort, confirms a stopped runtime or writes
   an immutable Runtime Observation plus `cancel_unconfirmed` Typed Block, and
   never dispatches a successor. A later public `resume` uses the durable
@@ -19,9 +19,9 @@
 - Result/Review publication has deterministic prepared-artifact recovery.
   Promotion preparation precedes CAS and `resume` reconciles expected,
   already-promoted, and conflicting refs. A crash after Result publication
-  leaves a typed `runtime_reconciliation_required` checkpoint that is
-  resumable; a crash after Review publication completes. Repeated public
-  resume and publication are idempotent.
+  reconstructs the isolated Result, performs the next planner/verifier action,
+  and reaches Receipt; a crash after Review publication completes. Repeated
+  public resume and publication are idempotent.
 - Runtime event subscriptions are observational only; attempt execution no
   longer waits indefinitely for SSE readiness, so the admitted Attempt
   deadline remains the execution bound.
@@ -34,11 +34,11 @@
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
 - Current branch is `agent/executable-opencode-harness-design` after local
-  repair commits through `09cb345`; this handoff update is the next local
+  repair commits through `60e557b`; this handoff update is the next local
   commit. Nothing has been pushed and no PR exists.
-- Current evidence: protocol 4/4, M0 16/16, full M1 11/11 including a fresh
-  successful real OpenCode trace, M2 17/17, kernel 1/1, JavaScript syntax
-  checks, and `git diff --check` all pass.
+- Current evidence: protocol 4/4, M0 16/16, full M1 12/12 including a fresh
+  successful real OpenCode trace, M2 19/19, kernel 1/1, JavaScript syntax
+  checks, and `git diff --check` pass.
 
 ### Next task
 
@@ -96,16 +96,18 @@ performed. Before any future publication:
   confirm `cancelled`. A Run with no active binding also writes a fallback
   Runtime Observation and block rather than remaining `cancelling`.
 - Crash boundaries: deterministic hooks cover before/after Promotion
-  preparation, before/after Result Ref CAS, after Result publication, after
-  Review publication, before/after `receipt_admitted` Run-state replacement,
-  before/after runtime abort, and repeated public CLI resume at each boundary.
+  preparation, before/after Result Ref CAS, after Result publication with
+  planner/verifier continuation, after Review publication, before/after
+  `receipt_admitted` Run-state replacement, before/after runtime abort, and
+  repeated public CLI resume at each boundary.
 
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
-- `npm run test:m0` — 16/16 passed.
-- `npm run test:m1` — 11/11 passed, including the real OpenCode trace.
-- `npm run test:m2` — 17/17 passed after the final runtime-bound repair.
+- `npm run test:m0` — 16/16 passed, including the live process-death/reconnect
+  cancellation probe.
+- `npm run test:m1` — 12/12 passed, including the real OpenCode trace.
+- `npm run test:m2` — 19/19 passed after the final runtime-bound repair.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check scripts/local-change.mjs` and
   `node --check scripts/probe-opencode.mjs` — passed.
@@ -114,21 +116,27 @@ performed. Before any future publication:
 
 ### Remaining limitations
 
-- The M0 operator probe intentionally reports
-  `operator.cancel_unconfirmed_reconcile` as capability-unverified rather
-  than relabeling a deadline abort. M2 proves the durable later-observation
-  path with its file-backed adapter seam; no M0 cross-process server-death
-  capability is claimed.
-- A public resume after process death cannot reconnect to an external
-  OpenCode server that no longer exists in the process; it fails closed as
-  `cancel_unconfirmed`. The bounded adapter seam can confirm abort/status when
-  the durable binding is reachable.
+- The M0 operator probe now kills and restarts the fixture-local OpenCode
+  server, observes the dead-server abort failure, reconnects the same session,
+  and requires post-reconnect abort confirmation/stopped evidence. It does not
+  claim recovery of an unrelated external server or a runtime outside the
+  fixture-local binding.
+- Public repeated resume of an unresolved cancellation is deliberately
+  idempotent when no runtime adapter is reachable: it returns the durable
+  `cancel_unconfirmed` checkpoint without rewriting fixed artifacts or
+  dispatching a successor. A reachable adapter may later confirm the binding.
 - Material gating is deliberately fail-closed to explicit durable Request
   ambiguity markers; caller-text keywords and model confidence alone cannot
   create a human gate.
 - Repository-policy intake cites the target workspace's `AGENTS.md` when it is
   present and records an explicit empty-policy statement otherwise; the
   planner receives that Kernel-derived content and cannot read files.
+- The worker receives the observed post-commit snapshot in a second message of
+  the same Attempt and authors the Result proposal, including
+  `output_snapshot`; the Kernel validates and publishes it. Kernel command
+  execution remains durable in Runtime Observation, while command Evidence is
+  accepted only when explicitly worker-authored and fully bound by the
+  admission seam.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -147,7 +155,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD: repair tip `09cb345`; this handoff update is the next local commit
+- HEAD: repair tip `60e557b`; this handoff update is the next local commit
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
 - no protected uncommitted work was present before this handoff edit
@@ -440,10 +448,12 @@ work.
   paths, and every emitted Run/artifact is validated against protocol-v1 before
   it is written.
 - The worker may use only OpenCode read/edit/write tools; the kernel executes
-  the one exact typed `verify-change` command and binds its output digest into
-  Result evidence. Verifier output is accepted only after the kernel confirms
-  unchanged snapshot; no M2 recovery, repairs, concurrency, extra preset,
-  inspect@1, llm-wiki, or Application path was added.
+  the one exact typed `verify-change` command and records its output digest in
+  the worker Runtime Observation. Result evidence remains worker-authored;
+  explicit command Evidence is accepted only when fully bound by admission.
+  Verifier output is accepted only after the kernel confirms unchanged
+  snapshot; no M2 recovery, repairs, concurrency, extra preset, inspect@1,
+  llm-wiki, or Application path was added.
 
 ### Mistakes and failed assumptions
 
