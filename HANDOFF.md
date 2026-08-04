@@ -9,39 +9,92 @@
   execution authority, Packet deadlines could widen their parent deadline,
   command Evidence was not semantically checked against its Runtime
   Observation, and a symlinked run root could enter the user workspace.
-- Promotion crash reconciliation remains M2-owned. Worker-authored Result,
-  observed local verifier reads, and durable pre-runtime startup failure were
-  not expanded because the current protocol/public observations do not support
-  a focused M1 repair without new product contract.
-- M2 has started through the public CLI. The runtime probe now has a passing
-  `operator.cancel_and_observe` M2 row, and `resume` reconstructs a terminal
-  Run from validated files, is repeat-idempotent, and rejects invalid durable
-  state without guessing from OpenCode history.
+- M2 recovery, cancellation, budget exhaustion, material decisions, and
+  paired low-risk ambiguity are complete through the public CLI and
+  file-backed Run artifacts. `cancel` records intent before abort, confirms a
+  stopped runtime or durably blocks as `cancel_unconfirmed`; `resume` repairs
+  prepared Promotion state across all three Result Ref cases, preserves a
+  cumulative Run limit as a Typed Block, admits exactly one human Decision
+  successor, and records the paired low-risk Assumption before continuing.
 - Current branch is `agent/executable-opencode-harness-design` at
-  `7d0190b`; no M0/M1 implementation commit or PR exists.
-- Current evidence: protocol 4/4, M1 7/7 including a fresh successful real
-  OpenCode trace, M2 replay 1/1, M0/M2 capability probe 16/16, kernel 1/1,
-  JavaScript syntax checks, and `git diff --check` all pass.
+  implementation tip `c07da36`; this handoff update is the next local commit.
+  Nothing has been pushed and no PR exists.
+- Current evidence: protocol 4/4, M0 16/16, full M1 7/7 including a fresh
+  successful real OpenCode trace, M2 10/10, kernel 1/1, JavaScript syntax
+  checks, and `git diff --check` all pass.
 
 ### Next task
 
-Continue M2 one RED -> GREEN vertical slice at a time through the same public
-CLI and file-backed Run seam. Next implement operator `cancel`: record intent
-before abort, confirm or preserve `cancel_unconfirmed`, and never dispatch a
-successor into the unresolved workspace. Then implement prepared Promotion CAS
-reconciliation and only afterward the bounded Material Decision round trip.
-Do not add a generic recovery engine, retry/fork surface, concurrency, or M3.
+M2 is complete locally. The next milestone is M3's one finding-bound repair;
+that work is intentionally not included here. Do not add a generic recovery
+engine, arbitrary retry/fork surface, concurrency, or Application.
 
 ### PR gate
 
-Do not commit, push, or open a PR without current user authorization. Before a
-future publication:
+The user authorized local commits for this continuation. No push or PR was
+performed. Before any future publication:
 
 - every retained repair is tied to an explicit M1 criterion and focused
   regression test;
 - protocol, M0, deterministic M1, and current real-runtime M1 checks pass;
 - the successful real trace satisfies the M1 exit evidence;
-- the claimed milestone boundary matches the actual M2 state and tests.
+- the claimed milestone boundary matches the actual M2 state and tests;
+- the handoff's exact evidence is refreshed against the live checkout.
+
+## M2 recovery ledger (2026-08-05)
+
+### Acceptance evidence
+
+- Operator cancellation: `cancel_requested` is durably appended before the
+  runtime abort. A confirmed stop appends `cancel_confirmed` and closes the
+  Run as `cancelled`; an unconfirmed stop writes an immutable Runtime
+  Observation, a `cancel_unconfirmed` Typed Block, and no successor dispatch.
+  Public `cancel` after simulated process death exercises the same durable
+  fallback.
+- Prepared Promotion: `artifacts/promotions/promotion-1.json` is written
+  before Result Ref CAS and contains the expected ref, promoted ref, and
+  snapshot. `resume` handles the current ref at expected, already-promoted,
+  or conflicting OID; only the first two proceed, while drift becomes a
+  typed block. Repeated resume is idempotent.
+- Cumulative Run limits: planner, execution, revision, and repair admissions
+  consume the same durable Run counters; exhaustion produces a Typed Block
+  rather than another attempt.
+- Material Decision: `material_decision_request` survives restart with its
+  prepared Promotion reference. `resume --decision` admits exactly one
+  `producer.role=human`, `disposition=accepted` Decision artifact under
+  `artifacts/decisions/decision-1/0001.json`, then reconciles Promotion and
+  resumes. Repeated responses do not create another successor.
+- Paired low-risk ambiguity: exactly two non-material ambiguity strings create
+  one durable Assumption before proposal continuation. Materiality is not
+  inferred from model confidence.
+- Crash boundaries: deterministic hooks cover before/after Promotion
+  preparation, before/after Result Ref CAS, before/after Run-state
+  replacement, before/after runtime abort, and repeated resume at each
+  boundary.
+
+### Verification
+
+- `npm run test:protocol` — 4/4 passed.
+- `npm run test:m0` — 16/16 passed.
+- `npm run test:m1` — 7/7 passed, including the real OpenCode trace.
+- `npm run test:m2` — 10/10 passed.
+- `node --test test/m1-kernel.test.mjs` — 1/1 passed.
+- `node --check scripts/local-change.mjs` and
+  `node --check scripts/probe-opencode.mjs` — passed.
+- `git diff --check` — passed; the checkout was clean before this handoff
+  edit.
+
+### Remaining limitations
+
+- A CLI-only cancellation after process death cannot prove that an external
+  runtime stopped, so it fails closed as `cancel_unconfirmed`; only the live
+  adapter can confirm abort/status.
+- Material gating is deliberately fail-closed to explicit human-request
+  markers plus declared planner ambiguity prefixes; model confidence alone
+  cannot create a human gate.
+- Recovery covers the current single-task prepared Promotion and Decision
+  checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
+  M3 repair, and Application remain out of scope.
 
 ## Historical objective
 
