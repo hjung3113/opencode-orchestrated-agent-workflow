@@ -124,6 +124,13 @@ test("resume reconstructs a terminal Run idempotently and rejects invalid durabl
   try {
     const run = await runLocalChange({ workspace, runRoot, requestText: "Add change.txt.", runtimeFactory: (options) => new Runtime(options) });
     const statePath = join(run.run_dir, "run.json");
+    const inspected = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "inspect", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(inspected.result_ref, `refs/orchestrator/results/${run.run_id}`);
+    assert.equal(Array.isArray(inspected.runtime_bindings), true);
+    assert.equal(inspected.receipt.artifact_refs.some(({ path }) => path.endsWith("result.json")), true);
     const before = readFileSync(statePath, "utf8");
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const resumed = JSON.parse(execFileSync(process.execPath, [
