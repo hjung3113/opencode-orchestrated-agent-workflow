@@ -144,6 +144,21 @@ function fixture() {
   return { workspace, runRoot };
 }
 
+function artifactEntries(runDir) {
+  const entries = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolutePath);
+      else if (entry.name.endsWith(".json")) {
+        entries.push([absolutePath, JSON.parse(readFileSync(absolutePath, "utf8"))]);
+      }
+    }
+  };
+  visit(join(runDir, "artifacts"));
+  return entries;
+}
+
 function cliResume(workspace, runRoot, runId, extra = []) {
   return JSON.parse(execFileSync(process.execPath, [
     "scripts/local-change.mjs", "resume", "--workspace", workspace,
@@ -283,6 +298,16 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       expected: /producer|independent/i,
     },
     {
+      name: "worker and verifier session collision",
+      mutate: ({ state, reviewRuntime }) => {
+        const workerBinding = state.runtime_bindings.find(({ role }) => role === "worker");
+        const verifierBinding = state.runtime_bindings.find(({ role }) => role === "verifier");
+        verifierBinding.session_id = workerBinding.session_id;
+        reviewRuntime.session_id = workerBinding.session_id;
+      },
+      expected: /session|independent|provenance/i,
+    },
+    {
       name: "runtime role",
       mutate: ({ result, review }) => { review.runtime_ref = result.runtime_ref; },
       expected: /runtime|independent/i,
@@ -354,7 +379,7 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
       const resultRuntime = JSON.parse(readFileSync(resultRuntimePath, "utf8"));
       const reviewRuntime = JSON.parse(readFileSync(reviewRuntimePath, "utf8"));
-      testCase.mutate({ result, review, resultRuntime, reviewRuntime, promotion, receipt });
+      testCase.mutate({ state, result, review, resultRuntime, reviewRuntime, promotion, receipt });
       const replaceRefs = (value, path, next) => {
         if (Array.isArray(value)) return value.forEach((item) => replaceRefs(item, path, next));
         if (!value || typeof value !== "object") return;
@@ -365,23 +390,30 @@ test("public inspect rejects semantically malformed completed artifacts", async 
         Object.values(value).forEach((item) => replaceRefs(item, path, next));
       };
       const containers = [state, result, review, promotion, receipt];
-      const artifacts = [
+      const artifacts = artifactEntries(run.run_dir);
+      for (const [absolutePath, artifact] of [
         [resultRuntimePath, resultRuntime],
         [reviewRuntimePath, reviewRuntime],
         [resultPath, result],
         [reviewPath, review],
         [promotionPath, promotion],
         [receiptPath, receipt],
-      ];
-      for (const [absolutePath, artifact] of artifacts) {
-        const path = absolutePath.slice(`${run.run_dir}/`.length);
-        const nextRef = {
-          reference_kind: "artifact",
-          artifact_id: artifact.artifact_id,
-          path,
-          digest: digest(artifact),
-        };
-        containers.forEach((value) => replaceRefs(value, path, nextRef));
+      ]) {
+        const entry = artifacts.find(([path]) => path === absolutePath);
+        if (entry) entry[1] = artifact;
+      }
+      containers.push(...artifacts.map(([, artifact]) => artifact));
+      for (let pass = 0; pass < artifacts.length; pass += 1) {
+        for (const [absolutePath, artifact] of artifacts) {
+          const path = absolutePath.slice(`${run.run_dir}/`.length);
+          const nextRef = {
+            reference_kind: "artifact",
+            artifact_id: artifact.artifact_id,
+            path,
+            digest: digest(artifact),
+          };
+          containers.forEach((value) => replaceRefs(value, path, nextRef));
+        }
       }
       artifacts.forEach(([absolutePath, artifact]) => writeFileSync(absolutePath, `${JSON.stringify(artifact, null, 2)}\n`));
       writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
@@ -389,6 +421,42 @@ test("public inspect rejects semantically malformed completed artifacts", async 
         "scripts/local-change.mjs", "inspect", "--workspace", workspace,
         "--run-root", runRoot, "--run-id", run.run_id,
       ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), testCase.expected, testCase.name);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("public inspect walks planner Request, Graph, and Packet Runtime provenance", async () => {
+  for (const runtimePath of [
+    "artifacts/runtime/planner-request.json",
+    "artifacts/runtime/planner-graph-1.json",
+    "artifacts/runtime/planner-graph-2.json",
+  ]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      const run = await runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => new Runtime(options),
+      });
+      const path = join(run.run_dir, runtimePath);
+      const runtime = JSON.parse(readFileSync(path, "utf8"));
+      runtime.message_ids = ["tampered-planner-runtime"];
+      const statePath = join(run.run_dir, "run.json");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      state.transitions = state.transitions.map((transition) => ({
+        ...transition,
+        record_refs: transition.record_refs.filter((recordRef) => recordRef.path !== runtimePath),
+      }));
+      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      writeFileSync(path, `${JSON.stringify(runtime, null, 2)}\n`);
+      assert.throws(() => execFileSync(process.execPath, [
+        "scripts/local-change.mjs", "inspect", "--workspace", workspace,
+        "--run-root", runRoot, "--run-id", run.run_id,
+      ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /artifact reference digest|reference/i, runtimePath);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(runRoot, { recursive: true, force: true });

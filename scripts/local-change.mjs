@@ -237,7 +237,7 @@ function safeArtifactPath(runDir, path) {
   return fullPath;
 }
 
-export function resolveArtifactReference(ctx, artifactReference) {
+export function resolveArtifactReference(ctx, artifactReference, seen = new Set()) {
   if (!referenceValidator(artifactReference)) {
     throw new Error(`artifact reference failed protocol validation: ${JSON.stringify(referenceValidator.errors)}`);
   }
@@ -249,16 +249,17 @@ export function resolveArtifactReference(ctx, artifactReference) {
     || digest(artifact) !== artifactReference.digest) {
     throw new Error(`artifact reference digest or id mismatch: ${artifactReference.path}`);
   }
+  const key = `${artifactReference.path}:${artifactReference.digest}`;
+  if (!seen.has(key)) {
+    seen.add(key);
+    resolveArtifactReferences(ctx, artifact, seen);
+  }
   return artifact;
 }
 
 function resolveArtifactReferences(ctx, value, seen = new Set()) {
   if (isArtifactReference(value)) {
-    const key = `${value.path}:${value.digest}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      resolveArtifactReference(ctx, value);
-    }
+    resolveArtifactReference(ctx, value, seen);
     return;
   }
   if (Array.isArray(value)) {
@@ -1961,6 +1962,7 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     || resultArtifact.producer.actor_id !== resultRuntime.agent_identity
     || review.producer.actor_id !== reviewRuntime.agent_identity
     || resultRuntime.agent_identity === reviewRuntime.agent_identity
+    || resultRuntime.session_id === reviewRuntime.session_id
     || workerBinding?.role !== "worker"
     || verifierBinding?.role !== "verifier"
     || resultRuntime.task_id !== resultArtifact.task_id
@@ -1973,6 +1975,7 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     || verifierBinding?.task_id !== review.task_id
     || verifierBinding?.attempt !== review.attempt
     || verifierBinding?.session_id !== reviewRuntime.session_id
+    || workerBinding?.session_id === verifierBinding?.session_id
     || workerBinding.agent_identity !== resultRuntime.agent_identity
     || verifierBinding.agent_identity !== reviewRuntime.agent_identity) {
     throw new Error("completed Run producer/runtime identities do not preserve independent worker and verifier roles");
@@ -2022,7 +2025,10 @@ export function inspectRun(runDir) {
   resolveArtifactReferences(ctx, state);
   const outcomeEntry = outcomeEntries(runDir).at(-1) ?? null;
   const outcome = outcomeEntry?.outcome ?? null;
-  if (outcome) validateProtocol(outcome, "latest outcome");
+  if (outcome) {
+    validateProtocol(outcome, "latest outcome");
+    resolveArtifactReferences(ctx, outcome);
+  }
   if (state.lifecycle_state === "completed") validateCompletedRun(ctx, state, outcomeEntry);
   let resultRef = null;
   if (outcome?.promotion_ref) {
