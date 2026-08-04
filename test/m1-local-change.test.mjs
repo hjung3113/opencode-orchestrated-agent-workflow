@@ -424,6 +424,7 @@ test("real local-change@1 run preserves the user worktree and emits the verified
       "graph_revision_1_admitted",
       "implementation_dispatched",
       "implementation_result_admitted",
+      "runtime_dispatch_prepared",
       "graph_revision_2_admitted",
       "verification_dispatched",
       "review_admitted",
