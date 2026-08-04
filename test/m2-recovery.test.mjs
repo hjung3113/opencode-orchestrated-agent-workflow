@@ -420,6 +420,7 @@ test("Material Decision Request survives restart and admits exactly one human su
       "scripts/local-change.mjs", "resume", "--workspace", workspace,
       "--run-root", runRoot, "--run-id", run.run_id,
       "--decision", "Use the bounded harness-owned Result Ref.",
+      "--decision-disposition", "accepted",
     ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
     assert.equal(resumed.lifecycle_state, "completed");
     const decisionRoot = join(runDir, "artifacts/decisions");
@@ -438,6 +439,46 @@ test("Material Decision Request survives restart and admits exactly one human su
     assert.equal(repeated.lifecycle_state, "completed");
     assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat);
     assert.equal(readdirSync(join(runDir, "artifacts/decisions", readdirSync(decisionRoot)[0])).length, 1);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicitly rejected Decision is durable and never promotes", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Please update the file using the bounded local workflow.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
+    });
+    const rejected = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+      "--decision", "Do not admit this Promotion.",
+      "--decision-disposition", "rejected",
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(rejected.lifecycle_state, "material_decision_required");
+    assert.equal(existsSync(join(run.run_dir, "artifacts/outcomes/0002.json")), false);
+    assert.throws(() => git(join(run.run_dir, "result-repository.git"), [
+      "rev-parse", "--verify", `refs/orchestrator/results/${run.run_id}`,
+    ]));
+    const decisionRoot = join(run.run_dir, "artifacts/decisions/decision-1");
+    const rejectedDecision = JSON.parse(readFileSync(join(decisionRoot, "0001.json")));
+    assert.equal(rejectedDecision.disposition, "rejected");
+
+    const accepted = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+      "--decision", "Use the bounded harness-owned Result Ref.",
+      "--decision-disposition", "accepted",
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(accepted.lifecycle_state, "completed");
+    const acceptedDecision = JSON.parse(readFileSync(join(decisionRoot, "0002.json")));
+    assert.equal(acceptedDecision.disposition, "accepted");
+    assert.equal(acceptedDecision.supersedes.artifact_id, rejectedDecision.artifact_id);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

@@ -1615,41 +1615,74 @@ function decisionEntries(runDir) {
           path: `artifacts/decisions/${decisionId}/${file}`,
           decision: JSON.parse(readFileSync(join(directory, file), "utf8")),
         }));
-    });
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function acceptMaterialDecision(ctx, state, response) {
-  const accepted = decisionEntries(ctx.runDir).filter(({ decision }) =>
-    decision.disposition === "accepted");
+function decisionRef(runDir, entry) {
+  return entry.ref ?? reference(entry.decision.artifact_id, entry.path, entry.decision);
+}
+
+function acceptMaterialDecision(ctx, state, { response, disposition }) {
+  const entries = decisionEntries(ctx.runDir);
+  const accepted = entries.filter(({ decision }) => decision.disposition === "accepted");
   if (accepted.length > 1) throw new AttemptFailure("multiple_accepted_decisions", "more than one accepted human Decision exists");
-  if (accepted.length === 0) {
-    if (typeof response !== "string" || response.trim().length === 0) return null;
-    const request = outcomeEntries(ctx.runDir).find(({ outcome }) =>
-      outcome.outcome_kind === "material_decision_request");
-    if (!request) throw new AttemptFailure("missing_material_decision_request", "accepted Decision has no durable Material Decision Request");
-    const requestRef = reference(request.outcome.artifact_id, `artifacts/outcomes/${request.file}`, request.outcome);
-    const decision = envelope({
-      kind: "decision",
-      artifactId: "decision-1-accepted",
-      runId: ctx.runId,
-      producer: { role: "human", actor_id: "operator" },
-      inputRefs: [requestRef],
-      createdAt: now(),
-      decision_id: "decision-1",
-      disposition: "accepted",
-      rationale: response.trim(),
-      scope: [request.outcome.question],
-      authority_ref: requestRef,
-    });
-    const acceptedRef = writeArtifact(ctx, "artifacts/decisions/decision-1/0001.json", decision);
-    accepted.push({ path: acceptedRef.path, decision, ref: acceptedRef });
+  const decisionRefs = state.decision_refs ?? [];
+  if (accepted.length === 1) {
+    const acceptedRef = decisionRef(ctx.runDir, accepted[0]);
+    if (state.lifecycle_state === "active" && decisionRefs.some((ref) => ref.digest === acceptedRef.digest)) return state;
+    return applyTransition(ctx, state, "material_decision_accepted", {
+      lifecycle_state: "active",
+      decision_refs: [...decisionRefs.filter((ref) => ref.digest !== acceptedRef.digest), acceptedRef],
+    }, [acceptedRef]);
   }
-  const acceptedRef = accepted[0].ref ?? reference(accepted[0].decision.artifact_id, accepted[0].path, accepted[0].decision);
-  if (state.decision_refs?.some((ref) => ref.digest === acceptedRef.digest)) return state;
-  return applyTransition(ctx, state, "material_decision_accepted", {
-    lifecycle_state: "active",
-    decision_refs: [acceptedRef],
-  }, [acceptedRef]);
+  if (typeof response !== "string" || response.trim().length === 0) return null;
+  if (!["accepted", "rejected"].includes(disposition)) {
+    throw new AttemptFailure("decision_disposition_required", "a human Decision requires an explicit accepted or rejected disposition");
+  }
+  const request = outcomeEntries(ctx.runDir).find(({ outcome }) =>
+    outcome.outcome_kind === "material_decision_request");
+  if (!request) throw new AttemptFailure("missing_material_decision_request", "Decision has no durable Material Decision Request");
+  const requestRef = reference(request.outcome.artifact_id, `artifacts/outcomes/${request.file}`, request.outcome);
+  const prior = entries.at(-1);
+  const priorRef = prior ? decisionRef(ctx.runDir, prior) : null;
+  if (disposition === "rejected" && prior?.decision.disposition === "rejected") {
+    const priorDecisionRefs = decisionRefs.some((ref) => ref.digest === priorRef.digest)
+      ? decisionRefs : [...decisionRefs, priorRef];
+    if (priorDecisionRefs.length === decisionRefs.length) return state;
+    return applyTransition(ctx, state, "material_decision_rejected", {
+      lifecycle_state: "material_decision_required",
+      decision_refs: priorDecisionRefs,
+    }, [priorRef]);
+  }
+  const nextNumber = entries.length + 1;
+  const decision = envelope({
+    kind: "decision",
+    artifactId: `decision-1-${String(nextNumber).padStart(4, "0")}`,
+    runId: ctx.runId,
+    producer: { role: "human", actor_id: "operator" },
+    inputRefs: [requestRef, ...(priorRef ? [priorRef] : [])],
+    createdAt: now(),
+    decision_id: "decision-1",
+    disposition,
+    rationale: response.trim(),
+    scope: [request.outcome.question],
+    authority_ref: requestRef,
+    ...(priorRef ? { supersedes: priorRef } : {}),
+  });
+  const decisionRefValue = writeArtifact(
+    ctx,
+    `artifacts/decisions/decision-1/${String(nextNumber).padStart(4, "0")}.json`,
+    decision,
+  );
+  const nextDecisionRefs = [...decisionRefs, decisionRefValue];
+  return applyTransition(ctx, state,
+    disposition === "accepted" ? "material_decision_accepted" : "material_decision_rejected",
+    {
+      lifecycle_state: disposition === "accepted" ? "active" : "material_decision_required",
+      decision_refs: nextDecisionRefs,
+    },
+    [decisionRefValue]);
 }
 
 function latestOutcome(runDir) {
@@ -1676,7 +1709,7 @@ export function inspectRun(runDir) {
   };
 }
 
-export function resumeRun(runDir, { decision, hooks = {} } = {}) {
+export function resumeRun(runDir, { decision, decisionDisposition, hooks = {} } = {}) {
   let state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
@@ -1687,11 +1720,17 @@ export function resumeRun(runDir, { decision, hooks = {} } = {}) {
   if (state.lifecycle_state === "material_decision_required") {
     const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
     try {
-      const resumedState = acceptMaterialDecision(ctx, state, decision);
+      const resumedState = acceptMaterialDecision(ctx, state, {
+        response: decision,
+        disposition: decisionDisposition,
+      });
       if (!resumedState) {
         return { ...inspectRun(runDir), next_action: null, checkpoint: "material_decision_required" };
       }
       state = resumedState;
+      if (state.lifecycle_state === "material_decision_required") {
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "material_decision_required" };
+      }
     } catch (error) {
       if (!error.code) throw error;
       recordFailure(ctx, state, error);
@@ -2323,7 +2362,10 @@ async function main() {
     if (!/^[A-Za-z0-9._-]+$/.test(selected)) throw new Error(`invalid Run id: ${selected}`);
     const runDir = join(root, "runs", selected);
     const result = command === "resume"
-      ? resumeRun(runDir, { decision: parseOption(argv, "--decision") })
+      ? resumeRun(runDir, {
+        decision: parseOption(argv, "--decision"),
+        decisionDisposition: parseOption(argv, "--decision-disposition"),
+      })
       : command === "cancel"
         ? await cancelRun(runDir)
         : inspectRun(runDir);
