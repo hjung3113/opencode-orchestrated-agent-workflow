@@ -64,6 +64,12 @@ class Runtime {
           evidence: [{ claim: "worker observed the requested edit", source: "worker-report", observation: "the target was written" }],
           changed_resources: [this.targetFile],
         })
+        : this.scenario === "worker-invalid-proposal"
+          ? JSON.stringify({
+            claims: [{ claim: "not a string" }],
+            evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
+            changed_resources: [this.targetFile],
+          })
         : JSON.stringify({
           claims: ["implemented"],
           evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
@@ -570,6 +576,24 @@ test("worker Result fields are authored by the worker proposal", async () => {
     assert.deepEqual(result.claims, ["worker-authored claim"]);
     assert.deepEqual(result.changed_resources, ["change.txt"]);
     assert.equal(result.evidence[0].source, "worker-report");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("worker Result rejects object-valued claims instead of coercing them", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "worker-invalid-proposal" }),
+    }), /worker Result claims must contain strings/i);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const failure = JSON.parse(readFileSync(join(runRoot, "runs", runId, "artifacts/outcomes/failure.json")));
+    assert.match(failure.summary, /worker Result claims must contain strings/i);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
