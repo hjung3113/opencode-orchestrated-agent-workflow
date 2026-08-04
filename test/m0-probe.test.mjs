@@ -435,7 +435,10 @@ test("complete M1 capability matrix passes in one disposable fixture", () => {
       matrix.rows.filter(({ gates, status }) => gates.includes("M1") && status !== "pass"),
       [],
     );
-    assert.equal(matrix.rows.find(({ id }) => id === "operator.cancel_unconfirmed_reconcile").status, "incompatible");
+    assert.deepEqual(
+      matrix.rows.filter(({ gates, status }) => gates.includes("M2") && status !== "pass"),
+      [],
+    );
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
