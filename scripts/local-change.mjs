@@ -1478,7 +1478,7 @@ function preparedPromotion(ctx, {
   resultCommit,
   resultRefName,
   resultArtifactRef,
-  reviewRef,
+  reviewArtifactRef,
   workerSnapshot,
   promotedResources,
   taskWorkspace,
@@ -1497,7 +1497,7 @@ function preparedPromotion(ctx, {
     artifactId: "promotion-1",
     runId: ctx.runId,
     producer: kernelProducer(),
-    inputRefs: [resultArtifactRef, reviewRef],
+    inputRefs: [resultArtifactRef, reviewArtifactRef],
     createdAt: now(),
     verified_snapshot: workerSnapshot.digest,
     result_ref: resultRefName,
@@ -1567,8 +1567,8 @@ function nextOutcomePath(runDir) {
 function receiptFor(ctx, state, {
   requestRef,
   graphRef,
-  resultRef,
-  reviewRef,
+  resultArtifactRef,
+  reviewArtifactRef,
   promotionRef,
   promotedSnapshot,
 }) {
@@ -1587,8 +1587,8 @@ function receiptFor(ctx, state, {
   const refs = [
     requestRef,
     graphRef,
-    resultRef,
-    reviewRef,
+    resultArtifactRef,
+    reviewArtifactRef,
     promotionRef,
     ...(state.decision_refs ?? []),
     ...ctx.admittedRefs,
@@ -1912,13 +1912,13 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   }
   const promotionPath = "artifacts/promotions/promotion-1.json";
   const resultRepoPath = join(runDir, "result-repository.git");
-  const resultRef = state.tasks?.["implementation-1"]?.artifact_ref;
-  const reviewRef = state.tasks?.["verification-1"]?.artifact_ref;
-  if (existsSync(resultRepoPath) && resultRef && reviewRef) {
+  const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
+  const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (existsSync(resultRepoPath) && resultArtifactRef && reviewArtifactRef) {
     const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
     try {
-      const resultArtifact = resolveArtifactReference(ctx, resultRef);
-      const review = resolveArtifactReference(ctx, reviewRef);
+      const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
+      const review = resolveArtifactReference(ctx, reviewArtifactRef);
       let promotion;
       let promotionRef;
       if (existsSync(join(runDir, promotionPath))) {
@@ -1929,8 +1929,8 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
           resultRepo: resultRepoPath,
           resultCommit: resultArtifact.result_commit,
           resultRefName: `refs/orchestrator/results/${state.run_id}`,
-          resultArtifactRef: resultRef,
-          reviewRef,
+          resultArtifactRef,
+          reviewArtifactRef,
           workerSnapshot: { digest: resultArtifact.output_snapshot },
           promotedResources: resultArtifact.changed_resources,
           taskWorkspace: null,
@@ -1951,8 +1951,8 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       const { state: completedState } = receiptFor(ctx, state, {
         requestRef: state.request_ref,
         graphRef: state.active_graph_ref,
-        resultRef,
-        reviewRef,
+        resultArtifactRef,
+        reviewArtifactRef,
         promotionRef,
         promotedSnapshot,
       });
@@ -2370,7 +2370,7 @@ export async function runLocalChange({
       result_commit: resultCommit,
     });
     await hooks.beforeResultAdmission?.({ workerResult });
-    const resultRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
+    const resultArtifactRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
     const resultRepo = join(runDir, "result-repository.git");
     if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
     git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
@@ -2380,9 +2380,9 @@ export async function runLocalChange({
       runtime_bindings: state.runtime_bindings.map((binding) =>
         binding.attempt_id === workerExecution.binding.attempt_id ? workerExecution.binding : binding),
       tasks: {
-        "implementation-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultRef },
+        "implementation-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultArtifactRef },
       },
-    }, [workerRuntimeRef, resultRef]);
+    }, [workerRuntimeRef, resultArtifactRef]);
 
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
@@ -2419,7 +2419,7 @@ export async function runLocalChange({
       packet: verification.packet,
       runtimeRef: graphTwoRuntimeRef,
       artifactId: "packet-verification-1",
-      targetTaskRef: resultRef,
+      targetTaskRef: resultArtifactRef,
       targetSnapshot: workerSnapshot.digest,
       actorId: graphTwoAttempt.binding.agent_identity,
     });
@@ -2429,9 +2429,9 @@ export async function runLocalChange({
       graphRevision: 2,
       runtimeRef: graphTwoRuntimeRef,
       requestRef,
-      triggerRef: resultRef,
+      triggerRef: resultArtifactRef,
       parentRef: graphOneRef,
-      inputRefs: [requestRef, graphOneRef, resultRef],
+      inputRefs: [requestRef, graphOneRef, resultArtifactRef],
       nodes: [
         { ...implementation.node, packet_ref: implementationPacketRef },
         { ...verification.task, packet_ref: verificationPacketRef },
@@ -2446,7 +2446,7 @@ export async function runLocalChange({
         ...state.tasks,
         "verification-1": { task_state: "planned", attempts: 0 },
       },
-    }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultRef]);
+    }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
 
     admitBudget(state, "execution_attempt");
     const verifierAttempt = await adapter.newAttempt({
@@ -2468,7 +2468,7 @@ export async function runLocalChange({
     const verifierPrompt = [
       `Use your read tool exactly once on ${targetFile}; do not read any other path and do not use edit, write, shell, network, or delegation.`,
       `The expected UTF-8 content is ${JSON.stringify(expectedContent)}.`,
-      `Independently inspect the frozen Result/Output Snapshot: worker Result artifact reference ${resultRef.path} (${resultRef.digest}), declared output snapshot ${workerSnapshot.digest}, changed resource ${targetFile}.`,
+      `Independently inspect the frozen Result/Output Snapshot: worker Result artifact reference ${resultArtifactRef.path} (${resultArtifactRef.digest}), declared output snapshot ${workerSnapshot.digest}, changed resource ${targetFile}.`,
       "After the read, do not call another tool. Your final response MUST be exactly one JSON object and no Markdown, with this shape: {\"verdict\":\"pass\",\"findings\":[],\"evidence\":[{\"claim\":\"the declared change is present\",\"source\":\"verifier-read\",\"observation\":\"the named target bytes match the frozen Result Output Snapshot\"}]}",
     ].join("\n");
     const verifierExecution = await adapter.execute({
@@ -2504,31 +2504,31 @@ export async function runLocalChange({
       attempt: 1,
       producer: verifierProducer(verifierAttempt.binding.agent_identity),
       runtime_ref: verifierRuntimeRef,
-      inputRefs: [verificationPacketRef, resultRef],
+      inputRefs: [verificationPacketRef, resultArtifactRef],
       createdAt: now(),
-      target_task_ref: resultRef,
+      target_task_ref: resultArtifactRef,
       target_snapshot: workerSnapshot.digest,
       verdict: reviewProposal.verdict,
       evidence: reviewProposal.evidence,
       findings: reviewProposal.findings,
     });
-    const reviewRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/review.json", review);
+    const reviewArtifactRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/review.json", review);
     crashAt(ctx, "after_review_publication");
     state = applyTransition(ctx, state, "review_admitted", {
       runtime_bindings: state.runtime_bindings.map((binding) =>
         binding.attempt_id === verifierExecution.binding.attempt_id ? verifierExecution.binding : binding),
       tasks: {
         ...state.tasks,
-        "verification-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewRef },
+        "verification-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewArtifactRef },
       },
-    }, [verifierRuntimeRef, reviewRef]);
+    }, [verifierRuntimeRef, reviewArtifactRef]);
 
     const { promotionRef } = preparedPromotion(ctx, {
       resultRepo,
       resultCommit,
       resultRefName,
-      resultArtifactRef: resultRef,
-      reviewRef,
+      resultArtifactRef,
+      reviewArtifactRef,
       workerSnapshot,
       promotedResources: [targetFile],
       taskWorkspace,
@@ -2543,8 +2543,8 @@ export async function runLocalChange({
     const { state: completedState, outcomeRef } = receiptFor(ctx, state, {
       requestRef,
       graphRef: graphTwoRef,
-      resultRef,
-      reviewRef,
+      resultArtifactRef,
+      reviewArtifactRef,
       promotionRef,
       promotedSnapshot,
     });
