@@ -1245,6 +1245,19 @@ function runtimeForBinding(runDir, binding) {
     .at(-1);
 }
 
+function cancellationBinding(state) {
+  return [...(state.runtime_bindings ?? [])].reverse()[0] ?? {
+    attempt_id: `cancel-${state.run_id}`,
+    role: "planner",
+    agent_identity: digest("unavailable-after-process-death"),
+    agent: "unavailable-after-process-death",
+    model: "",
+    configuration_digest: digest("unavailable-after-process-death"),
+    session_id: `unavailable-${state.run_id}`,
+    binding_state: "unreachable",
+  };
+}
+
 function fallbackCancellationObservation(state, binding, confirmed = false) {
   return {
     schema_version: "1.0",
@@ -1324,12 +1337,7 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
       runtime_permission_events: ["operator.cancel"],
       exit_reason: result?.confirmed ? "cancelled" : "cancel_unconfirmed",
     }
-    : active ? fallbackCancellationObservation(state, active, result?.confirmed === true) : null);
-  if (!observation) {
-    const error = new AttemptFailure("cancel_unconfirmed", "no active runtime binding could confirm cancellation");
-    await recordFailure(ctx, next, error);
-    return { ...inspectRun(runDir), next_action: null, checkpoint: "cancel_unconfirmed" };
-  }
+    : fallbackCancellationObservation(state, cancellationBinding(state), active && result?.confirmed === true));
   const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
   if (result?.confirmed === true && observation.exit_reason === "cancelled") {
     next = applyTransition(ctx, next, "cancel_confirmed", {

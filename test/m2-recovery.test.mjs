@@ -227,6 +227,43 @@ test("public cancel command records an unconfirmed stop after process death", as
   }
 });
 
+test("cancel with no active binding durably blocks instead of stalling", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const crash = new Error("simulated process death");
+    crash.code = "simulated_crash";
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+      hooks: { afterWorkerDispatch: async () => { throw crash; } },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    state.runtime_bindings = state.runtime_bindings.map((binding) => ({ ...binding, binding_state: "idle" }));
+    writeFileSync(join(runDir, "run.json"), `${JSON.stringify(state, null, 2)}\n`);
+
+    const result = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "cancel", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", runId,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(result.lifecycle_state, "blocked");
+    const durable = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.deepEqual(durable.transitions.slice(-2).map(({ event_kind }) => event_kind), [
+      "cancel_requested",
+      "cancel_unconfirmed",
+    ]);
+    assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/cancel.json"))).block_type, "cancel_unconfirmed");
+    assert.equal(readdirSync(join(runDir, "artifacts/runtime")).some((file) => file.includes("cancel")), true);
+    assert.equal(durable.transitions.some(({ event_kind }) => event_kind === "successor_dispatched"), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("prepared Promotion resumes across absent, committed, and conflicting Result Ref states", async () => {
   for (const crashAt of ["after_promotion_preparation", "after_result_ref_update"]) {
     const { workspace, runRoot } = fixture();
