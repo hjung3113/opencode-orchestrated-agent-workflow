@@ -1979,6 +1979,26 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   const resultRepoPath = join(runDir, "result-repository.git");
   const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
   const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (existsSync(resultRepoPath) && resultArtifactRef && !reviewArtifactRef) {
+    if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "Result continuation requires the target workspace");
+    try {
+      const runRoot = dirname(dirname(resolve(runDir)));
+      const resumed = await runLocalChange({
+        workspace,
+        runRoot,
+        existingRunDir: runDir,
+        runtimeFactory: runtime ? async (options) => {
+          Object.assign(runtime, options);
+          return runtime;
+        } : undefined,
+        hooks,
+      });
+      return { ...resumed.inspect, next_action: null, ...resumed };
+    } catch (error) {
+      if (error.code !== "simulated_crash") throw error;
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
   if (existsSync(resultRepoPath) && resultArtifactRef && reviewArtifactRef) {
     const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
     try {
@@ -2142,10 +2162,25 @@ export async function runLocalChange({
     }
   }
   const ctx = { runDir, runId, admittedRefs: [], hooks };
+  const continuingResult = Boolean(existingState?.tasks?.["implementation-1"]?.artifact_ref
+    && !existingState?.tasks?.["verification-1"]?.artifact_ref);
   try {
     cloneWorkspace(workspace, taskWorkspace);
-    const taskBaseline = workspaceSnapshot(taskWorkspace);
-    if (taskBaseline.digest !== baselineTarget.digest) {
+    let taskBaseline = workspaceSnapshot(taskWorkspace);
+    if (continuingResult) {
+      const resultRef = existingState.tasks["implementation-1"].artifact_ref;
+      const resultArtifact = resolveArtifactReference(ctx, resultRef);
+      const resultRepo = join(runDir, "result-repository.git");
+      if (!existsSync(resultRepo) || !resultArtifact.result_commit) {
+        throw new AttemptFailure("runtime_reconciliation_required", "published Result cannot be reconstructed from its durable Result repository");
+      }
+      git(taskWorkspace, ["fetch", "-q", resultRepo, resultArtifact.result_commit]);
+      git(taskWorkspace, ["reset", "--hard", "-q", resultArtifact.result_commit]);
+      taskBaseline = workspaceSnapshot(taskWorkspace);
+      if (taskBaseline.digest !== resultArtifact.output_snapshot) {
+        throw new AttemptFailure("result_snapshot_mismatch", "published Result does not reproduce its claimed Output Snapshot");
+      }
+    } else if (taskBaseline.digest !== baselineTarget.digest) {
       throw new Error("isolated task workspace did not reproduce the intake snapshot");
     }
     adapter = runtimeFactory
@@ -2285,6 +2320,16 @@ export async function runLocalChange({
     const requestBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "planner-request");
     if (!requestBinding) throw new AttemptFailure("missing_request_binding", "admitted Run has no durable intake binding");
 
+    let implementation;
+    let implementationPacketRef;
+    let graphOneRef;
+    let resultArtifactRef;
+    let resultRepo;
+    let resultRefName;
+    let resultCommit;
+    let workerSnapshot;
+    let workerIdentity;
+    if (!continuingResult) {
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
     const admittedCommand = hooks.commandOverride?.({ targetFile, expectedContent })
@@ -2311,7 +2356,7 @@ export async function runLocalChange({
     });
     admitAttemptExecution(ctx, graphOneExecution, "graph revision 1 planner Attempt");
     const graphOneRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-1.json", graphOneExecution.observation);
-    const implementation = implementationPlan(responseObject(graphOneExecution.text, "revision 1 planner"), {
+    implementation = implementationPlan(responseObject(graphOneExecution.text, "revision 1 planner"), {
       targetFile,
       skill,
       command: admittedCommand,
@@ -2327,7 +2372,7 @@ export async function runLocalChange({
       artifactId: "packet-implementation-1",
       actorId: graphOneAttempt.binding.agent_identity,
     });
-    const implementationPacketRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/packet.json", implementationPacket);
+    implementationPacketRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/packet.json", implementationPacket);
     const graphOne = makeGraph({
       runId,
       graphRevision: 1,
@@ -2337,7 +2382,7 @@ export async function runLocalChange({
       nodes: [{ ...implementation.node, packet_ref: implementationPacketRef }],
       actorId: graphOneAttempt.binding.agent_identity,
     });
-    const graphOneRef = writeArtifact(ctx, "artifacts/graphs/0001.json", graphOne);
+    graphOneRef = writeArtifact(ctx, "artifacts/graphs/0001.json", graphOne);
     state = applyTransition(ctx, state, "graph_revision_1_admitted", {
       active_graph_ref: graphOneRef,
       runtime_bindings: [requestBinding, graphOneExecution.binding],
@@ -2353,6 +2398,7 @@ export async function runLocalChange({
       taskId: "implementation-1",
       attempt: 1,
     });
+    workerIdentity = workerAttempt.binding.agent_identity;
     state = applyTransition(ctx, state, "implementation_dispatched", {
       runtime_bindings: [...state.runtime_bindings, workerAttempt.binding],
       tasks: {
@@ -2390,9 +2436,9 @@ export async function runLocalChange({
     }
     git(taskWorkspace, ["add", "-A"]);
     git(taskWorkspace, ["commit", "-qm", "M1 local-change Result"]);
-    const resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
+    resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
     const observedResources = workerChanges.map(({ path }) => path);
-    const workerSnapshot = workspaceSnapshot(taskWorkspace);
+    workerSnapshot = workspaceSnapshot(taskWorkspace);
     const proposalExecution = await adapter.execute({
       role: "worker",
       attemptId: "worker-implementation-1",
@@ -2441,19 +2487,37 @@ export async function runLocalChange({
       result_commit: resultCommit,
     });
     await hooks.beforeResultAdmission?.({ workerResult, commandExecution, workerRuntimeRef, admittedCommand });
-    const resultArtifactRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
-    const resultRepo = join(runDir, "result-repository.git");
+    resultArtifactRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
+    resultRepo = join(runDir, "result-repository.git");
     if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
     git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
     crashAt(ctx, "after_result_publication");
-    const resultRefName = `refs/orchestrator/results/${runId}`;
+    resultRefName = `refs/orchestrator/results/${runId}`;
     state = applyTransition(ctx, state, "implementation_result_admitted", {
       runtime_bindings: state.runtime_bindings.map((binding) =>
         binding.attempt_id === workerExecution.binding.attempt_id ? workerExecution.binding : binding),
       tasks: {
         "implementation-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultArtifactRef },
       },
-    }, [workerRuntimeRef, resultArtifactRef]);
+      }, [workerRuntimeRef, resultArtifactRef]);
+    } else {
+      resultArtifactRef = state.tasks["implementation-1"].artifact_ref;
+      const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
+      workerIdentity = resultArtifact.producer.actor_id;
+      resultRepo = join(runDir, "result-repository.git");
+      resultCommit = resultArtifact.result_commit;
+      resultRefName = `refs/orchestrator/results/${runId}`;
+      workerSnapshot = snapshotFromCommit(resultRepo, resultCommit);
+      if (workerSnapshot.digest !== resultArtifact.output_snapshot) {
+        throw new AttemptFailure("result_snapshot_mismatch", "published Result does not reproduce its claimed Output Snapshot");
+      }
+      graphOneRef = state.active_graph_ref;
+      const graphOne = resolveArtifactReference(ctx, graphOneRef);
+      implementationPacketRef = graphOne.nodes.find(({ task_id }) => task_id === "implementation-1")?.packet_ref;
+      if (!implementationPacketRef) throw new AttemptFailure("runtime_reconciliation_required", "published Result has no implementation Packet");
+      const implementationPacket = resolveArtifactReference(ctx, implementationPacketRef);
+      implementation = { node: graphOne.nodes.find(({ task_id }) => task_id === "implementation-1"), packet: implementationPacket };
+    }
 
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
@@ -2526,7 +2590,7 @@ export async function runLocalChange({
       taskId: "verification-1",
       attempt: 1,
     });
-    if (verifierAttempt.binding.agent_identity === workerAttempt.binding.agent_identity) {
+    if (verifierAttempt.binding.agent_identity === workerIdentity) {
       throw new Error("verifier_not_independent");
     }
     state = applyTransition(ctx, state, "verification_dispatched", {
