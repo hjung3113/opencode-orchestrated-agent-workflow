@@ -2519,87 +2519,203 @@ export async function runLocalChange({
       implementation = { node: graphOne.nodes.find(({ task_id }) => task_id === "implementation-1"), packet: implementationPacket };
     }
 
-    admitBudget(state, "planner_attempt");
-    admitBudget(state, "graph_revision");
-    const graphTwoAttempt = await adapter.newAttempt({
-      role: "planner",
-      attemptId: "planner-graph-2",
-      attempt: 3,
-    });
-    const graphTwoPrompt = [
-      "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
-      "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
-      "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
-    ].join("\n");
-    const graphTwoExecution = await adapter.execute({
-      role: "planner",
-      attemptId: "planner-graph-2",
-      attempt: 3,
-      binding: graphTwoAttempt.binding,
-      prompt: graphTwoPrompt,
-      beforeSnapshot: workerSnapshot,
-      deadlineSeconds: admittedAttemptDeadlineSeconds,
-    });
-    admitAttemptExecution(ctx, graphTwoExecution, "graph revision 2 planner Attempt");
-    const graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
-    const verification = verificationPlan(responseObject(graphTwoExecution.text, "revision 2 planner"), {
-      targetFile,
-      requestText,
-      attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
-    });
-    const verificationPacket = makePacket({
-      runId,
-      graphRevision: 2,
-      taskId: "verification-1",
-      packet: verification.packet,
-      runtimeRef: graphTwoRuntimeRef,
-      artifactId: "packet-verification-1",
-      targetTaskRef: resultArtifactRef,
-      targetSnapshot: workerSnapshot.digest,
-      actorId: graphTwoAttempt.binding.agent_identity,
-    });
-    const verificationPacketRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/packet.json", verificationPacket);
-    const graphTwo = makeGraph({
-      runId,
-      graphRevision: 2,
-      runtimeRef: graphTwoRuntimeRef,
-      requestRef,
-      triggerRef: resultArtifactRef,
-      parentRef: graphOneRef,
-      inputRefs: [requestRef, graphOneRef, resultArtifactRef],
-      nodes: [
-        { ...implementation.node, packet_ref: implementationPacketRef },
-        { ...verification.task, packet_ref: verificationPacketRef },
-      ],
-      actorId: graphTwoAttempt.binding.agent_identity,
-    });
-    const graphTwoRef = writeArtifact(ctx, "artifacts/graphs/0002.json", graphTwo);
-    state = applyTransition(ctx, state, "graph_revision_2_admitted", {
-      active_graph_ref: graphTwoRef,
-      runtime_bindings: [...state.runtime_bindings, graphTwoExecution.binding],
-      tasks: {
-        ...state.tasks,
-        "verification-1": { task_state: "planned", attempts: 0 },
-      },
-    }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
-
-    admitBudget(state, "execution_attempt");
-    const verifierAttempt = await adapter.newAttempt({
-      role: "verifier",
-      attemptId: "verifier-1",
-      taskId: "verification-1",
-      attempt: 1,
-    });
-    if (verifierAttempt.binding.agent_identity === workerIdentity) {
-      throw new Error("verifier_not_independent");
+    let graphTwo;
+    let graphTwoRef;
+    let graphTwoRuntimeRef;
+    let verificationPacketRef;
+    let verification;
+    const graphTwoPath = "artifacts/graphs/0002.json";
+    const verificationPacketPath = "artifacts/tasks/verification-1/attempts/1/packet.json";
+    const graphTwoAdmitted = state.active_graph_ref?.path === graphTwoPath;
+    if (graphTwoAdmitted) {
+      graphTwoRef = state.active_graph_ref;
+      graphTwo = resolveArtifactReference(ctx, graphTwoRef);
+      verificationPacketRef = graphTwo.nodes.find(({ task_id }) => task_id === "verification-1")?.packet_ref;
+      graphTwoRuntimeRef = graphTwo.runtime_ref;
+      verification = {
+        task: graphTwo.nodes.find(({ task_id }) => task_id === "verification-1"),
+        packet: resolveArtifactReference(ctx, verificationPacketRef),
+      };
+    } else if (continuingResult && existsSync(join(runDir, graphTwoPath))) {
+      graphTwo = JSON.parse(readFileSync(join(runDir, graphTwoPath), "utf8"));
+      validateProtocol(graphTwo, "graph revision 2");
+      graphTwoRef = reference(graphTwo.artifact_id, graphTwoPath, graphTwo);
+      verificationPacketRef = graphTwo.nodes.find(({ task_id }) => task_id === "verification-1")?.packet_ref;
+      graphTwoRuntimeRef = graphTwo.runtime_ref;
+      verification = {
+        task: graphTwo.nodes.find(({ task_id }) => task_id === "verification-1"),
+        packet: resolveArtifactReference(ctx, verificationPacketRef),
+      };
+    } else {
+      let graphTwoBinding;
+      if (continuingResult && existsSync(join(runDir, verificationPacketPath))) {
+        const verificationPacket = JSON.parse(readFileSync(join(runDir, verificationPacketPath), "utf8"));
+        validateProtocol(verificationPacket, "verification Packet");
+        verificationPacketRef = reference(verificationPacket.artifact_id, verificationPacketPath, verificationPacket);
+        graphTwoRuntimeRef = verificationPacket.runtime_ref;
+        verification = {
+          task: {
+            task_id: "verification-1",
+            workflow_definition: "verification",
+            requires: ["implementation-1"],
+            read_resources: [targetFile],
+            write_resources: [],
+            packet_ref: verificationPacketRef,
+          },
+          packet: verificationPacket,
+        };
+        const plannerRuntime = resolveArtifactReference(ctx, graphTwoRuntimeRef);
+        graphTwoBinding = {
+          attempt_id: plannerRuntime.attempt_id,
+          attempt: 3,
+          session_id: plannerRuntime.session_id,
+          role: "planner",
+          agent_identity: plannerRuntime.agent_identity,
+          agent: plannerRuntime.agent,
+          model: plannerRuntime.model,
+          configuration_digest: plannerRuntime.configuration_digest,
+          binding_state: "idle",
+        };
+      } else {
+        admitBudget(state, "planner_attempt");
+        admitBudget(state, "graph_revision");
+        const graphTwoAttempt = await adapter.newAttempt({
+          role: "planner",
+          attemptId: "planner-graph-2",
+          attempt: 3,
+        });
+        const graphTwoPrompt = [
+          "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
+          "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
+          "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
+        ].join("\n");
+        const graphTwoExecution = await adapter.execute({
+          role: "planner",
+          attemptId: "planner-graph-2",
+          attempt: 3,
+          binding: graphTwoAttempt.binding,
+          prompt: graphTwoPrompt,
+          beforeSnapshot: workerSnapshot,
+          deadlineSeconds: admittedAttemptDeadlineSeconds,
+        });
+        admitAttemptExecution(ctx, graphTwoExecution, "graph revision 2 planner Attempt");
+        graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
+        verification = verificationPlan(responseObject(graphTwoExecution.text, "revision 2 planner"), {
+          targetFile,
+          requestText,
+          attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
+        });
+        const verificationPacket = makePacket({
+          runId,
+          graphRevision: 2,
+          taskId: "verification-1",
+          packet: verification.packet,
+          runtimeRef: graphTwoRuntimeRef,
+          artifactId: "packet-verification-1",
+          targetTaskRef: resultArtifactRef,
+          targetSnapshot: workerSnapshot.digest,
+          actorId: graphTwoAttempt.binding.agent_identity,
+        });
+        verificationPacketRef = writeArtifact(ctx, verificationPacketPath, verificationPacket);
+        crashAt(ctx, "after_graph_two_packet_publication");
+        graphTwoBinding = graphTwoExecution.binding;
+      }
+      graphTwo = makeGraph({
+        runId,
+        graphRevision: 2,
+        runtimeRef: graphTwoRuntimeRef,
+        requestRef,
+        triggerRef: resultArtifactRef,
+        parentRef: graphOneRef,
+        inputRefs: [requestRef, graphOneRef, resultArtifactRef],
+        nodes: [
+          { ...implementation.node, packet_ref: implementationPacketRef },
+          { ...verification.task, packet_ref: verificationPacketRef },
+        ],
+        actorId: graphTwoBinding.agent_identity,
+      });
+      graphTwoRef = writeArtifact(ctx, graphTwoPath, graphTwo);
+      crashAt(ctx, "after_graph_two_publication");
+      state = applyTransition(ctx, state, "graph_revision_2_admitted", {
+        active_graph_ref: graphTwoRef,
+        runtime_bindings: [...state.runtime_bindings, graphTwoBinding],
+        tasks: {
+          ...state.tasks,
+          "verification-1": { task_state: "planned", attempts: 0 },
+        },
+      }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
+      if (continuingResult) {
+        return {
+          run_id: runId,
+          run_dir: runDir,
+          inspect: inspectRun(runDir),
+          checkpoint: "graph_revision_2_admitted",
+        };
+      }
     }
-    state = applyTransition(ctx, state, "verification_dispatched", {
-      runtime_bindings: [...state.runtime_bindings, verifierAttempt.binding],
-      tasks: {
-        ...state.tasks,
-        "verification-1": { task_state: "active", attempts: 1 },
-      },
-    }, [verificationPacketRef]);
+
+    if (state.active_graph_ref?.path !== graphTwoPath) {
+      const plannerRuntime = resolveArtifactReference(ctx, graphTwoRuntimeRef);
+      const graphTwoBinding = {
+        attempt_id: plannerRuntime.attempt_id,
+        attempt: 3,
+        session_id: plannerRuntime.session_id,
+        role: "planner",
+        agent_identity: plannerRuntime.agent_identity,
+        agent: plannerRuntime.agent,
+        model: plannerRuntime.model,
+        configuration_digest: plannerRuntime.configuration_digest,
+        binding_state: "idle",
+      };
+      state = applyTransition(ctx, state, "graph_revision_2_admitted", {
+        active_graph_ref: graphTwoRef,
+        runtime_bindings: [...state.runtime_bindings, graphTwoBinding],
+        tasks: {
+          ...state.tasks,
+          "verification-1": { task_state: "planned", attempts: 0 },
+        },
+      }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
+      if (continuingResult) {
+        return {
+          run_id: runId,
+          run_dir: runDir,
+          inspect: inspectRun(runDir),
+          checkpoint: "graph_revision_2_admitted",
+        };
+      }
+    }
+
+    let verifierBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "verifier-1");
+    if (state.tasks["verification-1"]?.task_state === "planned") {
+      admitBudget(state, "execution_attempt");
+      const verifierAttempt = await adapter.newAttempt({
+        role: "verifier",
+        attemptId: "verifier-1",
+        taskId: "verification-1",
+        attempt: 1,
+      });
+      if (verifierAttempt.binding.agent_identity === workerIdentity) {
+        throw new Error("verifier_not_independent");
+      }
+      verifierBinding = verifierAttempt.binding;
+      state = applyTransition(ctx, state, "verification_dispatched", {
+        runtime_bindings: [...state.runtime_bindings, verifierAttempt.binding],
+        tasks: {
+          ...state.tasks,
+          "verification-1": { task_state: "active", attempts: 1 },
+        },
+      }, [verificationPacketRef]);
+      crashAt(ctx, "after_verification_dispatch");
+      if (continuingResult) {
+        return {
+          run_id: runId,
+          run_dir: runDir,
+          inspect: inspectRun(runDir),
+          checkpoint: "verification_dispatched",
+        };
+      }
+    }
+    if (!verifierBinding) throw new AttemptFailure("runtime_reconciliation_required", "admitted verification task has no runtime binding");
     const verifierPrompt = [
       `Use your read tool exactly once on ${targetFile}; do not read any other path and do not use edit, write, shell, network, or delegation.`,
       `The expected UTF-8 content is ${JSON.stringify(expectedContent)}.`,
@@ -2611,7 +2727,7 @@ export async function runLocalChange({
       attemptId: "verifier-1",
       taskId: "verification-1",
       attempt: 1,
-      binding: verifierAttempt.binding,
+      binding: verifierBinding,
       prompt: verifierPrompt,
       beforeSnapshot: workerSnapshot,
       deadlineSeconds: verification.packet.deadline_seconds,
@@ -2637,7 +2753,7 @@ export async function runLocalChange({
       graph_revision: 2,
       task_id: "verification-1",
       attempt: 1,
-      producer: verifierProducer(verifierAttempt.binding.agent_identity),
+      producer: verifierProducer(verifierBinding.agent_identity),
       runtime_ref: verifierRuntimeRef,
       inputRefs: [verificationPacketRef, resultArtifactRef],
       createdAt: now(),
@@ -2657,6 +2773,14 @@ export async function runLocalChange({
         "verification-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewArtifactRef },
       },
     }, [verifierRuntimeRef, reviewArtifactRef]);
+    if (continuingResult) {
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        inspect: inspectRun(runDir),
+        checkpoint: "review_admitted",
+      };
+    }
 
     const { promotionRef } = preparedPromotion(ctx, {
       resultRepo,

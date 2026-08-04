@@ -456,6 +456,53 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
   }
 });
 
+test("Result-only continuation replays graph and verifier boundaries one action at a time", async () => {
+  for (const crashAt of [
+    "after_graph_two_packet_publication",
+    "after_graph_two_publication",
+    "after_verification_dispatch",
+  ]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      let runtime;
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => {
+          runtime = new Runtime(options);
+          return runtime;
+        },
+        hooks: { crashAt },
+      }), /simulated process death/);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const expectedActions = crashAt === "after_verification_dispatch"
+        ? ["review_admitted", "receipt_admitted"]
+        : ["graph_revision_2_admitted", "verification_dispatched", "review_admitted", "receipt_admitted"];
+      const seen = [];
+      for (const expected of expectedActions) {
+        const before = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const resumed = await resumeRun(runDir, { workspace, runtime });
+        const after = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const newEvents = after.transitions.slice(before.transitions.length).map(({ event_kind }) => event_kind);
+        assert.deepEqual(newEvents, [expected], `${crashAt}: ${expected}`);
+        seen.push(expected);
+        if (expected !== "receipt_admitted") assert.equal(resumed.lifecycle_state, "active", `${crashAt}: ${expected}`);
+        else assert.equal(resumed.lifecycle_state, "completed", crashAt);
+      }
+      assert.deepEqual(seen, expectedActions, crashAt);
+      const finalState = readFileSync(join(runDir, "run.json"), "utf8");
+      const final = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(final.lifecycle_state, "completed", crashAt);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), finalState, `${crashAt}: repeated terminal resume`);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("runtime-abort crash boundaries preserve cancellation intent and forbid resume dispatch", async () => {
   for (const crashAt of ["before_runtime_abort", "after_runtime_abort"]) {
     const { workspace, runRoot } = fixture();
