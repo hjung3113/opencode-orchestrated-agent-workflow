@@ -862,6 +862,7 @@ function responseObject(text, label) {
         ? (value) => Array.isArray(value?.claims)
           && Array.isArray(value?.evidence)
           && Array.isArray(value?.changed_resources)
+          && typeof value?.output_snapshot === "string"
       : (value) => value?.verdict;
   const matching = candidates.filter(hint);
   if (matching.length > 0) return matching.sort((a, b) =>
@@ -1169,6 +1170,9 @@ function parseReview(parsed) {
 }
 
 function parseResultProposal(parsed) {
+  if (typeof parsed?.output_snapshot !== "string" || parsed.output_snapshot.length === 0) {
+    throw new Error("worker Result proposal must include output_snapshot");
+  }
   if (!Array.isArray(parsed?.claims)
     || !Array.isArray(parsed?.evidence)
     || !Array.isArray(parsed?.changed_resources)) {
@@ -1181,7 +1185,7 @@ function parseResultProposal(parsed) {
     }),
     evidence: parsed.evidence.length === 0 ? [] : validEvidenceArray(parsed.evidence),
     changed_resources: validStringArray(parsed.changed_resources, "worker Result changed_resources"),
-    ...(typeof parsed.output_snapshot === "string" ? { output_snapshot: parsed.output_snapshot } : {}),
+    output_snapshot: parsed.output_snapshot,
   };
 }
 
@@ -2364,7 +2368,7 @@ export async function runLocalChange({
       `Implement the admitted local-change Packet. Modify exactly ${targetFile}.`,
       `Create it with exactly this UTF-8 content: ${JSON.stringify(expectedContent)}.`,
       "Do not modify protected unrelated files, the Git metadata, the skill file, or any other path.",
-      "Use your edit/write tool, never shell or network. After editing, return exactly one JSON object and no Markdown. Claims and changed_resources must be arrays of strings, and evidence must contain string claim/source/observation fields. Do not include output_snapshot; the Kernel records the observed snapshot. Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"]}. The Result proposal fields must be authored by you; do not return prose.",
+      "Use your edit/write tool, never shell or network. After editing, report only that the edit is complete; the Kernel will independently observe and command-check the isolated workspace before requesting your Result proposal.",
     ].join("\n");
     const workerExecution = await adapter.execute({
       role: "worker",
@@ -2387,17 +2391,33 @@ export async function runLocalChange({
     git(taskWorkspace, ["add", "-A"]);
     git(taskWorkspace, ["commit", "-qm", "M1 local-change Result"]);
     const resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
-    const workerSnapshot = workspaceSnapshot(taskWorkspace);
-    const workerProposal = parseResultProposal(responseObject(workerExecution.text, "worker Result proposal"));
     const observedResources = workerChanges.map(({ path }) => path);
+    const workerSnapshot = workspaceSnapshot(taskWorkspace);
+    const proposalExecution = await adapter.execute({
+      role: "worker",
+      attemptId: "worker-implementation-1",
+      taskId: "implementation-1",
+      attempt: 1,
+      binding: workerExecution.binding,
+      prompt: [
+        "The Kernel observed and command-checked your isolated edit and committed the Result candidate.",
+        `The canonical Output Snapshot digest is ${workerSnapshot.digest}. Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal ${workerSnapshot.digest}.`,
+        "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
+      ].join("\n"),
+      beforeSnapshot: workerSnapshot,
+      deadlineSeconds: implementation.packet.deadline_seconds,
+    });
+    admitAttemptExecution(ctx, proposalExecution, "worker Result proposal Attempt");
+    const workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
       throw new Error(`worker Result proposal changed_resources do not match the observed diff: proposed=${JSON.stringify(workerProposal.changed_resources)} observed=${JSON.stringify(observedResources)}`);
     }
-    if (workerProposal.output_snapshot && workerProposal.output_snapshot !== workerSnapshot.digest) {
+    if (proposalExecution.snapshot.digest !== workerSnapshot.digest
+      || workerProposal.output_snapshot !== workerSnapshot.digest) {
       throw new Error("worker Result proposal output_snapshot does not match the observed snapshot");
     }
     const workerObservation = {
-      ...workerExecution.observation,
+      ...proposalExecution.observation,
       observed_changes: workerChanges,
       observed_output_snapshot: workerSnapshot.digest,
       command_executions: [commandExecution],
@@ -2415,22 +2435,12 @@ export async function runLocalChange({
       inputRefs: [implementationPacketRef],
       createdAt: now(),
       claims: workerProposal.claims,
-      evidence: [...workerProposal.evidence, {
-        claim: "the admitted command confirmed the requested file content",
-        source: `command:${commandExecution.command_id}`,
-        observation: "kernel runner returned succeeded",
-        command_ref: {
-          kind: "command_execution",
-          runtime_ref: workerRuntimeRef,
-          command_id: commandExecution.command_id,
-          output_digest: commandExecution.output_digest,
-        },
-      }],
+      evidence: workerProposal.evidence,
       changed_resources: workerProposal.changed_resources,
-      output_snapshot: workerSnapshot.digest,
+      output_snapshot: workerProposal.output_snapshot,
       result_commit: resultCommit,
     });
-    await hooks.beforeResultAdmission?.({ workerResult });
+    await hooks.beforeResultAdmission?.({ workerResult, commandExecution, workerRuntimeRef, admittedCommand });
     const resultArtifactRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
     const resultRepo = join(runDir, "result-repository.git");
     if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);

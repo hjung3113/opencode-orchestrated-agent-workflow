@@ -164,6 +164,7 @@ class FakeRuntime {
       };
     }
     let text;
+    let workerProposalPhase = false;
     if (attemptId === "planner-request") {
       text = JSON.stringify({
         objective: this.requestText,
@@ -194,13 +195,19 @@ class FakeRuntime {
         },
       });
     } else if (attemptId === "worker-implementation-1") {
-      if (!scenario.idleWithoutResult) writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
-      if (scenario.undeclaredPathChange) writeFileSync(join(this.workspace, "unexpected.txt"), "unexpected\n");
-      text = JSON.stringify({
-        claims: ["fake worker completed"],
-        evidence: [{ claim: "the requested file was written", source: "worker-report", observation: "the target was written" }],
-        changed_resources: scenario.idleWithoutResult ? [] : [this.targetFile],
-      });
+      workerProposalPhase = this.workerProposalPhase === true;
+      if (!workerProposalPhase) {
+        if (!scenario.idleWithoutResult) writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
+        if (scenario.undeclaredPathChange) writeFileSync(join(this.workspace, "unexpected.txt"), "unexpected\n");
+        this.workerProposalPhase = true;
+        text = JSON.stringify({ status: "edit complete" });
+      } else {
+        text = JSON.stringify({
+          claims: ["fake worker completed"],
+          evidence: [{ claim: "the requested file was written", source: "worker-report", observation: "the target was written" }],
+          changed_resources: scenario.idleWithoutResult ? [] : [this.targetFile],
+        });
+      }
     } else if (attemptId === "planner-graph-2") {
       text = JSON.stringify({
         carry_forward_task_id: "implementation-1",
@@ -228,6 +235,11 @@ class FakeRuntime {
       throw new Error(`unexpected fake attempt ${attemptId}`);
     }
     const snapshot = workspaceSnapshot(this.workspace);
+    if (workerProposalPhase && attemptId === "worker-implementation-1") {
+      const proposal = JSON.parse(text);
+      proposal.output_snapshot = snapshot.digest;
+      text = JSON.stringify(proposal);
+    }
     return {
       binding: { ...binding, binding_state: "idle" },
       text,
@@ -638,8 +650,18 @@ test("M1 admission preserves policy, evidence, deadline, and run-root boundaries
 
   const evidence = await assertBlockedScenario({
     hooks: {
-      beforeResultAdmission: ({ workerResult }) => {
-        workerResult.evidence.find(({ command_ref }) => command_ref).command_ref.output_digest = digest("wrong output");
+      beforeResultAdmission: ({ workerResult, commandExecution, workerRuntimeRef }) => {
+        workerResult.evidence.push({
+          claim: "the admitted command confirmed the requested file content",
+          source: `command:${commandExecution.command_id}`,
+          observation: "kernel runner returned succeeded",
+          command_ref: {
+            kind: "command_execution",
+            runtime_ref: workerRuntimeRef,
+            command_id: commandExecution.command_id,
+            output_digest: digest("wrong output"),
+          },
+        });
       },
     },
   });
@@ -723,8 +745,18 @@ test("public run requires an explicit human request and creates no Run when omit
 test("command Evidence binds its declared source to the admitted command", { timeout: 30_000 }, async () => {
   const evidence = await assertBlockedScenario({
     hooks: {
-      beforeResultAdmission: ({ workerResult }) => {
-        workerResult.evidence.find(({ source }) => source.startsWith("command:")).source = "command:undeclared";
+      beforeResultAdmission: ({ workerResult, commandExecution, workerRuntimeRef }) => {
+        workerResult.evidence.push({
+          claim: "the admitted command confirmed the requested file content",
+          source: "command:undeclared",
+          observation: "kernel runner returned succeeded",
+          command_ref: {
+            kind: "command_execution",
+            runtime_ref: workerRuntimeRef,
+            command_id: commandExecution.command_id,
+            output_digest: commandExecution.output_digest,
+          },
+        });
       },
     },
   });

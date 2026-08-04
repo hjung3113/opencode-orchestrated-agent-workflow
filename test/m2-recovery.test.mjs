@@ -46,6 +46,7 @@ class Runtime {
   }
   async execute({ role, attemptId, taskId, attempt, binding, beforeSnapshot }) {
     let text;
+    let workerProposalPhase = false;
     if (attemptId === "planner-request") text = JSON.stringify({
       objective: this.requestText, scope: [this.targetFile], exclusions: ["external effects"],
       ambiguities: this.scenario === "material"
@@ -57,28 +58,39 @@ class Runtime {
     });
     else if (attemptId === "planner-graph-1") text = JSON.stringify({ graph: { nodes: [{ task_id: "implementation-1", workflow_definition: "implementation" }] }, packet: { acceptance_criteria: ["target exists"], deadline_seconds: 3 } });
     else if (attemptId === "worker-implementation-1") {
-      writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
-      text = this.scenario === "worker-proposal"
-        ? JSON.stringify({
-          claims: ["worker-authored claim"],
-          evidence: [{ claim: "worker observed the requested edit", source: "worker-report", observation: "the target was written" }],
-          changed_resources: [this.targetFile],
-        })
-        : this.scenario === "worker-invalid-proposal"
+      workerProposalPhase = this.workerProposalPhase === true;
+      if (!workerProposalPhase) {
+        writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
+        this.workerProposalPhase = true;
+        text = JSON.stringify({ status: "edit complete" });
+      } else {
+        text = this.scenario === "worker-proposal"
           ? JSON.stringify({
-            claims: [{ claim: "not a string" }],
-            evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
+            claims: ["worker-authored claim"],
+            evidence: [{ claim: "worker observed the requested edit", source: "worker-report", observation: "the target was written" }],
             changed_resources: [this.targetFile],
           })
-        : JSON.stringify({
-          claims: ["implemented"],
-          evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
-          changed_resources: [this.targetFile],
-        });
+          : this.scenario === "worker-invalid-proposal"
+            ? JSON.stringify({
+              claims: [{ claim: "not a string" }],
+              evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
+              changed_resources: [this.targetFile],
+            })
+          : JSON.stringify({
+            claims: ["implemented"],
+            evidence: [{ claim: "the target was written", source: "worker-report", observation: "the target was written" }],
+            changed_resources: [this.targetFile],
+          });
+      }
     }
     else if (attemptId === "planner-graph-2") text = JSON.stringify({ carry_forward_task_id: "implementation-1", verifier_task: { task_id: "verification-1" }, verifier_packet: { acceptance_criteria: ["target matches"], deadline_seconds: 3 } });
     else text = JSON.stringify({ verdict: "pass", findings: [], evidence: [{ claim: "matches", source: "verifier-read", observation: "target matches" }] });
     const snapshot = (await import("../scripts/local-change.mjs")).workspaceSnapshot(this.workspace);
+    if (workerProposalPhase && attemptId === "worker-implementation-1" && this.scenario !== "worker-missing-output-snapshot") {
+      const proposal = JSON.parse(text);
+      proposal.output_snapshot = snapshot.digest;
+      text = JSON.stringify(proposal);
+    }
     return { binding: { ...binding, binding_state: "idle" }, text, snapshot, observation: this.observation({ attemptId, role, binding, snapshot, taskId, attempt }) };
   }
 
@@ -610,6 +622,24 @@ test("worker Result fields are authored by the worker proposal", async () => {
     assert.deepEqual(result.claims, ["worker-authored claim"]);
     assert.deepEqual(result.changed_resources, ["change.txt"]);
     assert.equal(result.evidence[0].source, "worker-report");
+    const workerRuntime = JSON.parse(readFileSync(join(run.run_dir, result.runtime_ref.path)));
+    assert.equal(result.output_snapshot, workerRuntime.observed_output_snapshot);
+    assert.equal(result.evidence.some(({ source }) => source.startsWith("command:")), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("worker Result without a claimed Output Snapshot is rejected", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "worker-missing-output-snapshot" }),
+    }), /output_snapshot|Output Snapshot/i);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
