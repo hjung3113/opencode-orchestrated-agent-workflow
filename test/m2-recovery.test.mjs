@@ -99,6 +99,13 @@ function fixture() {
   return { workspace, runRoot };
 }
 
+function cliResume(workspace, runRoot, runId, extra = []) {
+  return JSON.parse(execFileSync(process.execPath, [
+    "scripts/local-change.mjs", "resume", "--workspace", workspace,
+    "--run-root", runRoot, "--run-id", runId, ...extra,
+  ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+}
+
 test("resume reconstructs a terminal Run idempotently and rejects invalid durable state", async () => {
   const { workspace, runRoot } = fixture();
   try {
@@ -280,11 +287,11 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
       const runDir = join(runRoot, "runs", runId);
       const prepared = JSON.parse(readFileSync(join(runDir, "artifacts/promotions/promotion-1.json")));
       assert.equal(prepared.expected_ref_oid, null);
-      run = await resumeRun(runDir);
+      run = cliResume(workspace, runRoot, runId);
       assert.equal(run.lifecycle_state, "completed");
       assert.equal(run.next_action, null);
       const before = readFileSync(join(runDir, "run.json"), "utf8");
-      assert.equal((await resumeRun(runDir)).lifecycle_state, "completed");
+      assert.equal(cliResume(workspace, runRoot, runId).lifecycle_state, "completed");
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
       assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json"))).outcome_kind, "receipt");
     } finally {
@@ -312,7 +319,7 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
       env: { ...process.env, GIT_AUTHOR_NAME: "M2 Drift", GIT_AUTHOR_EMAIL: "m2@example.invalid", GIT_COMMITTER_NAME: "M2 Drift", GIT_COMMITTER_EMAIL: "m2@example.invalid" },
     }).trim();
     git(join(runDir, "result-repository.git"), ["update-ref", `refs/orchestrator/results/${runId}`, drift]);
-    const resumed = await resumeRun(runDir);
+    const resumed = cliResume(workspace, runRoot, runId);
     assert.equal(resumed.lifecycle_state, "blocked");
     assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/failure.json"))).block_type, "result_ref_drift");
     assert.equal(git(join(runDir, "result-repository.git"), ["rev-parse", `refs/orchestrator/results/${runId}`]).trim(), drift);
@@ -329,6 +336,7 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
     "before_result_ref_update",
     "after_result_ref_update",
     "before_run_state_replacement:receipt_admitted",
+    "after_run_state_replacement:receipt_admitted",
   ]) {
     const { workspace, runRoot } = fixture();
     try {
@@ -341,10 +349,10 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
       }), /simulated process death/);
       const runId = readdirSync(join(runRoot, "runs"))[0];
       const runDir = join(runRoot, "runs", runId);
-      const first = await resumeRun(runDir);
+      const first = cliResume(workspace, runRoot, runId);
       assert.equal(first.lifecycle_state, "completed", crashAt);
       const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
-      const second = await resumeRun(runDir);
+      const second = cliResume(workspace, runRoot, runId);
       assert.equal(second.lifecycle_state, "completed", crashAt);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat, crashAt);
     } finally {
