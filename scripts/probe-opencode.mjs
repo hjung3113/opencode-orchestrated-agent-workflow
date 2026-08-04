@@ -530,11 +530,6 @@ async function observeServer() {
         && properties?.sessionID === sessions.verifier)
       .map(({ properties }) => properties.status?.type)
       .filter(Boolean);
-    const observedCancelledSession = await requestJson({
-      port,
-      path: `/session/${sessions.verifier}`,
-      timeout: 2_000,
-    });
     const operatorAgent = resolvedAgents.find(({ name }) => name === "m0-verifier");
     const operatorSession = await requestJson({
       port,
