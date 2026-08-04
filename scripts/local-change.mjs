@@ -392,6 +392,12 @@ export function transitionRun(state, {
   return next;
 }
 
+function upsertRuntimeBinding(bindings, binding) {
+  const index = bindings.findIndex(({ attempt_id }) => attempt_id === binding.attempt_id);
+  if (index === -1) return [...bindings, binding];
+  return bindings.map((current, currentIndex) => currentIndex === index ? binding : current);
+}
+
 function applyTransition(ctx, state, eventKind, patch, recordRefs = []) {
   const next = transitionRun(state, {
     eventId: `${eventKind}-${state.state_version + 1}`,
@@ -738,6 +744,59 @@ export class OpenCodeAdapter {
       await wait(100);
     }
     return fallback;
+  }
+
+  async reconcileAttempt({ role, attemptId, taskId, attempt, binding, beforeSnapshot }) {
+    const statuses = await this.api("/session/status", { timeout: 5_000 });
+    const body = await this.latestMessage(binding.session_id, null);
+    if (!body) {
+      throw new AttemptFailure("runtime_reconciliation_required", `no completed message is observable for ${attemptId}`);
+    }
+    const status = statuses.body?.[binding.session_id]?.type;
+    if (status && status !== "idle") {
+      throw new AttemptFailure("runtime_reconciliation_required", `runtime binding ${binding.session_id} is still ${status}`);
+    }
+    const currentSnapshot = workspaceSnapshot(this.workspace);
+    const textParts = (body.parts ?? [])
+      .filter(({ type }) => type === "text")
+      .map(({ text: value }) => value);
+    const reasoningParts = (body.parts ?? [])
+      .filter(({ type }) => type === "reasoning")
+      .map(({ text: value }) => value);
+    const text = [...textParts, ...reasoningParts].join("\n").trim();
+    return {
+      binding: { ...binding, binding_state: "idle" },
+      text,
+      snapshot: currentSnapshot,
+      changes: diffEntries(beforeSnapshot, currentSnapshot),
+      events: [],
+      observation: envelope({
+        kind: "runtime_observation",
+        artifactId: `runtime-${attemptId}`,
+        runId: this.runId,
+        producer: runtimeProducer(),
+        inputRefs: [],
+        createdAt: now(),
+        attempt_id: attemptId,
+        ...(taskId ? { task_id: taskId } : {}),
+        ...(role === "worker" || role === "verifier" ? { attempt } : {}),
+        role,
+        opencode_version: this.version,
+        configuration_digest: this.configurationDigest,
+        server_id: `opencode-${this.port}`,
+        session_id: binding.session_id,
+        agent_identity: binding.agent_identity,
+        message_ids: body.info?.id ? [body.info.id] : [],
+        agent: binding.agent,
+        model: binding.model,
+        runtime_permission_events: [],
+        command_executions: [],
+        observed_changes: diffEntries(beforeSnapshot, currentSnapshot),
+        observed_output_snapshot: currentSnapshot.digest,
+        external_reads: [],
+        exit_reason: "idle",
+      }),
+    };
   }
 
   async execute({ role, attemptId, taskId, attempt, binding, prompt, beforeSnapshot, deadlineSeconds = m1AttemptDeadlineSeconds }) {
@@ -2116,6 +2175,10 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
         if (isRecoverableProviderFailure(error)) {
           return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
         }
+        if (error.code) {
+          recordFailure(reconciliationCtx, state, error);
+          return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+        }
         throw error;
       }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
@@ -2741,27 +2804,48 @@ export async function runLocalChange({
         });
         verificationPacketRef = writeArtifact(ctx, verificationPacketPath, verificationPacket);
       } else {
-        admitBudget(state, "planner_attempt");
-        admitBudget(state, "graph_revision");
-        const graphTwoAttempt = await adapter.newAttempt({
-          role: "planner",
-          attemptId: "planner-graph-2",
-          attempt: 3,
-        });
-        const graphTwoPrompt = [
-          "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
-          "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
-          "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
-        ].join("\n");
-        const graphTwoExecution = await adapter.execute({
-          role: "planner",
-          attemptId: "planner-graph-2",
-          attempt: 3,
-          binding: graphTwoAttempt.binding,
-          prompt: graphTwoPrompt,
-          beforeSnapshot: workerSnapshot,
-          deadlineSeconds: admittedAttemptDeadlineSeconds,
-        });
+        const preparedGraphTwoBinding = state.runtime_bindings.find(({ attempt_id }) =>
+          attempt_id === "planner-graph-2");
+        let graphTwoExecution;
+        if (preparedGraphTwoBinding) {
+          if (typeof adapter.reconcileAttempt !== "function") {
+            throw new AttemptFailure("runtime_reconciliation_required", "planner-graph-2 has a durable binding but no reconciliation adapter");
+          }
+          graphTwoBinding = preparedGraphTwoBinding;
+          graphTwoExecution = await adapter.reconcileAttempt({
+            role: "planner",
+            attemptId: "planner-graph-2",
+            attempt: 3,
+            binding: graphTwoBinding,
+            beforeSnapshot: workerSnapshot,
+          });
+        } else {
+          admitBudget(state, "planner_attempt");
+          admitBudget(state, "graph_revision");
+          const graphTwoAttempt = await adapter.newAttempt({
+            role: "planner",
+            attemptId: "planner-graph-2",
+            attempt: 3,
+          });
+          graphTwoBinding = graphTwoAttempt.binding;
+          state = applyTransition(ctx, state, "runtime_dispatch_prepared", {
+            runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
+          }, []);
+          const graphTwoPrompt = [
+            "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
+            "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
+            "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
+          ].join("\n");
+          graphTwoExecution = await adapter.execute({
+            role: "planner",
+            attemptId: "planner-graph-2",
+            attempt: 3,
+            binding: graphTwoBinding,
+            prompt: graphTwoPrompt,
+            beforeSnapshot: workerSnapshot,
+            deadlineSeconds: admittedAttemptDeadlineSeconds,
+          });
+        }
         admitAttemptExecution(ctx, graphTwoExecution, "graph revision 2 planner Attempt");
         writePreparedExecution(ctx, "planner-graph-2", graphTwoExecution);
         graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
@@ -2780,7 +2864,7 @@ export async function runLocalChange({
           artifactId: "packet-verification-1",
           targetTaskRef: resultArtifactRef,
           targetSnapshot: workerSnapshot.digest,
-          actorId: graphTwoAttempt.binding.agent_identity,
+          actorId: graphTwoBinding.agent_identity,
         });
         verificationPacketRef = writeArtifact(ctx, verificationPacketPath, verificationPacket);
         crashAt(ctx, "after_graph_two_packet_publication");
@@ -2804,7 +2888,7 @@ export async function runLocalChange({
       crashAt(ctx, "after_graph_two_publication");
       state = applyTransition(ctx, state, "graph_revision_2_admitted", {
         active_graph_ref: graphTwoRef,
-        runtime_bindings: [...state.runtime_bindings, graphTwoBinding],
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
         tasks: {
           ...state.tasks,
           "verification-1": { task_state: "planned", attempts: 0 },
@@ -2836,7 +2920,7 @@ export async function runLocalChange({
       };
       state = applyTransition(ctx, state, "graph_revision_2_admitted", {
         active_graph_ref: graphTwoRef,
-        runtime_bindings: [...state.runtime_bindings, graphTwoBinding],
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
         tasks: {
           ...state.tasks,
           "verification-1": { task_state: "planned", attempts: 0 },

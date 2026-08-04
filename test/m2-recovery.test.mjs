@@ -985,6 +985,137 @@ if (args[0] === "--version") {
   }
 });
 
+test("public resume reuses a durable planner binding after an accepted message loses its response", async () => {
+  const { workspace, runRoot } = fixture();
+  const fakeBin = mkdtempSync(join(tmpdir(), "m2-ambiguous-provider-bin-"));
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+      hooks: { crashAt: "after_result_publication" },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    assert.equal(cliResume(workspace, runRoot, runId).checkpoint, "implementation_result_admitted");
+
+    const providerState = join(fakeBin, "provider-state.json");
+    writeFileSync(providerState, JSON.stringify({
+      nextSession: 1,
+      messagePosts: 0,
+      ambiguousOnce: true,
+      sessions: {},
+    }));
+    const fakeOpencode = join(fakeBin, "opencode");
+    writeFileSync(fakeOpencode, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const args = process.argv.slice(2);
+const statePath = process.env.M2_AMBIGUOUS_PROVIDER_STATE;
+const readState = () => JSON.parse(readFileSync(statePath, "utf8"));
+const writeState = (state) => writeFileSync(statePath, JSON.stringify(state));
+const send = (response, status, body) => {
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify(body));
+};
+const readBody = (request) => new Promise((resolve) => {
+  let raw = "";
+  request.on("data", (chunk) => { raw += chunk; });
+  request.on("end", () => resolve(raw.length === 0 ? {} : JSON.parse(raw)));
+});
+
+if (args[0] === "--version") {
+  process.stdout.write("m2-ambiguous-opencode\\n");
+} else if (args[0] === "debug") {
+  process.stdout.write(JSON.stringify({ instructions: [], plugin: [], mcp: {}, agent: {}, command: {}, provider: {} }) + "\\n");
+} else if (args[0] === "serve") {
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname === "/global/health") return send(response, 200, { healthy: true, version: "m2-ambiguous-opencode" });
+    if (url.pathname === "/agent") return send(response, 200, ["planner", "worker", "verifier"].map((role) => ({ name: "m1-" + role, model: { providerID: "fake", modelID: "model" } })));
+    if (url.pathname === "/event") {
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/event-stream");
+      response.write(": ready\\n\\n");
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/session") {
+      const state = readState();
+      const id = "session-" + state.nextSession;
+      writeState({ ...state, nextSession: state.nextSession + 1, sessions: { ...state.sessions, [id]: null } });
+      return send(response, 200, { id });
+    }
+    if (request.method === "GET" && url.pathname === "/session/status") {
+      return send(response, 200, Object.fromEntries(Object.keys(readState().sessions).map((id) => [id, { type: "idle" }])));
+    }
+    const sessionMatch = url.pathname.match(/^\\/session\\/([^/]+)\\/message$/);
+    if (sessionMatch && request.method === "GET") {
+      const message = readState().sessions[sessionMatch[1]];
+      return send(response, 200, message ? [message] : []);
+    }
+    if (sessionMatch && request.method === "POST") {
+      const payload = await readBody(request);
+      const prompt = payload.parts?.[0]?.text ?? "";
+      const state = readState();
+      const messagePosts = state.messagePosts + 1;
+      const text = prompt.includes("graph revision 2")
+        ? JSON.stringify({ carry_forward_task_id: "implementation-1", verifier_task: { task_id: "verification-1", workflow_definition: "verification", requires: ["implementation-1"], read_resources: ["change.txt"], write_resources: [] }, verifier_packet: { objective: "verify", acceptance_criteria: ["target matches"], allowed_resources: ["change.txt"], forbidden_resources: [".git"], capabilities: ["repository_read"], admitted_commands: [], deadline_seconds: 3, escalation_condition: "mismatch" } })
+        : JSON.stringify({ verdict: "pass", findings: [], evidence: [{ claim: "the target matches", source: "verifier-read", observation: "the target bytes match" }] });
+      const message = { info: { id: "ambiguous-message-" + messagePosts, role: "assistant" }, parts: [{ type: "text", text }] };
+      writeState({ ...state, messagePosts, ambiguousOnce: false, sessions: { ...state.sessions, [sessionMatch[1]]: message } });
+      if (state.ambiguousOnce) {
+        request.socket.destroy();
+        return;
+      }
+      return send(response, 200, message);
+    }
+    return send(response, 404, { error: "not found" });
+  });
+  const port = Number(args[args.indexOf("--port") + 1]);
+  server.listen(port, "127.0.0.1");
+}
+`);
+    chmodSync(fakeOpencode, 0o755);
+    const env = {
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      M2_AMBIGUOUS_PROVIDER_STATE: providerState,
+    };
+    const failed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(failed.lifecycle_state, "blocked");
+    assert.equal(failed.checkpoint, "runtime_provider_failure");
+    const stateAfterFailure = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const binding = stateAfterFailure.runtime_bindings.find(({ attempt_id }) => attempt_id === "planner-graph-2");
+    assert.equal(binding?.session_id, "session-1");
+    const acceptedState = JSON.parse(readFileSync(providerState));
+    assert.equal(acceptedState.messagePosts, 1);
+
+    writeFileSync(providerState, JSON.stringify({ ...acceptedState, sessions: {} }));
+    const unresolved = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(unresolved.lifecycle_state, "blocked");
+    assert.equal(unresolved.checkpoint, "runtime_reconciliation_required");
+    assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 1);
+    writeFileSync(providerState, JSON.stringify(acceptedState));
+
+    const reconciled = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(reconciled.checkpoint, "graph_revision_2_admitted");
+    assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 1);
+    assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings.filter(({ attempt_id }) => attempt_id === "planner-graph-2").length, 1);
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "verification_dispatched");
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "review_admitted");
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "promotion_prepared");
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "result_ref_promoted");
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).lifecycle_state, "completed");
+    assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 2);
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("runtime-abort crash boundaries preserve cancellation intent and forbid resume dispatch", async () => {
   for (const crashAt of ["before_runtime_abort", "after_runtime_abort"]) {
     const { workspace, runRoot } = fixture();
