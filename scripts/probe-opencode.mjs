@@ -412,6 +412,9 @@ async function observeServer() {
   });
   let child = startServer();
   let childExit = once(child, "exit");
+  let childExitObservedAt = new Promise((resolvePromise) => {
+    child.once("exit", () => resolvePromise(performance.now()));
+  });
   const waitForHealth = async () => {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -623,22 +626,28 @@ async function observeServer() {
         resolvePromise(requestedAtMs);
       });
     });
-    const processDied = await Promise.race([
-      childExit.then(() => true),
-      new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 2_000)),
+    const processExitedAtMs = await Promise.race([
+      childExitObservedAt,
+      new Promise((resolvePromise) => setTimeout(() => resolvePromise(null), 2_000)),
     ]);
+    const processDied = typeof processExitedAtMs === "number";
     const cancelOutcome = await cancelRequest;
     const cancelRequestError = cancelOutcome.error?.message;
-    const cancelRequestFinishedBeforeProcessDeath = cancelRequestFinishedAtMs !== null
-      && cancelRequestFinishedAtMs < processDeathRequestedAtMs;
-    const abortResponseBeforeProcessDeath = abortResponseAtMs !== null
-      && abortResponseAtMs <= processDeathRequestedAtMs;
-    const cancelUnconfirmedBeforeProcessDeath = runtimeActiveBeforeCancel
-      && cancelRequestFinishedBeforeProcessDeath
-      && !abortResponseBeforeProcessDeath
+    const cancelRequestFinishedBeforeProcessExit = cancelRequestFinishedAtMs !== null
+      && processExitedAtMs !== null
+      && cancelRequestFinishedAtMs < processExitedAtMs;
+    const abortResponseBeforeProcessExit = abortResponseAtMs !== null
+      && processExitedAtMs !== null
+      && abortResponseAtMs <= processExitedAtMs;
+    const cancelUnconfirmedBeforeProcessExit = runtimeActiveBeforeCancel
+      && cancelRequestFinishedBeforeProcessExit
+      && !abortResponseBeforeProcessExit
       && processDied;
     child = startServer();
     childExit = once(child, "exit");
+    childExitObservedAt = new Promise((resolvePromise) => {
+      child.once("exit", () => resolvePromise(performance.now()));
+    });
     const reconnectHealth = await waitForHealth();
     const reconnectedSession = await requestJson({
       port,
@@ -698,11 +707,12 @@ async function observeServer() {
         prompt_http_status: reconcilePrompt.response?.status ?? null,
         runtime_active_before_cancel: runtimeActiveBeforeCancel,
         status_before_cancel: reconcileStatusesBeforeCancel[reconcileSession.id]?.type ?? null,
-        cancel_request_finished_before_process_death: cancelRequestFinishedBeforeProcessDeath,
+        cancel_request_finished_before_process_exit: cancelRequestFinishedBeforeProcessExit,
         cancel_request_finished_at_ms: cancelRequestFinishedAtMs,
         process_death_requested_at_ms: processDeathRequestedAtMs,
-        cancel_unconfirmed_before_process_death: cancelUnconfirmedBeforeProcessDeath,
-        abort_response_before_process_death: abortResponseBeforeProcessDeath,
+        process_exited_at_ms: processExitedAtMs,
+        cancel_unconfirmed_before_process_exit: cancelUnconfirmedBeforeProcessExit,
+        abort_response_before_process_exit: abortResponseBeforeProcessExit,
         abort_response_at_ms: abortResponseAtMs,
         process_died: processDied,
         cancel_request_error: cancelRequestError,
@@ -858,13 +868,16 @@ const operatorRow = {
 };
 const operatorReconcileObserved = runtimeObservation.operator_reconcile.runtime_active_before_cancel
   && ["busy", "running"].includes(runtimeObservation.operator_reconcile.status_before_cancel)
-  && runtimeObservation.operator_reconcile.cancel_request_finished_before_process_death
+  && runtimeObservation.operator_reconcile.cancel_request_finished_before_process_exit
   && typeof runtimeObservation.operator_reconcile.cancel_request_finished_at_ms === "number"
   && typeof runtimeObservation.operator_reconcile.process_death_requested_at_ms === "number"
+  && typeof runtimeObservation.operator_reconcile.process_exited_at_ms === "number"
   && runtimeObservation.operator_reconcile.cancel_request_finished_at_ms
-    < runtimeObservation.operator_reconcile.process_death_requested_at_ms
-  && runtimeObservation.operator_reconcile.cancel_unconfirmed_before_process_death
-  && runtimeObservation.operator_reconcile.abort_response_before_process_death === false
+    < runtimeObservation.operator_reconcile.process_exited_at_ms
+  && runtimeObservation.operator_reconcile.process_exited_at_ms
+    >= runtimeObservation.operator_reconcile.process_death_requested_at_ms
+  && runtimeObservation.operator_reconcile.cancel_unconfirmed_before_process_exit
+  && runtimeObservation.operator_reconcile.abort_response_before_process_exit === false
   && runtimeObservation.operator_reconcile.process_died
   && runtimeObservation.operator_reconcile.reconnect_health?.healthy === true
   && runtimeObservation.operator_reconcile.reconnected_session_id === runtimeObservation.operator_reconcile.session_id
