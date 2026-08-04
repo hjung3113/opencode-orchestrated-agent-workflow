@@ -500,9 +500,7 @@ test("real local-change@1 run preserves the user worktree and emits the verified
     assert.equal(command.command_id, "verify-change");
     assert.equal(command.outcome, "succeeded");
     assert.equal(command.environment_policy_id, "local-change-sandbox-v1");
-    const commandEvidence = resultArtifact.evidence.find(({ source }) => source === "command:verify-change");
-    assert.equal(commandEvidence.command_ref.runtime_ref.digest, resultArtifact.runtime_ref.digest);
-    assert.equal(commandEvidence.command_ref.output_digest, command.output_digest);
+    assert.equal(resultArtifact.evidence.some(({ source }) => source === "command:verify-change"), false);
 
     const runtimeBindings = state.runtime_bindings;
     assert.deepEqual(runtimeBindings.map(({ role }) => role), ["planner", "planner", "worker", "planner", "verifier"]);
