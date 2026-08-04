@@ -22,6 +22,9 @@
   leaves a typed `runtime_reconciliation_required` checkpoint that is
   resumable; a crash after Review publication completes. Repeated public
   resume and publication are idempotent.
+- Runtime event subscriptions are observational only; attempt execution no
+  longer waits indefinitely for SSE readiness, so the admitted Attempt
+  deadline remains the execution bound.
 - Material ambiguity is admitted only from explicit durable protocol data.
   Neutral request wording and model confidence cannot create a material gate.
   The gate is before workflow selection, worker dispatch, or Promotion
@@ -31,7 +34,7 @@
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
 - Current branch is `agent/executable-opencode-harness-design` after local
-  repair commits through `fb00119`; this handoff update is the next local
+  repair commits through `09cb345`; this handoff update is the next local
   commit. Nothing has been pushed and no PR exists.
 - Current evidence: protocol 4/4, M0 16/16, full M1 11/11 including a fresh
   successful real OpenCode trace, M2 17/17, kernel 1/1, JavaScript syntax
@@ -102,7 +105,7 @@ performed. Before any future publication:
 - `npm run test:protocol` — 4/4 passed.
 - `npm run test:m0` — 16/16 passed.
 - `npm run test:m1` — 11/11 passed, including the real OpenCode trace.
-- `npm run test:m2` — 17/17 passed.
+- `npm run test:m2` — 17/17 passed after the final runtime-bound repair.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check scripts/local-change.mjs` and
   `node --check scripts/probe-opencode.mjs` — passed.
@@ -144,7 +147,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD: repair tip `fb00119`; this handoff update is the next local commit
+- HEAD: repair tip `09cb345`; this handoff update is the next local commit
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
 - no protected uncommitted work was present before this handoff edit
