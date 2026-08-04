@@ -519,31 +519,45 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
   ]) {
     const { workspace, runRoot } = fixture();
     try {
+      let runtime;
       await assert.rejects(() => runLocalChange({
         workspace,
         runRoot,
         requestText: "Add change.txt.",
-        runtimeFactory: (options) => new Runtime(options),
+        runtimeFactory: (options) => {
+          runtime = new Runtime(options);
+          return runtime;
+        },
         hooks: { crashAt },
       }), /simulated process death/);
       const runId = readdirSync(join(runRoot, "runs"))[0];
       const runDir = join(runRoot, "runs", runId);
-      const first = cliResume(workspace, runRoot, runId);
+      const resume = () => crashAt === "after_result_publication"
+        ? resumeRun(runDir, { workspace, runtime })
+        : cliResume(workspace, runRoot, runId);
+      const first = await resume();
       if (crashAt === "after_result_publication") {
-        assert.equal(first.lifecycle_state, "completed", crashAt);
+        assert.equal(first.lifecycle_state, "active", crashAt);
         const reconciled = JSON.parse(readFileSync(join(runDir, "run.json")));
         assert.equal(reconciled.tasks["implementation-1"].task_state, "artifacts_published", crashAt);
         assert.ok(reconciled.tasks["implementation-1"].artifact_ref, crashAt);
-        assert.equal(reconciled.tasks["verification-1"].task_state, "artifacts_published", crashAt);
-        assert.ok(reconciled.tasks["verification-1"].artifact_ref, crashAt);
+        assert.equal(reconciled.tasks["verification-1"].task_state, "planned", crashAt);
+        assert.equal(reconciled.transitions.at(-1).event_kind, "graph_revision_2_admitted", crashAt);
         assert.equal(existsSync(join(runDir, "artifacts/graphs/0002.json")), true, crashAt);
+        for (const expected of ["verification_dispatched", "review_admitted", "receipt_admitted"]) {
+          const before = JSON.parse(readFileSync(join(runDir, "run.json")));
+          const resumed = await resume();
+          const after = JSON.parse(readFileSync(join(runDir, "run.json")));
+          assert.deepEqual(after.transitions.slice(before.transitions.length).map(({ event_kind }) => event_kind), [expected], `${crashAt}: ${expected}`);
+          assert.equal(resumed.lifecycle_state, expected === "receipt_admitted" ? "completed" : "active", `${crashAt}: ${expected}`);
+        }
         assert.equal(existsSync(join(runDir, "artifacts/outcomes/0001.json")), true, crashAt);
       } else {
         assert.equal(first.lifecycle_state, "completed", crashAt);
       }
       const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
       const second = cliResume(workspace, runRoot, runId);
-      assert.equal(second.lifecycle_state, first.lifecycle_state, crashAt);
+      assert.equal(second.lifecycle_state, crashAt === "after_result_publication" ? "completed" : first.lifecycle_state, crashAt);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat, crashAt);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
