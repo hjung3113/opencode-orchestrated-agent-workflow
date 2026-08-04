@@ -280,11 +280,11 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
       const runDir = join(runRoot, "runs", runId);
       const prepared = JSON.parse(readFileSync(join(runDir, "artifacts/promotions/promotion-1.json")));
       assert.equal(prepared.expected_ref_oid, null);
-      run = resumeRun(runDir);
+      run = await resumeRun(runDir);
       assert.equal(run.lifecycle_state, "completed");
       assert.equal(run.next_action, null);
       const before = readFileSync(join(runDir, "run.json"), "utf8");
-      assert.equal(resumeRun(runDir).lifecycle_state, "completed");
+      assert.equal((await resumeRun(runDir)).lifecycle_state, "completed");
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
       assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json"))).outcome_kind, "receipt");
     } finally {
@@ -312,7 +312,7 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
       env: { ...process.env, GIT_AUTHOR_NAME: "M2 Drift", GIT_AUTHOR_EMAIL: "m2@example.invalid", GIT_COMMITTER_NAME: "M2 Drift", GIT_COMMITTER_EMAIL: "m2@example.invalid" },
     }).trim();
     git(join(runDir, "result-repository.git"), ["update-ref", `refs/orchestrator/results/${runId}`, drift]);
-    const resumed = resumeRun(runDir);
+    const resumed = await resumeRun(runDir);
     assert.equal(resumed.lifecycle_state, "blocked");
     assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/failure.json"))).block_type, "result_ref_drift");
     assert.equal(git(join(runDir, "result-repository.git"), ["rev-parse", `refs/orchestrator/results/${runId}`]).trim(), drift);
@@ -341,10 +341,10 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
       }), /simulated process death/);
       const runId = readdirSync(join(runRoot, "runs"))[0];
       const runDir = join(runRoot, "runs", runId);
-      const first = resumeRun(runDir);
+      const first = await resumeRun(runDir);
       assert.equal(first.lifecycle_state, "completed", crashAt);
       const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
-      const second = resumeRun(runDir);
+      const second = await resumeRun(runDir);
       assert.equal(second.lifecycle_state, "completed", crashAt);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat, crashAt);
     } finally {
@@ -378,13 +378,55 @@ test("runtime-abort crash boundaries preserve cancellation intent and forbid res
       const state = JSON.parse(readFileSync(join(runDir, "run.json")));
       assert.equal(state.lifecycle_state, "cancelling", crashAt);
       assert.equal(state.transitions.at(-1).event_kind, "cancel_requested", crashAt);
-      const resumed = resumeRun(runDir);
-      assert.equal(resumed.lifecycle_state, "cancelling", crashAt);
+      const resumed = JSON.parse(execFileSync(process.execPath, [
+        "scripts/local-change.mjs", "resume", "--workspace", workspace,
+        "--run-root", runRoot, "--run-id", runId,
+      ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+      assert.equal(resumed.lifecycle_state, "blocked", crashAt);
+      assert.equal(resumed.checkpoint, "cancel_unconfirmed", crashAt);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/cancel.json"))).block_type, "cancel_unconfirmed", crashAt);
       assert.equal(resumed.next_action, null, crashAt);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(runRoot, { recursive: true, force: true });
     }
+  }
+});
+
+test("resume reconciles a cancelling Run through the durable runtime binding seam", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    const crash = new Error("simulated process death");
+    crash.code = "simulated_crash";
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        runtime.cancelConfirmed = true;
+        return runtime;
+      },
+      hooks: {
+        afterWorkerDispatch: async ({ runDir, adapter }) => {
+          await cancelRun(runDir, { runtime: adapter, hooks: { crashAt: "before_runtime_abort" } });
+        },
+      },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const resumed = await resumeRun(runDir, { runtime });
+    assert.equal(resumed.lifecycle_state, "cancelled");
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.deepEqual(state.transitions.slice(-2).map(({ event_kind }) => event_kind), [
+      "cancel_requested",
+      "cancel_confirmed",
+    ]);
+    assert.equal(state.runtime_bindings.at(-1).binding_state, "cancelled");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
   }
 });
 
@@ -531,7 +573,7 @@ test("Receipt after Decision restart includes the accepted Decision reference", 
       requestText: "Please update the file using the bounded local workflow.",
       runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
     });
-    const interrupted = resumeRun(run.run_dir, {
+    const interrupted = await resumeRun(run.run_dir, {
       decision: "Use the bounded harness-owned Result Ref.",
       decisionDisposition: "accepted",
       hooks: { crashAt: "after_run_state_replacement:material_decision_accepted" },

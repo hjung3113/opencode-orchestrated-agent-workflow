@@ -1319,7 +1319,9 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
 
   const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
   const active = [...state.runtime_bindings].reverse().find(({ binding_state }) => binding_state === "active");
-  let next = applyTransition(ctx, state, "cancel_requested", { lifecycle_state: "cancelling" });
+  let next = state.lifecycle_state === "cancelling"
+    ? state
+    : applyTransition(ctx, state, "cancel_requested", { lifecycle_state: "cancelling" });
   crashAt(ctx, "before_runtime_abort");
 
   let result;
@@ -1718,13 +1720,21 @@ export function inspectRun(runDir) {
   };
 }
 
-export function resumeRun(runDir, { decision, decisionDisposition, hooks = {} } = {}) {
+export async function resumeRun(runDir, { decision, decisionDisposition, runtime, hooks = {} } = {}) {
   let state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
   if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
     return { ...inspect, next_action: null };
+  }
+  if (state.lifecycle_state === "cancelling") {
+    try {
+      return await cancelRun(runDir, { runtime, hooks });
+    } catch (error) {
+      if (error.code !== "simulated_crash") throw error;
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
   }
   if (state.lifecycle_state === "material_decision_required") {
     const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
@@ -2371,7 +2381,7 @@ async function main() {
     if (!/^[A-Za-z0-9._-]+$/.test(selected)) throw new Error(`invalid Run id: ${selected}`);
     const runDir = join(root, "runs", selected);
     const result = command === "resume"
-      ? resumeRun(runDir, {
+      ? await resumeRun(runDir, {
         decision: parseOption(argv, "--decision"),
         decisionDisposition: parseOption(argv, "--decision-disposition"),
       })
