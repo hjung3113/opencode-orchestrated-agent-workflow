@@ -1519,6 +1519,7 @@ function receiptFor(ctx, state, {
     resultRef,
     reviewRef,
     promotionRef,
+    ...(state.decision_refs ?? []),
     ...ctx.admittedRefs,
   ].filter(Boolean);
   const uniqueRefs = [...new Map(refs.map((ref) => [ref.path, ref])).values()];
@@ -1733,7 +1734,7 @@ export function resumeRun(runDir, { decision, decisionDisposition, hooks = {} } 
       }
     } catch (error) {
       if (!error.code) throw error;
-      recordFailure(ctx, state, error);
+      if (error.code !== "simulated_crash") recordFailure(ctx, state, error);
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -1786,7 +1787,7 @@ export function resumeRun(runDir, { decision, decisionDisposition, hooks = {} } 
       return { ...inspectRun(runDir), next_action: null, lifecycle_state: completedState.lifecycle_state };
     } catch (error) {
       if (!error.code) throw error;
-      recordFailure(ctx, state, error);
+      if (error.code !== "simulated_crash") recordFailure(ctx, state, error);
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }

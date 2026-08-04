@@ -484,3 +484,35 @@ test("explicitly rejected Decision is durable and never promotes", async () => {
     rmSync(runRoot, { recursive: true, force: true });
   }
 });
+
+test("Receipt after Decision restart includes the accepted Decision reference", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Please update the file using the bounded local workflow.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
+    });
+    const interrupted = resumeRun(run.run_dir, {
+      decision: "Use the bounded harness-owned Result Ref.",
+      decisionDisposition: "accepted",
+      hooks: { crashAt: "after_run_state_replacement:material_decision_accepted" },
+    });
+    assert.equal(interrupted.checkpoint, "simulated_crash");
+
+    const resumed = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(resumed.lifecycle_state, "completed");
+    const state = JSON.parse(readFileSync(join(run.run_dir, "run.json")));
+    const receipt = JSON.parse(readFileSync(join(run.run_dir, "artifacts/outcomes/0002.json")));
+    assert.equal(state.decision_refs.length, 1);
+    assert.equal(receipt.artifact_refs.some((ref) => ref.digest === state.decision_refs[0].digest), true);
+    assert.equal(receipt.input_refs.some((ref) => ref.digest === state.decision_refs[0].digest), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
