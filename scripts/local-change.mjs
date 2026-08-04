@@ -897,8 +897,7 @@ function requestProposal(parsed, { requestText, targetSnapshot }) {
   };
 }
 
-function materialAmbiguities(request, requestText) {
-  if (!/choose|decide|material decision|external target|publish|deploy|user branch|scope|authority/i.test(requestText)) return [];
+function materialAmbiguities(request) {
   return request.ambiguities.filter((ambiguity) =>
     typeof ambiguity === "string" && /^(material|decision):/i.test(ambiguity));
 }
@@ -2251,7 +2250,7 @@ export async function runLocalChange({
       promotedResources: [targetFile],
       taskWorkspace,
     });
-    const material = materialAmbiguities(request, requestText);
+    const material = materialAmbiguities(request);
     if (material.length > 0) {
       const decisionCheckpoint = materialDecisionRequest(ctx, state, {
         requestRef,
