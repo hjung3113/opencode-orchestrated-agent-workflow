@@ -562,7 +562,15 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
       const runDir = join(runRoot, "runs", runId);
       const prepared = JSON.parse(readFileSync(join(runDir, "artifacts/promotions/promotion-1.json")));
       assert.equal(prepared.expected_ref_oid, null);
-      run = cliResume(workspace, runRoot, runId);
+      const expectedActions = crashAt === "after_promotion_preparation"
+        ? ["result_ref_promoted", "receipt_admitted"]
+        : ["receipt_admitted"];
+      for (const expected of expectedActions) {
+        const before = actionSnapshot(runDir, runId);
+        run = cliResume(workspace, runRoot, runId);
+        assertResumeAction(before, actionSnapshot(runDir, runId), expected, `${crashAt}: ${expected}`);
+        if (expected !== "receipt_admitted") assert.equal(run.lifecycle_state, "active");
+      }
       assert.equal(run.lifecycle_state, "completed");
       assert.equal(run.next_action, null);
       const before = readFileSync(join(runDir, "run.json"), "utf8");
