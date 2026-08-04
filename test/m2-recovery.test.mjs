@@ -404,7 +404,7 @@ test("Material Decision Request survives restart and admits exactly one human su
     const run = await runLocalChange({
       workspace,
       runRoot,
-      requestText: "Add change.txt.",
+      requestText: "Choose the durable external target for this change.",
       runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
     });
     const runDir = run.run_dir;
