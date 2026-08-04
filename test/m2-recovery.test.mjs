@@ -257,6 +257,15 @@ test("public cancel command records an unconfirmed stop after process death", as
       "cancel_unconfirmed",
     ]);
     assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/cancel.json"))).block_type, "cancel_unconfirmed");
+    const beforeResume = readFileSync(join(runDir, "run.json"), "utf8");
+    const beforeRuntime = readdirSync(join(runDir, "artifacts/runtime")).sort();
+    const firstResume = cliResume(workspace, runRoot, runId);
+    const secondResume = cliResume(workspace, runRoot, runId);
+    assert.equal(firstResume.lifecycle_state, "blocked");
+    assert.equal(firstResume.checkpoint, "cancel_unconfirmed");
+    assert.deepEqual(secondResume, firstResume);
+    assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), beforeResume);
+    assert.deepEqual(readdirSync(join(runDir, "artifacts/runtime")).sort(), beforeRuntime);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

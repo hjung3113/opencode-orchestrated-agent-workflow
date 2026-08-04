@@ -1383,6 +1383,9 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
     || (state.lifecycle_state === "blocked" && !cancelBlock)) {
     return { ...inspect, next_action: null };
   }
+  if (state.lifecycle_state === "blocked" && cancelBlock && !runtime?.cancelAttempt) {
+    return { ...inspect, next_action: null, checkpoint: "cancel_unconfirmed" };
+  }
 
   const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
   const active = [...state.runtime_bindings].reverse().find(({ binding_state }) =>
@@ -1399,6 +1402,9 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
     result = { confirmed: false };
   }
   crashAt(ctx, "after_runtime_abort");
+  if (state.lifecycle_state === "blocked" && cancelBlock && result?.confirmed !== true) {
+    return { ...inspectRun(runDir), next_action: null, checkpoint: "cancel_unconfirmed" };
+  }
 
   const durableBinding = active ?? cancellationBinding(state);
   const { observation, observationRef } = cancellationObservation(ctx, state, durableBinding, result);
