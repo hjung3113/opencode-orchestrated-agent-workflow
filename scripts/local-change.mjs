@@ -1966,7 +1966,7 @@ export async function runLocalChange({
       `Raw human request: ${requestText}`,
       `Target snapshot digest: ${taskBaseline.digest}`,
       "Select local-change@1 with no proposed narrowing.",
-      "If an ambiguity changes durable scope or authority, record it as a string prefixed material:. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
+      "Materiality is a protocol fact, not model uncertainty: record a material: ambiguity only when the raw human request explicitly leaves a durable scope or Decision Authority choice unresolved; never invent one from neutral wording or confidence. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
       "Use this shape: {\"objective\":\"...\",\"scope\":[\"...\"],\"exclusions\":[\"...\"],\"ambiguities\":[],\"assumptions\":[],\"target_snapshot\":\"...\",\"preset_selection\":{\"preset\":\"local-change@1\",\"selection_evidence\":[{\"claim\":\"...\",\"source\":\"intake\",\"observation\":\"...\"}],\"proposed_narrowing\":null,\"rationale\":\"...\"}}",
     ].join("\n");
     const requestExecution = await adapter.execute({
