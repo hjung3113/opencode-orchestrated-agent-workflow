@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { runLocalChange } from "../scripts/local-change.mjs";
-import { digest } from "../scripts/local-change.mjs";
+import { cancelRun, digest, runLocalChange } from "../scripts/local-change.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -59,6 +58,27 @@ class Runtime {
     const snapshot = (await import("../scripts/local-change.mjs")).workspaceSnapshot(this.workspace);
     return { binding: { ...binding, binding_state: "idle" }, text, snapshot, observation: this.observation({ attemptId, role, binding, snapshot, taskId, attempt }) };
   }
+
+  async cancelAttempt({ binding, runDir }) {
+    const observation = this.observation({
+      attemptId: `${binding.attempt_id}-cancel`,
+      role: binding.role,
+      binding,
+      snapshot: this.baselineSnapshot,
+      taskId: binding.task_id,
+      attempt: binding.attempt,
+    });
+    const confirmed = this.cancelConfirmed === true;
+    return {
+      confirmed,
+      observation: {
+        ...observation,
+        artifact_id: `${binding.attempt_id}-cancel`,
+        exit_reason: confirmed ? "cancelled" : "cancel_unconfirmed",
+      },
+      runDir,
+    };
+  }
 }
 
 function fixture() {
@@ -93,6 +113,79 @@ test("resume reconstructs a terminal Run idempotently and rejects invalid durabl
     assert.throws(() => execFileSync(process.execPath, [
       "scripts/local-change.mjs", "resume", "--workspace", workspace, "--run-root", runRoot, "--run-id", run.run_id,
     ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancel persists intent before abort and closes only after a confirmed stop", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    const result = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        runtime.cancelConfirmed = true;
+        const cancel = runtime.cancelAttempt.bind(runtime);
+        runtime.cancelAttempt = async (request) => {
+          const state = JSON.parse(readFileSync(join(request.runDir, "run.json")));
+          assert.equal(state.lifecycle_state, "cancelling");
+          assert.equal(state.transitions.at(-1).event_kind, "cancel_requested");
+          return cancel(request);
+        };
+        return runtime;
+      },
+      hooks: {
+        afterWorkerDispatch: async ({ runDir, adapter }) => {
+          await cancelRun(runDir, { runtime: adapter });
+        },
+      },
+    });
+    const state = JSON.parse(readFileSync(join(result.run_dir, "run.json")));
+    assert.equal(state.lifecycle_state, "cancelled");
+    assert.deepEqual(state.transitions.slice(-2).map(({ event_kind }) => event_kind), [
+      "cancel_requested",
+      "cancel_confirmed",
+    ]);
+    assert.equal(state.runtime_bindings.at(-1).binding_state, "cancelled");
+    assert.equal(runtime.sequence, 3);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("cancel_unconfirmed is durable and never permits successor dispatch", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const result = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        const runtime = new Runtime(options);
+        runtime.cancelConfirmed = false;
+        return runtime;
+      },
+      hooks: {
+        afterWorkerDispatch: async ({ runDir, adapter }) => {
+          await cancelRun(runDir, { runtime: adapter });
+        },
+      },
+    });
+    const state = JSON.parse(readFileSync(join(result.run_dir, "run.json")));
+    const block = JSON.parse(readFileSync(join(result.run_dir, "artifacts/outcomes/cancel.json")));
+    assert.equal(state.lifecycle_state, "blocked");
+    assert.equal(block.block_type, "cancel_unconfirmed");
+    assert.equal(state.runtime_bindings.at(-1).binding_state, "unreachable");
+    assert.equal(state.transitions.some(({ event_kind }) => event_kind === "successor_dispatched"), false);
+    const cancellation = readdirSync(join(result.run_dir, "artifacts/runtime")).find((name) => name.includes("cancel"));
+    assert.ok(cancellation);
+    assert.equal(JSON.parse(readFileSync(join(result.run_dir, "artifacts/runtime", cancellation))).exit_reason, "cancel_unconfirmed");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

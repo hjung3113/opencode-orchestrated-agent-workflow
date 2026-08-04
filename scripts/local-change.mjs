@@ -72,6 +72,19 @@ function writeJson(path, value) {
   renameSync(temporary, path);
 }
 
+function crashAt(ctx, label) {
+  const configured = ctx?.hooks?.crashAt;
+  const shouldCrash = typeof configured === "function"
+    ? configured(label)
+    : Array.isArray(configured)
+      ? configured.includes(label)
+      : configured === label;
+  if (!shouldCrash) return;
+  const error = new Error(`simulated process death at ${label}`);
+  error.code = "simulated_crash";
+  throw error;
+}
+
 function validateProtocol(value, label) {
   if (!validator(value)) {
     throw new Error(`${label} failed protocol validation: ${JSON.stringify(validator.errors)}`);
@@ -333,7 +346,9 @@ function applyTransition(ctx, state, eventKind, patch, recordRefs = []) {
     patch,
     recordRefs,
   });
+  crashAt(ctx, `before_run_state_replacement:${eventKind}`);
   writeRunState(ctx, next);
+  crashAt(ctx, `after_run_state_replacement:${eventKind}`);
   return next;
 }
 
@@ -635,6 +650,26 @@ export class OpenCodeAdapter {
     };
   }
 
+  async cancelAttempt({ binding }) {
+    const stop = await this.confirmAttemptStop(binding.session_id, { events: [] });
+    const snapshot = this.baselineSnapshot;
+    return {
+      confirmed: stop.confirmed,
+      observation: {
+        ...this.preflightObservation({
+          attemptId: `${binding.attempt_id}-cancel`,
+          role: binding.role,
+          binding,
+          artifactId: `runtime-${binding.attempt_id}-cancel`,
+        }),
+        ...(binding.task_id ? { task_id: binding.task_id, attempt: binding.attempt } : {}),
+        observed_output_snapshot: snapshot.digest,
+        runtime_permission_events: ["operator.cancel", ...stop.events],
+        exit_reason: stop.confirmed ? "cancelled" : "cancel_unconfirmed",
+      },
+    };
+  }
+
   async latestMessage(sessionId, fallback) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
@@ -865,7 +900,7 @@ function validEvidenceArray(value) {
   }));
 }
 
-function policyFor(request) {
+function policyFor(request, budgetOverride = {}) {
   const proposed = request.preset_selection.proposed_narrowing;
   const capabilities = proposed?.capabilities ?? ["repository_read", "local_write", "command_execute"];
   const requiredCapabilities = ["repository_read", "local_write", "command_execute"];
@@ -875,7 +910,7 @@ function policyFor(request) {
   if (requiredCapabilities.some((capability) => !capabilities.includes(capability))) {
     throw new Error("policy narrowing removes a required local-change@1 capability");
   }
-  const narrowedBudget = { ...budget, ...(proposed?.budget ?? {}) };
+  const narrowedBudget = { ...budget, ...(proposed?.budget ?? {}), ...budgetOverride };
   for (const [field, value] of Object.entries(narrowedBudget)) {
     if (value > budget[field]) throw new Error(`policy narrowing widens ${field}`);
   }
@@ -890,7 +925,12 @@ function policyFor(request) {
     },
     capabilities,
     proposed_narrowing: proposed,
-    admitted_narrowing: proposed,
+    admitted_narrowing: proposed || Object.keys(budgetOverride).length > 0
+      ? {
+        ...(proposed ?? {}),
+        ...(Object.keys(budgetOverride).length > 0 ? { budget: narrowedBudget } : {}),
+      }
+      : null,
     deviations: [],
     rationale: request.preset_selection.rationale,
   };
@@ -1144,7 +1184,15 @@ function admitAttemptExecution(ctx, execution, label) {
 }
 
 async function recordFailure(ctx, state, error) {
-  if (!state || existsSync(join(ctx.runDir, "artifacts/outcomes/failure.json"))) return;
+  let durableState = state;
+  try {
+    durableState = JSON.parse(readFileSync(join(ctx.runDir, "run.json"), "utf8"));
+  } catch {
+    // Preserve the original failure when the Run State has not been published yet.
+  }
+  if (!durableState
+    || ["cancelling", "cancelled", "material_decision_required"].includes(durableState.lifecycle_state)
+    || existsSync(join(ctx.runDir, "artifacts/outcomes/failure.json"))) return;
   const outcome = envelope({
     kind: "outcome",
     artifactId: "outcome-failure",
@@ -1162,7 +1210,97 @@ async function recordFailure(ctx, state, error) {
     resume_condition: "A new bounded Run must re-admit the request after the blocking condition is resolved.",
   });
   const outcomeRef = writeArtifact(ctx, "artifacts/outcomes/failure.json", outcome);
-  applyTransition(ctx, state, "run_blocked", { lifecycle_state: "blocked" }, [outcomeRef]);
+  applyTransition(ctx, durableState, "run_blocked", { lifecycle_state: "blocked" }, [outcomeRef]);
+}
+
+function runtimeArtifacts(runDir) {
+  const runtimeDir = join(runDir, "artifacts/runtime");
+  if (!existsSync(runtimeDir)) return [];
+  return readdirSync(runtimeDir)
+    .filter((file) => file.endsWith(".json"))
+    .sort()
+    .map((file) => JSON.parse(readFileSync(join(runtimeDir, file), "utf8")));
+}
+
+function runtimeForBinding(runDir, binding) {
+  return runtimeArtifacts(runDir)
+    .filter((observation) => observation.session_id === binding.session_id)
+    .at(-1);
+}
+
+function cancellationBlock(ctx, state, observationRef) {
+  const outcome = envelope({
+    kind: "outcome",
+    artifactId: "outcome-cancel",
+    runId: ctx.runId,
+    producer: kernelProducer(),
+    inputRefs: [...ctx.admittedRefs, observationRef],
+    createdAt: now(),
+    preset: state.effective_policy?.preset ?? "local-change@1",
+    ...(state.effective_policy ? { effective_policy: state.effective_policy } : {}),
+    outcome_kind: "block",
+    summary: "Run cancellation was requested but the runtime stop could not be confirmed.",
+    artifact_refs: [...ctx.admittedRefs, observationRef],
+    limitations: ["The active Attempt remains unresolved; no successor Attempt may be dispatched into this workspace."],
+    block_type: "cancel_unconfirmed",
+    resume_condition: "Reconcile the active runtime binding and confirm its stop before any future continuation.",
+  });
+  return writeArtifact(ctx, "artifacts/outcomes/cancel.json", outcome);
+}
+
+export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
+  runDir = resolve(runDir);
+  const statePath = join(runDir, "run.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  validateProtocol(state, "run state");
+  resolveArtifactReferences({ runDir }, state);
+  const inspect = inspectRun(runDir);
+  if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
+    return { ...inspect, next_action: null };
+  }
+
+  const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
+  const active = [...state.runtime_bindings].reverse().find(({ binding_state }) => binding_state === "active");
+  let next = applyTransition(ctx, state, "cancel_requested", { lifecycle_state: "cancelling" });
+  crashAt(ctx, "before_runtime_abort");
+
+  let result;
+  if (runtime?.cancelAttempt && active) {
+    result = await runtime.cancelAttempt({ binding: active, runDir });
+  } else {
+    result = { confirmed: false };
+  }
+  crashAt(ctx, "after_runtime_abort");
+
+  const observation = result?.observation ?? (active && runtimeForBinding(runDir, active)
+    ? {
+      ...runtimeForBinding(runDir, active),
+      artifact_id: `runtime-${active.attempt_id}-cancel`,
+      runtime_permission_events: ["operator.cancel"],
+      exit_reason: result?.confirmed ? "cancelled" : "cancel_unconfirmed",
+    }
+    : null);
+  if (!observation) {
+    const error = new AttemptFailure("cancel_unconfirmed", "no active runtime binding could confirm cancellation");
+    await recordFailure(ctx, next, error);
+    return { ...inspectRun(runDir), next_action: null, checkpoint: "cancel_unconfirmed" };
+  }
+  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
+  if (result?.confirmed === true && observation.exit_reason === "cancelled") {
+    next = applyTransition(ctx, next, "cancel_confirmed", {
+      lifecycle_state: "cancelled",
+      runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === active?.attempt_id
+        ? { ...binding, binding_state: "cancelled" } : binding),
+    }, [observationRef]);
+    return { ...inspectRun(runDir), next_action: null };
+  }
+  const blockRef = cancellationBlock(ctx, next, observationRef);
+  next = applyTransition(ctx, next, "cancel_unconfirmed", {
+    lifecycle_state: "blocked",
+    runtime_bindings: next.runtime_bindings.map((binding) => binding.attempt_id === active?.attempt_id
+      ? { ...binding, binding_state: "unreachable" } : binding),
+  }, [observationRef, blockRef]);
+  return { ...inspectRun(runDir), next_action: null, checkpoint: "cancel_unconfirmed" };
 }
 
 function resultRefOid(resultRepo, resultRef) {
@@ -1186,7 +1324,7 @@ function snapshotFromResultRef(resultRepo, resultRef) {
   return { base, entries, digest: digest({ base, entries }) };
 }
 
-function initialRun({ runId, bootstrapRef, idempotencyKey, binding, workspaceBaseline }) {
+function initialRun({ runId, bootstrapRef, idempotencyKey, binding, workspaceBaseline, executionContext, runBudget = budget }) {
   return envelope({
     kind: "run",
     artifactId: "run-state",
@@ -1200,7 +1338,8 @@ function initialRun({ runId, bootstrapRef, idempotencyKey, binding, workspaceBas
     bootstrap_ref: bootstrapRef,
     idempotency_key: idempotencyKey,
     workspace_baseline: workspaceBaseline,
-    budget,
+    execution_context: executionContext,
+    budget: runBudget,
     tasks: {},
     runtime_bindings: [binding],
     transitions: [],
@@ -1283,6 +1422,7 @@ export async function runLocalChange({
   expectedContent = "local change completed\n",
   runtimeFactory,
   hooks = {},
+  budgetOverride = {},
 }) {
   workspace = resolve(workspace);
   runRoot = resolve(runRoot);
@@ -1313,7 +1453,13 @@ export async function runLocalChange({
   const taskWorkspace = mkdtempSync(join(runDir, "task-workspace-"));
   let adapter;
   let state;
-  const ctx = { runDir, runId, admittedRefs: [] };
+  const runBudget = { ...budget, ...budgetOverride };
+  for (const [field, value] of Object.entries(runBudget)) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > budget[field]) {
+      throw new Error(`invalid budget narrowing: ${field}=${value}`);
+    }
+  }
+  const ctx = { runDir, runId, admittedRefs: [], hooks };
   try {
     cloneWorkspace(workspace, taskWorkspace);
     const taskBaseline = workspaceSnapshot(taskWorkspace);
@@ -1379,6 +1525,8 @@ export async function runLocalChange({
       idempotencyKey: bootstrap.idempotency_key,
       binding: requestAttempt.binding,
       workspaceBaseline,
+      executionContext: { target_file: targetFile, expected_content: expectedContent, request_text: requestText },
+      runBudget,
     });
     writeRunState(ctx, state);
 
@@ -1415,7 +1563,7 @@ export async function runLocalChange({
     });
     const requestRef = writeArtifact(ctx, "artifacts/request.json", requestArtifact);
     const effectivePolicy = {
-      ...policyFor(request),
+      ...policyFor(request, budgetOverride),
       preset_selection_ref: requestRef,
     };
     state = applyTransition(ctx, state, "request_admitted", {
@@ -1423,7 +1571,7 @@ export async function runLocalChange({
       admission_state: "admitted",
       request_ref: requestRef,
       effective_policy: effectivePolicy,
-      budget: { ...budget, ...(effectivePolicy.admitted_narrowing?.budget ?? {}) },
+      budget: runBudget,
       runtime_bindings: [requestExecution.binding],
     }, [requestRef, requestRuntimeRef]);
 
@@ -1499,6 +1647,11 @@ export async function runLocalChange({
         "implementation-1": { task_state: "active", attempts: 1 },
       },
     }, [implementationPacketRef]);
+    await hooks.afterWorkerDispatch?.({ runDir, runId, state, adapter, binding: workerAttempt.binding });
+    state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    if (state.lifecycle_state !== "active") {
+      return { run_id: runId, run_dir: runDir, inspect: inspectRun(runDir), checkpoint: state.lifecycle_state };
+    }
     const workerPrompt = [
       `Implement the admitted local-change Packet. Modify exactly ${targetFile}.`,
       `Create it with exactly this UTF-8 content: ${JSON.stringify(expectedContent)}.`,

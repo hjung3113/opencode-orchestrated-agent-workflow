@@ -268,8 +268,14 @@
             "bootstrap_ref": { "$ref": "#/$defs/reference" },
             "idempotency_key": { "$ref": "#/$defs/id" },
             "workspace_baseline": { "$ref": "#/$defs/workspaceBaseline" },
+            "execution_context": { "$ref": "#/$defs/executionContext" },
             "request_ref": { "$ref": "#/$defs/reference" },
             "active_graph_ref": { "$ref": "#/$defs/reference" },
+            "decision_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/reference" }
+            },
+            "prepared_promotion_ref": { "$ref": "#/$defs/reference" },
             "effective_policy": { "$ref": "#/$defs/effectivePolicy" },
             "budget": { "$ref": "#/$defs/budget" },
             "tasks": {
@@ -777,6 +783,16 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/resourcePath" }
         }
+      }
+    },
+    "executionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_file", "expected_content", "request_text"],
+      "properties": {
+        "target_file": { "$ref": "#/$defs/resourcePath" },
+        "expected_content": { "type": "string" },
+        "request_text": { "type": "string", "minLength": 1 }
       }
     },
     "policyNarrowing": {
