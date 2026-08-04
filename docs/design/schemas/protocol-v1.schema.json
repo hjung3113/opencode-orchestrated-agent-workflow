@@ -483,7 +483,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "claims", "evidence", "changed_resources", "output_snapshot", "runtime_ref"],
+          "required": ["kind", "claims", "evidence", "changed_resources", "output_snapshot", "runtime_ref", "result_commit"],
           "properties": {
             "kind": { "const": "result" },
             "producer": { "$ref": "#/$defs/workerProducer" },
@@ -491,6 +491,7 @@
             "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
             "changed_resources": { "type": "array", "items": { "type": "string" } },
             "output_snapshot": { "$ref": "#/$defs/digest" },
+            "result_commit": { "$ref": "#/$defs/gitOid" },
             "runtime_ref": { "$ref": "#/$defs/reference" }
           }
         }

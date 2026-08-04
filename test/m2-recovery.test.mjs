@@ -48,7 +48,11 @@ class Runtime {
     let text;
     if (attemptId === "planner-request") text = JSON.stringify({
       objective: this.requestText, scope: [this.targetFile], exclusions: ["external effects"],
-      ambiguities: [], assumptions: [], target_snapshot: this.baselineSnapshot.digest,
+      ambiguities: this.scenario === "material"
+        ? ["material: choose the durable external target"]
+        : this.scenario === "low-risk"
+          ? ["low-risk: target filename", "low-risk: line ending"]
+          : [], assumptions: [], target_snapshot: this.baselineSnapshot.digest,
       preset_selection: { preset: "local-change@1", selection_evidence: [{ claim: "bounded", source: "intake", observation: "local" }], proposed_narrowing: null, rationale: "bounded" },
     });
     else if (attemptId === "planner-graph-1") text = JSON.stringify({ graph: { nodes: [{ task_id: "implementation-1", workflow_definition: "implementation" }] }, packet: { acceptance_criteria: ["target exists"], deadline_seconds: 3 } });
@@ -192,6 +196,37 @@ test("cancel_unconfirmed is durable and never permits successor dispatch", async
   }
 });
 
+test("public cancel command records an unconfirmed stop after process death", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const crash = new Error("simulated process death");
+    crash.code = "simulated_crash";
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+      hooks: { afterWorkerDispatch: async () => { throw crash; } },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const result = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "cancel", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", runId,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(result.lifecycle_state, "blocked");
+    const runDir = join(runRoot, "runs", runId);
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.deepEqual(state.transitions.slice(-2).map(({ event_kind }) => event_kind), [
+      "cancel_requested",
+      "cancel_unconfirmed",
+    ]);
+    assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/cancel.json"))).block_type, "cancel_unconfirmed");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("prepared Promotion resumes across absent, committed, and conflicting Result Ref states", async () => {
   for (const crashAt of ["after_promotion_preparation", "after_result_ref_update"]) {
     const { workspace, runRoot } = fixture();
@@ -250,6 +285,72 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
   }
 });
 
+test("crash boundaries are deterministic and repeated resume is idempotent", async () => {
+  for (const crashAt of [
+    "before_promotion_preparation",
+    "after_promotion_preparation",
+    "before_result_ref_update",
+    "after_result_ref_update",
+    "before_run_state_replacement:receipt_admitted",
+  ]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => new Runtime(options),
+        hooks: { crashAt },
+      }), /simulated process death/);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const first = resumeRun(runDir);
+      assert.equal(first.lifecycle_state, "completed", crashAt);
+      const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
+      const second = resumeRun(runDir);
+      assert.equal(second.lifecycle_state, "completed", crashAt);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat, crashAt);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime-abort crash boundaries preserve cancellation intent and forbid resume dispatch", async () => {
+  for (const crashAt of ["before_runtime_abort", "after_runtime_abort"]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => {
+          const runtime = new Runtime(options);
+          runtime.cancelConfirmed = true;
+          return runtime;
+        },
+        hooks: {
+          afterWorkerDispatch: async ({ runDir, adapter }) => {
+            await cancelRun(runDir, { runtime: adapter, hooks: { crashAt } });
+          },
+        },
+      }), /simulated process death/);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+      assert.equal(state.lifecycle_state, "cancelling", crashAt);
+      assert.equal(state.transitions.at(-1).event_kind, "cancel_requested", crashAt);
+      const resumed = resumeRun(runDir);
+      assert.equal(resumed.lifecycle_state, "cancelling", crashAt);
+      assert.equal(resumed.next_action, null, crashAt);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("cumulative Run limit exhaustion is a typed block", async () => {
   const { workspace, runRoot } = fixture();
   try {
@@ -269,6 +370,74 @@ test("cumulative Run limit exhaustion is a typed block", async () => {
     assert.equal(block.block_type, "budget_exceeded");
     assert.match(block.summary, /execution_attempt budget exhausted/);
     assert.equal(existsSync(join(runDir, "artifacts/promotions")), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("paired low-risk ambiguity records an Assumption and continues", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "low-risk" }),
+    });
+    const state = JSON.parse(readFileSync(join(run.run_dir, "run.json")));
+    const request = JSON.parse(readFileSync(join(run.run_dir, "artifacts/request.json")));
+    assert.equal(state.lifecycle_state, "completed");
+    assert.equal(request.ambiguities.length, 2);
+    assert.equal(request.assumptions.length, 1);
+    assert.match(request.assumptions[0], /low-risk|reversible/i);
+    assert.equal(existsSync(join(run.run_dir, "artifacts/outcomes/0001.json")), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("Material Decision Request survives restart and admits exactly one human successor", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
+    });
+    const runDir = run.run_dir;
+    const requestOutcome = JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json")));
+    assert.equal(requestOutcome.outcome_kind, "material_decision_request");
+    const checkpoint = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(checkpoint.lifecycle_state, "material_decision_required");
+
+    const resumed = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+      "--decision", "Use the bounded harness-owned Result Ref.",
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(resumed.lifecycle_state, "completed");
+    const decisionRoot = join(runDir, "artifacts/decisions");
+    const decisions = readdirSync(decisionRoot).flatMap((id) => readdirSync(join(decisionRoot, id)));
+    assert.deepEqual(decisions, ["0001.json"]);
+    const decision = JSON.parse(readFileSync(join(decisionRoot, readdirSync(decisionRoot)[0], "0001.json")));
+    assert.equal(decision.producer.role, "human");
+    assert.equal(decision.disposition, "accepted");
+
+    const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
+    const repeated = JSON.parse(execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "resume", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+      "--decision", "A different answer must not create another successor.",
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    assert.equal(repeated.lifecycle_state, "completed");
+    assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat);
+    assert.equal(readdirSync(join(runDir, "artifacts/decisions", readdirSync(decisionRoot)[0])).length, 1);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

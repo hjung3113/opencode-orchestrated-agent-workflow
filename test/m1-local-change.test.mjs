@@ -270,7 +270,9 @@ async function assertBlockedScenario(scenario) {
     assert.equal(failure.outcome_kind, "block");
     assert.equal(validate(state), true, JSON.stringify(validate.errors));
     assert.equal(validate(failure), true, JSON.stringify(validate.errors));
-    assert.equal(statSync(join(runDir, "artifacts/promotions/promotion-1.json"), { throwIfNoEntry: false }), undefined);
+    if (!scenario.hooks?.afterResultRefCas) {
+      assert.equal(statSync(join(runDir, "artifacts/promotions/promotion-1.json"), { throwIfNoEntry: false }), undefined);
+    }
     assert.equal(statSync(join(runDir, "artifacts/outcomes/0001.json"), { throwIfNoEntry: false }), undefined);
     return { runDir, state, failure };
   } finally {

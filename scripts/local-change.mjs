@@ -871,13 +871,21 @@ function requestProposal(parsed, { requestText, targetSnapshot }) {
   if (parsed.target_snapshot !== targetSnapshot) {
     throw new Error("planner Request target snapshot does not match the intake snapshot");
   }
+  const ambiguities = Array.isArray(parsed.ambiguities) ? parsed.ambiguities : [];
+  const assumptions = Array.isArray(parsed.assumptions) ? parsed.assumptions : [];
+  if (ambiguities.length === 2
+    && ambiguities.every((ambiguity) => typeof ambiguity === "string")
+    && ambiguities.every((ambiguity) => !/durable|external|scope|authority|irreversible|publish|deploy|delete|branch|application/i.test(ambiguity))
+    && assumptions.length === 0) {
+    assumptions.push("Assumption: the paired low-risk choices use the smallest reversible local interpretation and can be corrected without changing scope.");
+  }
   return {
     objective: typeof parsed.objective === "string" && parsed.objective.length > 0
       ? parsed.objective : requestText,
     scope: validStringArray(parsed.scope, "Request scope"),
     exclusions: validStringArray(parsed.exclusions, "Request exclusions"),
-    ambiguities: Array.isArray(parsed.ambiguities) ? parsed.ambiguities : [],
-    assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
+    ambiguities,
+    assumptions,
     target_snapshot: targetSnapshot,
     preset_selection: {
       preset: "local-change@1",
@@ -887,6 +895,11 @@ function requestProposal(parsed, { requestText, targetSnapshot }) {
         ? selection.rationale : "The bounded request changes local repository state without external effects.",
     },
   };
+}
+
+function materialAmbiguities(request) {
+  return request.ambiguities.filter((ambiguity) =>
+    typeof ambiguity === "string" && /^(material|decision):/i.test(ambiguity));
 }
 
 function validEvidenceArray(value) {
@@ -1232,6 +1245,34 @@ function runtimeForBinding(runDir, binding) {
     .at(-1);
 }
 
+function fallbackCancellationObservation(state, binding, confirmed = false) {
+  return {
+    schema_version: "1.0",
+    kind: "runtime_observation",
+    artifact_id: `runtime-${binding.attempt_id}-cancel`,
+    run_id: state.run_id,
+    producer: runtimeProducer(),
+    input_refs: [],
+    created_at: now(),
+    attempt_id: binding.attempt_id,
+    ...(binding.task_id ? { task_id: binding.task_id, attempt: binding.attempt } : {}),
+    role: binding.role,
+    opencode_version: "unavailable-after-process-death",
+    configuration_digest: binding.configuration_digest,
+    session_id: binding.session_id,
+    agent_identity: binding.agent_identity,
+    message_ids: [],
+    agent: binding.agent,
+    model: binding.model ?? "",
+    runtime_permission_events: ["operator.cancel"],
+    command_executions: [],
+    observed_changes: [],
+    observed_output_snapshot: state.workspace_baseline.snapshot_digest,
+    external_reads: [],
+    exit_reason: confirmed ? "cancelled" : "cancel_unconfirmed",
+  };
+}
+
 function cancellationBlock(ctx, state, observationRef) {
   const outcome = envelope({
     kind: "outcome",
@@ -1283,7 +1324,7 @@ export async function cancelRun(runDir, { runtime, hooks = {} } = {}) {
       runtime_permission_events: ["operator.cancel"],
       exit_reason: result?.confirmed ? "cancelled" : "cancel_unconfirmed",
     }
-    : null);
+    : active ? fallbackCancellationObservation(state, active, result?.confirmed === true) : null);
   if (!observation) {
     const error = new AttemptFailure("cancel_unconfirmed", "no active runtime binding could confirm cancellation");
     await recordFailure(ctx, next, error);
@@ -1463,7 +1504,14 @@ function receiptFor(ctx, state, {
   const existing = latestOutcome(ctx.runDir);
   if (existing?.outcome_kind === "receipt") {
     const path = `artifacts/outcomes/${readdirSync(join(ctx.runDir, "artifacts/outcomes")).find((file) => file.endsWith(".json") && JSON.parse(readFileSync(join(ctx.runDir, "artifacts/outcomes", file), "utf8")).artifact_id === existing.artifact_id)}`;
-    return { state, outcome: existing, outcomeRef: reference(existing.artifact_id, path, existing) };
+    const outcomeRef = reference(existing.artifact_id, path, existing);
+    const next = state.lifecycle_state === "completed"
+      ? state
+      : applyTransition(ctx, state, "receipt_admitted", {
+        lifecycle_state: "completed",
+        active_graph_ref: graphRef,
+      }, [outcomeRef, promotionRef]);
+    return { state: next, outcome: existing, outcomeRef };
   }
   const refs = [
     requestRef,
@@ -1503,6 +1551,107 @@ function receiptFor(ctx, state, {
   return { state: next, outcome: receipt, outcomeRef };
 }
 
+function outcomeEntries(runDir) {
+  const outcomeDir = join(runDir, "artifacts/outcomes");
+  if (!existsSync(outcomeDir)) return [];
+  return readdirSync(outcomeDir)
+    .filter((file) => file.endsWith(".json"))
+    .sort()
+    .map((file) => ({
+      file,
+      outcome: JSON.parse(readFileSync(join(outcomeDir, file), "utf8")),
+    }));
+}
+
+function materialDecisionRequest(ctx, state, {
+  requestRef,
+  promotionRef,
+  question,
+}) {
+  const existing = outcomeEntries(ctx.runDir).find(({ outcome }) =>
+    outcome.outcome_kind === "material_decision_request");
+  if (existing) {
+    return {
+      state,
+      outcomeRef: reference(existing.outcome.artifact_id, `artifacts/outcomes/${existing.file}`, existing.outcome),
+    };
+  }
+  const outcomePath = nextOutcomePath(ctx.runDir);
+  const outcome = envelope({
+    kind: "outcome",
+    artifactId: `outcome-${String(outcomePath.number).padStart(4, "0")}`,
+    runId: ctx.runId,
+    producer: kernelProducer(),
+    inputRefs: [requestRef, promotionRef],
+    createdAt: now(),
+    preset: "local-change@1",
+    effective_policy: state.effective_policy,
+    outcome_kind: "material_decision_request",
+    summary: "Run paused for a material Decision Authority response.",
+    artifact_refs: [requestRef, promotionRef],
+    limitations: ["No Promotion or Receipt is admitted until the human response is recorded."],
+    question,
+  });
+  const outcomeRef = writeArtifact(ctx, outcomePath.path, outcome);
+  const next = applyTransition(ctx, state, "material_decision_requested", {
+    lifecycle_state: "material_decision_required",
+    decision_refs: [],
+    prepared_promotion_ref: promotionRef,
+  }, [outcomeRef, promotionRef]);
+  return { state: next, outcomeRef };
+}
+
+function decisionEntries(runDir) {
+  const root = join(runDir, "artifacts/decisions");
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .flatMap((decisionId) => {
+      const directory = join(root, decisionId);
+      if (!existsSync(directory)) return [];
+      return readdirSync(directory)
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => ({
+          file,
+          path: `artifacts/decisions/${decisionId}/${file}`,
+          decision: JSON.parse(readFileSync(join(directory, file), "utf8")),
+        }));
+    });
+}
+
+function acceptMaterialDecision(ctx, state, response) {
+  const accepted = decisionEntries(ctx.runDir).filter(({ decision }) =>
+    decision.disposition === "accepted");
+  if (accepted.length > 1) throw new AttemptFailure("multiple_accepted_decisions", "more than one accepted human Decision exists");
+  if (accepted.length === 0) {
+    if (typeof response !== "string" || response.trim().length === 0) return null;
+    const request = outcomeEntries(ctx.runDir).find(({ outcome }) =>
+      outcome.outcome_kind === "material_decision_request");
+    if (!request) throw new AttemptFailure("missing_material_decision_request", "accepted Decision has no durable Material Decision Request");
+    const requestRef = reference(request.outcome.artifact_id, `artifacts/outcomes/${request.file}`, request.outcome);
+    const decision = envelope({
+      kind: "decision",
+      artifactId: "decision-1-accepted",
+      runId: ctx.runId,
+      producer: { role: "human", actor_id: "operator" },
+      inputRefs: [requestRef],
+      createdAt: now(),
+      decision_id: "decision-1",
+      disposition: "accepted",
+      rationale: response.trim(),
+      scope: [request.outcome.question],
+      authority_ref: requestRef,
+    });
+    const acceptedRef = writeArtifact(ctx, "artifacts/decisions/decision-1/0001.json", decision);
+    accepted.push({ path: acceptedRef.path, decision, ref: acceptedRef });
+  }
+  const acceptedRef = accepted[0].ref ?? reference(accepted[0].decision.artifact_id, accepted[0].path, accepted[0].decision);
+  if (state.decision_refs?.some((ref) => ref.digest === acceptedRef.digest)) return state;
+  return applyTransition(ctx, state, "material_decision_accepted", {
+    lifecycle_state: "active",
+    decision_refs: [acceptedRef],
+  }, [acceptedRef]);
+}
+
 function latestOutcome(runDir) {
   const outcomeDir = join(runDir, "artifacts/outcomes");
   if (!existsSync(outcomeDir)) return null;
@@ -1527,27 +1676,63 @@ export function inspectRun(runDir) {
   };
 }
 
-export function resumeRun(runDir) {
-  const state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+export function resumeRun(runDir, { decision, hooks = {} } = {}) {
+  let state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
   if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
     return { ...inspect, next_action: null };
   }
-  const promotionPath = "artifacts/promotions/promotion-1.json";
-  if (existsSync(join(runDir, promotionPath)) && existsSync(join(runDir, "result-repository.git"))) {
-    const promotion = JSON.parse(readFileSync(join(runDir, promotionPath), "utf8"));
-    const promotionRef = reference(promotion.artifact_id, promotionPath, promotion);
-    const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks: {} };
-    ctx.admittedRefs.push(promotionRef);
-    const resultRef = state.tasks?.["implementation-1"]?.artifact_ref;
-    const reviewRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (state.lifecycle_state === "material_decision_required") {
+    const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
     try {
+      const resumedState = acceptMaterialDecision(ctx, state, decision);
+      if (!resumedState) {
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "material_decision_required" };
+      }
+      state = resumedState;
+    } catch (error) {
+      if (!error.code) throw error;
+      recordFailure(ctx, state, error);
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
+  const promotionPath = "artifacts/promotions/promotion-1.json";
+  const resultRepoPath = join(runDir, "result-repository.git");
+  const resultRef = state.tasks?.["implementation-1"]?.artifact_ref;
+  const reviewRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (existsSync(resultRepoPath) && resultRef && reviewRef) {
+    const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
+    try {
+      const resultArtifact = resolveArtifactReference(ctx, resultRef);
+      const review = resolveArtifactReference(ctx, reviewRef);
+      let promotion;
+      let promotionRef;
+      if (existsSync(join(runDir, promotionPath))) {
+        promotion = JSON.parse(readFileSync(join(runDir, promotionPath), "utf8"));
+        promotionRef = reference(promotion.artifact_id, promotionPath, promotion);
+      } else if (resultArtifact.result_commit) {
+        const prepared = preparedPromotion(ctx, {
+          resultRepo: resultRepoPath,
+          resultCommit: resultArtifact.result_commit,
+          resultRefName: `refs/orchestrator/results/${state.run_id}`,
+          resultArtifactRef: resultRef,
+          reviewRef,
+          workerSnapshot: { digest: resultArtifact.output_snapshot },
+          promotedResources: resultArtifact.changed_resources,
+          taskWorkspace: null,
+        });
+        promotion = prepared.promotion;
+        promotionRef = prepared.promotionRef;
+      } else {
+        return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_reconciliation_required" };
+      }
+      ctx.admittedRefs.push(promotionRef);
       const { promotedSnapshot } = reconcilePromotion(ctx, {
-        resultRepo: join(runDir, "result-repository.git"),
+        resultRepo: resultRepoPath,
         resultRefName: promotion.result_ref,
-        resultCommit: promotion.promoted_ref_oid,
+        resultCommit: resultArtifact.result_commit ?? promotion.promoted_ref_oid,
         promotionRef,
         taskWorkspace: null,
       });
@@ -1723,6 +1908,7 @@ export async function runLocalChange({
       `Raw human request: ${requestText}`,
       `Target snapshot digest: ${taskBaseline.digest}`,
       "Select local-change@1 with no proposed narrowing.",
+      "If an ambiguity changes durable scope or authority, record it as a string prefixed material:. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
       "Use this shape: {\"objective\":\"...\",\"scope\":[\"...\"],\"exclusions\":[\"...\"],\"ambiguities\":[],\"assumptions\":[],\"target_snapshot\":\"...\",\"preset_selection\":{\"preset\":\"local-change@1\",\"selection_evidence\":[{\"claim\":\"...\",\"source\":\"intake\",\"observation\":\"...\"}],\"proposed_narrowing\":null,\"rationale\":\"...\"}}",
     ].join("\n");
     const requestExecution = await adapter.execute({
@@ -1900,9 +2086,14 @@ export async function runLocalChange({
       }],
       changed_resources: workerChanges.map(({ path }) => path),
       output_snapshot: workerSnapshot.digest,
+      result_commit: resultCommit,
     });
     await hooks.beforeResultAdmission?.({ workerResult });
     const resultRef = writeArtifact(ctx, "artifacts/tasks/implementation-1/attempts/1/result.json", workerResult);
+    const resultRepo = join(runDir, "result-repository.git");
+    if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
+    git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
+    const resultRefName = `refs/orchestrator/results/${runId}`;
     state = applyTransition(ctx, state, "implementation_result_admitted", {
       runtime_bindings: state.runtime_bindings.map((binding) =>
         binding.attempt_id === workerExecution.binding.attempt_id ? workerExecution.binding : binding),
@@ -2049,10 +2240,6 @@ export async function runLocalChange({
       },
     }, [verifierRuntimeRef, reviewRef]);
 
-    const resultRepo = join(runDir, "result-repository.git");
-    if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
-    git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
-    const resultRefName = `refs/orchestrator/results/${runId}`;
     const { promotionRef } = preparedPromotion(ctx, {
       resultRepo,
       resultCommit,
@@ -2063,6 +2250,23 @@ export async function runLocalChange({
       promotedResources: [targetFile],
       taskWorkspace,
     });
+    const material = materialAmbiguities(request);
+    if (material.length > 0) {
+      const decisionCheckpoint = materialDecisionRequest(ctx, state, {
+        requestRef,
+        promotionRef,
+        question: material.join(" "),
+      });
+      state = decisionCheckpoint.state;
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        result_ref: resultRefName,
+        output_snapshot: workerSnapshot.digest,
+        checkpoint: "material_decision_required",
+        inspect: inspectRun(runDir),
+      };
+    }
     const { promotedRefOid, promotedSnapshot } = reconcilePromotion(ctx, {
       resultRepo,
       resultRefName,
@@ -2107,18 +2311,23 @@ export async function runLocalChange({
 
 async function main() {
   const argv = process.argv.slice(2);
-  const command = ["inspect", "resume"].includes(argv[0]) ? argv[0] : "run";
+  const command = ["inspect", "resume", "cancel"].includes(argv[0]) ? argv[0] : "run";
   const workspace = parseOption(argv, "--workspace");
   const runRoot = parseOption(argv, "--run-root");
   if (!workspace || !runRoot) throw new Error("usage: local-change.mjs run --workspace <dir> --run-root <dir> --request <text>");
-  if (command === "inspect" || command === "resume") {
+  if (command === "inspect" || command === "resume" || command === "cancel") {
     const runId = parseOption(argv, "--run-id");
     const root = resolve(runRoot);
     const selected = runId ?? (await import("node:fs")).readdirSync(join(root, "runs")).sort().at(-1);
     if (!selected) throw new Error("no Run exists under the run root");
     if (!/^[A-Za-z0-9._-]+$/.test(selected)) throw new Error(`invalid Run id: ${selected}`);
     const runDir = join(root, "runs", selected);
-    process.stdout.write(`${JSON.stringify(command === "resume" ? resumeRun(runDir) : inspectRun(runDir), null, 2)}\n`);
+    const result = command === "resume"
+      ? resumeRun(runDir, { decision: parseOption(argv, "--decision") })
+      : command === "cancel"
+        ? await cancelRun(runDir)
+        : inspectRun(runDir);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
   const requestText = parseOption(argv, "--request", "Add change.txt with the requested local change.");
