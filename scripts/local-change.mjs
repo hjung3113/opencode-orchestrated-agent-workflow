@@ -1808,13 +1808,68 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
   return next;
 }
 
+function validateCompletedRun(ctx, state, outcomeEntry) {
+  const receipt = outcomeEntry?.outcome;
+  if (!receipt || receipt.outcome_kind !== "receipt") {
+    throw new Error("completed Run requires an immutable Receipt");
+  }
+  const receiptRef = reference(
+    receipt.artifact_id,
+    `artifacts/outcomes/${outcomeEntry.file}`,
+    receipt,
+  );
+  const receiptTransition = state.transitions.find(({ event_kind, record_refs }) =>
+    event_kind === "receipt_admitted"
+      && record_refs.some((recordRef) => recordRef.digest === receiptRef.digest));
+  if (!receiptTransition) throw new Error("completed Run Receipt is not admitted by Run State");
+  const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
+  const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (!resultArtifactRef || !reviewArtifactRef) {
+    throw new Error("completed Run requires admitted Result and Review artifact references");
+  }
+  const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
+  const review = resolveArtifactReference(ctx, reviewArtifactRef);
+  if (review.target_task_ref.digest !== resultArtifactRef.digest
+    || review.target_snapshot !== resultArtifact.output_snapshot) {
+    throw new Error("completed Run Review does not match the admitted Result");
+  }
+  if (!receipt.promotion_ref) throw new Error("completed Run requires an admitted Promotion");
+  const promotion = resolveArtifactReference(ctx, receipt.promotion_ref);
+  if (!promotion.input_refs.some((recordRef) => recordRef.digest === resultArtifactRef.digest)
+    || !promotion.input_refs.some((recordRef) => recordRef.digest === reviewArtifactRef.digest)) {
+    throw new Error("completed Run Promotion does not reference the admitted Result and Review");
+  }
+  const requiredReceiptRefs = [resultArtifactRef, reviewArtifactRef, receipt.promotion_ref];
+  if (requiredReceiptRefs.some((recordRef) =>
+    !receipt.artifact_refs.some((receiptRefValue) => receiptRefValue.digest === recordRef.digest))) {
+    throw new Error("completed Run Receipt is missing an admitted artifact reference");
+  }
+  const resultRepo = join(ctx.runDir, "result-repository.git");
+  if (!existsSync(resultRepo)) throw new Error("completed Run Promotion repository is missing");
+  const promotedRefOid = maybeResultRefOid(resultRepo, promotion.result_ref);
+  if (promotedRefOid !== promotion.promoted_ref_oid) {
+    throw new Error("completed Run Promotion Result Ref does not match its recorded object");
+  }
+  const promotedSnapshot = snapshotFromResultRef(resultRepo, promotion.result_ref).digest;
+  if (promotedSnapshot !== promotion.verified_snapshot
+    || promotedSnapshot !== promotion.promoted_snapshot
+    || promotedSnapshot !== receipt.accepted_snapshot
+    || promotedSnapshot !== receipt.verified_snapshot
+    || promotedSnapshot !== receipt.promoted_snapshot) {
+    throw new Error("completed Run Receipt snapshots do not match Promotion");
+  }
+  return { receipt, promotion, resultArtifact, review, receiptRef };
+}
+
 export function inspectRun(runDir) {
   const ctx = { runDir };
   const state = JSON.parse(readFileSync(join(runDir, "run.json")));
   validateProtocol(state, "run state");
   resolveArtifactReferences(ctx, state);
-  const outcome = latestOutcome(runDir);
+  const outcomeEntry = outcomeEntries(runDir).at(-1) ?? null;
+  const outcome = outcomeEntry?.outcome ?? null;
   if (outcome) validateProtocol(outcome, "latest outcome");
+  if (state.lifecycle_state === "completed") validateCompletedRun(ctx, state, outcomeEntry);
   let resultRef = null;
   if (outcome?.promotion_ref) {
     const promotion = resolveArtifactReference(ctx, outcome.promotion_ref);

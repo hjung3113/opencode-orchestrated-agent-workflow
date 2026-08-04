@@ -159,6 +159,31 @@ test("resume reconstructs a terminal Run idempotently and rejects invalid durabl
   }
 });
 
+test("public inspect rejects completed state without an immutable Receipt", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    const run = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+    });
+    const statePath = join(run.run_dir, "run.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.transitions = state.transitions.filter(({ event_kind }) => event_kind !== "receipt_admitted");
+    state.lifecycle_state = "completed";
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    rmSync(join(run.run_dir, "artifacts/outcomes/0001.json"));
+    assert.throws(() => execFileSync(process.execPath, [
+      "scripts/local-change.mjs", "inspect", "--workspace", workspace,
+      "--run-root", runRoot, "--run-id", run.run_id,
+    ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /completed.*Receipt|Receipt.*completed/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("cancel persists intent before abort and closes only after a confirmed stop", async () => {
   const { workspace, runRoot } = fixture();
   try {
