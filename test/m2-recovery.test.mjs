@@ -202,6 +202,88 @@ test("public inspect rejects completed state without an immutable Receipt", asyn
   }
 });
 
+test("public inspect rejects semantically malformed completed artifacts", async () => {
+  const cases = [
+    {
+      name: "review verdict",
+      mutate: ({ review }) => {
+        review.verdict = "finding";
+        review.findings = [{
+          finding_id: "finding-1",
+          fingerprint: digest("finding-1"),
+          criterion: "the completed change must pass independent verification",
+          evidence: [],
+        }];
+      },
+      expected: /independent pass|verdict|findings/i,
+    },
+    {
+      name: "producer identity",
+      mutate: ({ result, review }) => { review.producer.actor_id = result.producer.actor_id; },
+      expected: /producer|independent/i,
+    },
+    {
+      name: "runtime role",
+      mutate: ({ result, review }) => { review.runtime_ref = result.runtime_ref; },
+      expected: /runtime|independent/i,
+    },
+    {
+      name: "Result snapshot",
+      mutate: ({ result }) => { result.output_snapshot = digest("tampered-output-snapshot"); },
+      expected: /snapshot|Result/i,
+    },
+  ];
+  for (const testCase of cases) {
+    const { workspace, runRoot } = fixture();
+    try {
+      const run = await runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => new Runtime(options),
+      });
+      const statePath = join(run.run_dir, "run.json");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      const resultPath = join(run.run_dir, state.tasks["implementation-1"].artifact_ref.path);
+      const reviewPath = join(run.run_dir, state.tasks["verification-1"].artifact_ref.path);
+      const result = JSON.parse(readFileSync(resultPath, "utf8"));
+      const review = JSON.parse(readFileSync(reviewPath, "utf8"));
+      testCase.mutate({ result, review });
+      writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+      writeFileSync(reviewPath, `${JSON.stringify(review, null, 2)}\n`);
+      const replaceRefs = (value, path, next) => {
+        if (Array.isArray(value)) return value.forEach((item) => replaceRefs(item, path, next));
+        if (!value || typeof value !== "object") return;
+        if (value.reference_kind === "artifact" && value.path === path) {
+          Object.assign(value, next);
+          return;
+        }
+        Object.values(value).forEach((item) => replaceRefs(item, path, next));
+      };
+      replaceRefs(state, resultPath.slice(`${run.run_dir}/`.length), {
+        reference_kind: "artifact",
+        artifact_id: result.artifact_id,
+        path: state.tasks["implementation-1"].artifact_ref.path,
+        digest: digest(result),
+      });
+      replaceRefs(state, reviewPath.slice(`${run.run_dir}/`.length), {
+        reference_kind: "artifact",
+        artifact_id: review.artifact_id,
+        path: state.tasks["verification-1"].artifact_ref.path,
+        digest: digest(review),
+      });
+      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      assert.throws(() => execFileSync(process.execPath, [
+        "scripts/local-change.mjs", "inspect", "--workspace", workspace,
+        "--run-root", runRoot, "--run-id", run.run_id,
+      ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), testCase.expected, testCase.name);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("cancel persists intent before abort and closes only after a confirmed stop", async () => {
   const { workspace, runRoot } = fixture();
   try {

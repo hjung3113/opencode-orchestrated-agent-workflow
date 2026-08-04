@@ -1833,6 +1833,26 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
   }
   const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
   const review = resolveArtifactReference(ctx, reviewArtifactRef);
+  if (review.verdict !== "pass" || review.findings.length !== 0) {
+    throw new Error("completed Run requires an independent pass Review with no findings");
+  }
+  const resultRuntime = resolveArtifactReference(ctx, resultArtifact.runtime_ref);
+  const reviewRuntime = resolveArtifactReference(ctx, review.runtime_ref);
+  const workerBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === resultRuntime.attempt_id);
+  const verifierBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === reviewRuntime.attempt_id);
+  if (resultArtifact.producer.role !== "worker"
+    || review.producer.role !== "verifier"
+    || resultRuntime.role !== "worker"
+    || reviewRuntime.role !== "verifier"
+    || resultArtifact.producer.actor_id !== resultRuntime.agent_identity
+    || review.producer.actor_id !== reviewRuntime.agent_identity
+    || resultRuntime.agent_identity === reviewRuntime.agent_identity
+    || workerBinding?.role !== "worker"
+    || verifierBinding?.role !== "verifier"
+    || workerBinding.agent_identity !== resultRuntime.agent_identity
+    || verifierBinding.agent_identity !== reviewRuntime.agent_identity) {
+    throw new Error("completed Run producer/runtime identities do not preserve independent worker and verifier roles");
+  }
   if (review.target_task_ref.digest !== resultArtifactRef.digest
     || review.target_snapshot !== resultArtifact.output_snapshot) {
     throw new Error("completed Run Review does not match the admitted Result");
@@ -1855,7 +1875,9 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     throw new Error("completed Run Promotion Result Ref does not match its recorded object");
   }
   const promotedSnapshot = snapshotFromResultRef(resultRepo, promotion.result_ref).digest;
-  if (promotedSnapshot !== promotion.verified_snapshot
+  if (promotion.verified_snapshot !== resultArtifact.output_snapshot
+    || promotion.promoted_snapshot !== resultArtifact.output_snapshot
+    || promotedSnapshot !== promotion.verified_snapshot
     || promotedSnapshot !== promotion.promoted_snapshot
     || promotedSnapshot !== receipt.accepted_snapshot
     || promotedSnapshot !== receipt.verified_snapshot
