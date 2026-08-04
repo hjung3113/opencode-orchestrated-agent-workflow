@@ -4,31 +4,37 @@
 
 ### Status
 
-- M1 closure is complete locally. The bounded candidate review retained and
-  repaired four reproducible M1 defects: policy narrowing could disagree with
-  execution authority, Packet deadlines could widen their parent deadline,
-  command Evidence was not semantically checked against its Runtime
-  Observation, and a symlinked run root could enter the user workspace.
-- M2 recovery, cancellation, budget exhaustion, material decisions, and
-  paired low-risk ambiguity are complete through the public CLI and
-  file-backed Run artifacts. `cancel` records intent before abort, confirms a
-  stopped runtime or durably blocks as `cancel_unconfirmed`; `resume` repairs
-  prepared Promotion state across all three Result Ref cases, reconciles a
-  cancelling Run through its durable runtime binding, preserves cumulative
-  limits as Typed Blocks, and records paired low-risk Assumptions before
-  continuing.
-- Material responses use explicit `--decision-disposition accepted|rejected`.
-  Rejection is an immutable human Decision that never promotes; a later
-  accepted successor may supersede it. Accepted Decision refs survive restart
-  into the final Receipt.
-- Materiality is derived from the durable admitted Request ambiguity marker,
-  not caller-text keyword inference. The Intake prompt explicitly forbids
-  treating neutral wording or model confidence as materiality.
-- Current branch is `agent/executable-opencode-harness-design` at
-  implementation tip `5241eae`; this handoff update is the next local commit.
-  Nothing has been pushed and no PR exists.
-- Current evidence: protocol 4/4, M0 16/16, full M1 7/7 including a fresh
-  successful real OpenCode trace, M2 14/14, kernel 1/1, JavaScript syntax
+- M1 and M2 are complete locally through the public CLI and file-backed
+  artifacts. The final review repairs cover repository-policy intake, one
+  natural-language public execution input, Result Ref vocabulary, native
+  network denial, pre-dispatch material Decision gating, publication
+  reconciliation, cancellation reconciliation, worker-authored Result
+  proposals, fail-closed inspect, complete command Evidence validation, and
+  honest M0 cancellation capability reporting.
+- `cancel` records intent before abort, confirms a stopped runtime or writes
+  an immutable Runtime Observation plus `cancel_unconfirmed` Typed Block, and
+  never dispatches a successor. A later public `resume` uses the durable
+  binding and bounded adapter reconciliation; no-binding cancellation also
+  fails closed with a durable observation and block.
+- Result/Review publication has deterministic prepared-artifact recovery.
+  Promotion preparation precedes CAS and `resume` reconciles expected,
+  already-promoted, and conflicting refs. A crash after Result publication
+  leaves a typed `runtime_reconciliation_required` checkpoint that is
+  resumable; a crash after Review publication completes. Repeated public
+  resume and publication are idempotent.
+- Material ambiguity is admitted only from explicit durable protocol data.
+  Neutral request wording and model confidence cannot create a material gate.
+  The gate is before workflow selection, worker dispatch, or Promotion
+  preparation. An explicit rejected human Decision never promotes; exactly one
+  accepted human-authored successor is admitted, its Decision ref is included
+  in the Receipt, and the Run resumes.
+- Paired low-risk ambiguity records one durable Assumption and continues.
+  Cumulative Run limit exhaustion produces a typed Block.
+- Current branch is `agent/executable-opencode-harness-design` after local
+  repair commits through `fb00119`; this handoff update is the next local
+  commit. Nothing has been pushed and no PR exists.
+- Current evidence: protocol 4/4, M0 16/16, full M1 11/11 including a fresh
+  successful real OpenCode trace, M2 17/17, kernel 1/1, JavaScript syntax
   checks, and `git diff --check` all pass.
 
 ### Next task
@@ -42,9 +48,9 @@ engine, arbitrary retry/fork surface, concurrency, or Application.
 The user authorized local commits for this continuation. No push or PR was
 performed. Before any future publication:
 
-- every retained repair is tied to an explicit M1 criterion and focused
-  regression test;
-- protocol, M0, deterministic M1, and current real-runtime M1 checks pass;
+- every retained review finding is tied to an explicit M0-M2 contract and
+  focused public/file-backed regression test;
+- protocol, M0, M1, M2, kernel, syntax, and whitespace checks pass;
 - the successful real trace satisfies the M1 exit evidence;
 - the claimed milestone boundary matches the actual M2 state and tests;
 - the handoff's exact evidence is refreshed against the live checkout.
@@ -67,8 +73,9 @@ performed. Before any future publication:
 - Cumulative Run limits: planner, execution, revision, and repair admissions
   consume the same durable Run counters; exhaustion produces a Typed Block
   rather than another attempt.
-- Material Decision: `material_decision_request` survives restart with its
-  prepared Promotion reference. `resume --decision ...
+- Material Decision: `material_decision_request` survives restart with only
+  the durable Request reference; no workflow, worker, or Promotion is
+  prepared before the human gate. `resume --decision ...
   --decision-disposition accepted|rejected` admits human Decision artifacts;
   rejection stays resumable and never promotes, while exactly one accepted
   successor may supersede it and resume. Its durable ref is included in the
@@ -86,31 +93,39 @@ performed. Before any future publication:
   confirm `cancelled`. A Run with no active binding also writes a fallback
   Runtime Observation and block rather than remaining `cancelling`.
 - Crash boundaries: deterministic hooks cover before/after Promotion
-  preparation, before/after Result Ref CAS, before/after `receipt_admitted`
-  Run-state replacement, before/after runtime abort, and repeated public CLI
-  resume at each boundary.
+  preparation, before/after Result Ref CAS, after Result publication, after
+  Review publication, before/after `receipt_admitted` Run-state replacement,
+  before/after runtime abort, and repeated public CLI resume at each boundary.
 
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
 - `npm run test:m0` — 16/16 passed.
-- `npm run test:m1` — 7/7 passed, including the real OpenCode trace.
-- `npm run test:m2` — 14/14 passed.
+- `npm run test:m1` — 11/11 passed, including the real OpenCode trace.
+- `npm run test:m2` — 17/17 passed.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check scripts/local-change.mjs` and
   `node --check scripts/probe-opencode.mjs` — passed.
-- `git diff --check` — passed; the checkout was clean before this handoff
-  edit.
+- `git diff --check` — passed before this handoff edit; it is rerun after the
+  edit and commit.
 
 ### Remaining limitations
 
+- The M0 operator probe intentionally reports
+  `operator.cancel_unconfirmed_reconcile` as capability-unverified rather
+  than relabeling a deadline abort. M2 proves the durable later-observation
+  path with its file-backed adapter seam; no M0 cross-process server-death
+  capability is claimed.
 - A public resume after process death cannot reconnect to an external
   OpenCode server that no longer exists in the process; it fails closed as
-  `cancel_unconfirmed`. The live adapter seam can confirm abort/status when
-  the binding is reachable.
+  `cancel_unconfirmed`. The bounded adapter seam can confirm abort/status when
+  the durable binding is reachable.
 - Material gating is deliberately fail-closed to explicit durable Request
   ambiguity markers; caller-text keywords and model confidence alone cannot
   create a human gate.
+- Repository-policy intake cites the target workspace's `AGENTS.md` when it is
+  present and records an explicit empty-policy statement otherwise; the
+  planner receives that Kernel-derived content and cannot read files.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -129,7 +144,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD: implementation tip `5241eae`; this handoff update is the next local commit
+- HEAD: repair tip `fb00119`; this handoff update is the next local commit
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
 - no protected uncommitted work was present before this handoff edit
