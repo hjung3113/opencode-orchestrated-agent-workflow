@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -244,6 +244,31 @@ test("prepared Promotion resumes across absent, committed, and conflicting Resul
     assert.equal(resumed.lifecycle_state, "blocked");
     assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/failure.json"))).block_type, "result_ref_drift");
     assert.equal(git(join(runDir, "result-repository.git"), ["rev-parse", `refs/orchestrator/results/${runId}`]).trim(), drift);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("cumulative Run limit exhaustion is a typed block", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+      budgetOverride: { max_execution_attempts: 1 },
+    }), /execution_attempt budget exhausted/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const block = JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/failure.json")));
+    assert.equal(state.lifecycle_state, "blocked");
+    assert.equal(block.outcome_kind, "block");
+    assert.equal(block.block_type, "budget_exceeded");
+    assert.match(block.summary, /execution_attempt budget exhausted/);
+    assert.equal(existsSync(join(runDir, "artifacts/promotions")), false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });

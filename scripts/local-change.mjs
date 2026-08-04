@@ -1162,6 +1162,10 @@ export function admitBudget(state, kind) {
       state.transitions.filter(({ event_kind }) => event_kind.startsWith("graph_revision_")).length,
       state.budget.max_graph_revisions,
     ],
+    repair: [
+      state.transitions.filter(({ event_kind }) => event_kind === "repair_admitted").length,
+      state.budget.max_repairs_per_finding,
+    ],
   };
   const [used, limit] = limits[kind] ?? [];
   if (used === undefined) throw new Error(`unknown budget admission point: ${kind}`);
