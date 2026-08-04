@@ -639,7 +639,7 @@ test("M1 admission preserves policy, evidence, deadline, and run-root boundaries
   const evidence = await assertBlockedScenario({
     hooks: {
       beforeResultAdmission: ({ workerResult }) => {
-        workerResult.evidence[0].command_ref.output_digest = digest("wrong output");
+        workerResult.evidence.find(({ command_ref }) => command_ref).command_ref.output_digest = digest("wrong output");
       },
     },
   });
