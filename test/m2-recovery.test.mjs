@@ -368,10 +368,19 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
       const runId = readdirSync(join(runRoot, "runs"))[0];
       const runDir = join(runRoot, "runs", runId);
       const first = cliResume(workspace, runRoot, runId);
-      assert.equal(first.lifecycle_state, "completed", crashAt);
+      if (crashAt === "after_result_publication") {
+        assert.equal(first.lifecycle_state, "active", crashAt);
+        assert.equal(first.checkpoint, "runtime_reconciliation_required", crashAt);
+        const reconciled = JSON.parse(readFileSync(join(runDir, "run.json")));
+        assert.equal(reconciled.tasks["implementation-1"].task_state, "artifacts_published", crashAt);
+        assert.ok(reconciled.tasks["implementation-1"].artifact_ref, crashAt);
+      } else {
+        assert.equal(first.lifecycle_state, "completed", crashAt);
+      }
       const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
       const second = cliResume(workspace, runRoot, runId);
-      assert.equal(second.lifecycle_state, "completed", crashAt);
+      assert.equal(second.lifecycle_state, first.lifecycle_state, crashAt);
+      if (crashAt === "after_result_publication") assert.equal(second.checkpoint, first.checkpoint, crashAt);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat, crashAt);
     } finally {
       rmSync(workspace, { recursive: true, force: true });

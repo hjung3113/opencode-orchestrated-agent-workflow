@@ -857,9 +857,13 @@ function responseObject(text, label) {
     ? (value) => value?.preset_selection
     : label.includes("revision 1")
       ? (value) => value?.graph && value?.packet
-      : label.includes("revision 2")
-        ? (value) => value?.verifier_task && value?.verifier_packet
-        : (value) => value?.verdict;
+    : label.includes("revision 2")
+      ? (value) => value?.verifier_task && value?.verifier_packet
+      : label.includes("worker Result")
+        ? (value) => Array.isArray(value?.claims)
+          && Array.isArray(value?.evidence)
+          && Array.isArray(value?.changed_resources)
+      : (value) => value?.verdict;
   const matching = candidates.filter(hint);
   if (matching.length > 0) return matching.sort((a, b) =>
     JSON.stringify(b).length - JSON.stringify(a).length)[0];
@@ -1172,8 +1176,11 @@ function parseResultProposal(parsed) {
     throw new Error("worker did not author a structured Result proposal");
   }
   return {
-    claims: validStringArray(parsed.claims, "worker Result claims"),
-    evidence: validEvidenceArray(parsed.evidence),
+    claims: parsed.claims.map((claim) => {
+      if (typeof claim !== "string" || claim.length === 0) throw new Error("worker Result claims must contain strings");
+      return claim;
+    }),
+    evidence: parsed.evidence.length === 0 ? [] : validEvidenceArray(parsed.evidence),
     changed_resources: validStringArray(parsed.changed_resources, "worker Result changed_resources"),
     ...(typeof parsed.output_snapshot === "string" ? { output_snapshot: parsed.output_snapshot } : {}),
   };
@@ -1631,7 +1638,6 @@ function outcomeEntries(runDir) {
 
 function materialDecisionRequest(ctx, state, {
   requestRef,
-  promotionRef,
   question,
 }) {
   const existing = outcomeEntries(ctx.runDir).find(({ outcome }) =>
@@ -1648,22 +1654,21 @@ function materialDecisionRequest(ctx, state, {
     artifactId: `outcome-${String(outcomePath.number).padStart(4, "0")}`,
     runId: ctx.runId,
     producer: kernelProducer(),
-    inputRefs: [requestRef, promotionRef],
+    inputRefs: [requestRef],
     createdAt: now(),
     preset: "local-change@1",
     effective_policy: state.effective_policy,
     outcome_kind: "material_decision_request",
     summary: "Run paused for a material Decision Authority response.",
-    artifact_refs: [requestRef, promotionRef],
-    limitations: ["No Promotion or Receipt is admitted until the human response is recorded."],
+    artifact_refs: [requestRef],
+    limitations: ["No workflow selection, worker execution, Promotion, or Receipt is admitted until the human response is recorded."],
     question,
   });
   const outcomeRef = writeArtifact(ctx, outcomePath.path, outcome);
   const next = applyTransition(ctx, state, "material_decision_requested", {
     lifecycle_state: "material_decision_required",
     decision_refs: [],
-    prepared_promotion_ref: promotionRef,
-  }, [outcomeRef, promotionRef]);
+  }, [outcomeRef, requestRef]);
   return { state: next, outcomeRef };
 }
 
@@ -1820,6 +1825,7 @@ export function inspectRun(runDir) {
       ? "completed" : state.lifecycle_state,
     runtime_bindings: state.runtime_bindings,
     active_runtime_bindings: state.runtime_bindings.filter(({ binding_state }) => binding_state === "active"),
+    result_artifact_ref: state.tasks?.["implementation-1"]?.artifact_ref ?? null,
     result_ref: resultRef,
     receipt: outcome?.outcome_kind === "receipt" ? {
       artifact_id: outcome.artifact_id,
@@ -1830,7 +1836,7 @@ export function inspectRun(runDir) {
   };
 }
 
-export async function resumeRun(runDir, { decision, decisionDisposition, runtime, hooks = {} } = {}) {
+export async function resumeRun(runDir, { workspace, decision, decisionDisposition, runtime, hooks = {} } = {}) {
   let state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
@@ -1872,6 +1878,28 @@ export async function resumeRun(runDir, { decision, decisionDisposition, runtime
     } catch (error) {
       if (!error.code) throw error;
       if (error.code !== "simulated_crash") recordFailure(ctx, state, error);
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
+  if (state.lifecycle_state === "active"
+    && (state.decision_refs ?? []).length > 0
+    && !state.tasks?.["implementation-1"]) {
+    if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "accepted Decision resume requires the target workspace");
+    try {
+      const runRoot = dirname(dirname(resolve(runDir)));
+      const resumed = await runLocalChange({
+        workspace,
+        runRoot,
+        existingRunDir: runDir,
+        runtimeFactory: runtime ? async (options) => {
+          Object.assign(runtime, options);
+          return runtime;
+        } : undefined,
+        hooks,
+      });
+      return { ...resumed.inspect, next_action: null, ...resumed };
+    } catch (error) {
+      if (error.code !== "simulated_crash") throw error;
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
@@ -1991,34 +2019,50 @@ export async function runLocalChange({
   workspace,
   runRoot,
   requestText,
-  targetFile = "change.txt",
-  expectedContent = "local change completed\n",
   runtimeFactory,
   hooks = {},
   budgetOverride = {},
+  existingRunDir = null,
 }) {
+  let targetFile = "change.txt";
+  let expectedContent = "local change completed\n";
   workspace = resolve(workspace);
-  runRoot = resolve(runRoot);
+  runRoot = resolve(runRoot ?? dirname(dirname(resolve(existingRunDir))));
   if (!existsSync(workspace)) throw new Error(`workspace does not exist: ${workspace}`);
   ensureOutside(workspace, runRoot);
+  const existingState = existingRunDir
+    ? JSON.parse(readFileSync(join(resolve(existingRunDir), "run.json"), "utf8"))
+    : null;
+  if (existingState) {
+    validateProtocol(existingState, "run state");
+    targetFile = existingState.execution_context.target_file;
+    expectedContent = existingState.execution_context.expected_content;
+    requestText = existingState.execution_context.request_text;
+  }
   if (!/^[A-Za-z0-9._/-]+$/.test(targetFile) || targetFile.startsWith(".") || targetFile.includes("..")) {
     throw new Error(`invalid target file: ${targetFile}`);
   }
   mkdirSync(runRoot, { recursive: true });
   ensureOutside(workspace, runRoot);
-  const runId = `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
-  const runDir = join(runRoot, "runs", runId);
+  const runId = existingState?.run_id ?? `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+  const runDir = resolve(existingRunDir ?? join(runRoot, "runs", runId));
   mkdirSync(runDir, { recursive: true });
   const baselineBranch = git(workspace, ["branch", "--show-current"]).trim();
   const baselineTarget = workspaceSnapshot(workspace);
   const baselineStatus = gitStatus(workspace);
-  const workspaceBaseline = {
+  const computedWorkspaceBaseline = {
     branch: baselineBranch,
     head: baselineTarget.base,
     status_digest: digest(Buffer.from(baselineStatus)),
     snapshot_digest: baselineTarget.digest,
     protected_paths: dirtyPaths(workspace),
   };
+  if (existingState && (computedWorkspaceBaseline.snapshot_digest !== existingState.workspace_baseline.snapshot_digest
+    || computedWorkspaceBaseline.branch !== existingState.workspace_baseline.branch
+    || computedWorkspaceBaseline.status_digest !== existingState.workspace_baseline.status_digest)) {
+    throw new Error("user workspace no longer matches the durable Run baseline");
+  }
+  const workspaceBaseline = existingState?.workspace_baseline ?? computedWorkspaceBaseline;
   if (baselineTarget.entries.some(({ path }) => path === targetFile)) {
     throw new Error(`target file already exists in the intake snapshot: ${targetFile}`);
   }
@@ -2026,8 +2070,8 @@ export async function runLocalChange({
   const repositoryPolicy = repositoryPolicyRecord(workspace, baselineTarget);
   const taskWorkspace = mkdtempSync(join(runDir, "task-workspace-"));
   let adapter;
-  let state;
-  const runBudget = { ...budget, ...budgetOverride };
+  let state = existingState;
+  const runBudget = existingState?.budget ?? { ...budget, ...budgetOverride };
   for (const [field, value] of Object.entries(runBudget)) {
     if (!Number.isSafeInteger(value) || value < 0 || value > budget[field]) {
       throw new Error(`invalid budget narrowing: ${field}=${value}`);
@@ -2063,6 +2107,12 @@ export async function runLocalChange({
     adapter.runId = runId;
     await adapter.start();
 
+    let request;
+    let requestRef;
+    if (existingState) {
+      requestRef = state.request_ref;
+      request = resolveArtifactReference(ctx, requestRef);
+    } else {
     const requestAttempt = await adapter.newAttempt({
       role: "planner",
       attemptId: "planner-request",
@@ -2127,7 +2177,7 @@ export async function runLocalChange({
     admitAttemptExecution(ctx, requestExecution, "Request planner Attempt");
     const requestRuntime = requestExecution.observation;
     const requestRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-request.json", requestRuntime);
-    const request = requestProposal(responseObject(requestExecution.text, "Request planner"), {
+    request = requestProposal(responseObject(requestExecution.text, "Request planner"), {
       requestText,
       targetSnapshot: taskBaseline.digest,
     });
@@ -2139,7 +2189,7 @@ export async function runLocalChange({
       actorId: requestAttempt.binding.agent_identity,
       bootstrapRef,
     });
-    const requestRef = writeArtifact(ctx, "artifacts/request.json", requestArtifact);
+    requestRef = writeArtifact(ctx, "artifacts/request.json", requestArtifact);
     const effectivePolicy = {
       ...policyFor(request, budgetOverride),
       preset_selection_ref: requestRef,
@@ -2152,6 +2202,24 @@ export async function runLocalChange({
       budget: runBudget,
       runtime_bindings: [requestExecution.binding],
     }, [requestRef, requestRuntimeRef]);
+    }
+
+    const material = materialAmbiguities(request);
+    if (material.length > 0 && !existingState) {
+      const decisionCheckpoint = materialDecisionRequest(ctx, state, {
+        requestRef,
+        question: material.join(" "),
+      });
+      state = decisionCheckpoint.state;
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        checkpoint: "material_decision_required",
+        inspect: inspectRun(runDir),
+      };
+    }
+    const requestBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "planner-request");
+    if (!requestBinding) throw new AttemptFailure("missing_request_binding", "admitted Run has no durable intake binding");
 
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
@@ -2208,7 +2276,7 @@ export async function runLocalChange({
     const graphOneRef = writeArtifact(ctx, "artifacts/graphs/0001.json", graphOne);
     state = applyTransition(ctx, state, "graph_revision_1_admitted", {
       active_graph_ref: graphOneRef,
-      runtime_bindings: [requestExecution.binding, graphOneExecution.binding],
+      runtime_bindings: [requestBinding, graphOneExecution.binding],
       tasks: {
         "implementation-1": { task_state: "planned", attempts: 0 },
       },
@@ -2236,7 +2304,7 @@ export async function runLocalChange({
       `Implement the admitted local-change Packet. Modify exactly ${targetFile}.`,
       `Create it with exactly this UTF-8 content: ${JSON.stringify(expectedContent)}.`,
       "Do not modify protected unrelated files, the Git metadata, the skill file, or any other path.",
-      "Use your edit/write tool, never shell or network. After editing, return exactly one JSON object and no Markdown with claims, evidence, changed_resources, and optional output_snapshot fields. The Result proposal fields must be authored by you; do not return prose.",
+      "Use your edit/write tool, never shell or network. After editing, return exactly one JSON object and no Markdown. Claims and changed_resources must be arrays of strings, and evidence must contain string claim/source/observation fields. Do not include output_snapshot; the Kernel records the observed snapshot. Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"]}. The Result proposal fields must be authored by you; do not return prose.",
     ].join("\n");
     const workerExecution = await adapter.execute({
       role: "worker",
@@ -2263,7 +2331,7 @@ export async function runLocalChange({
     const workerProposal = parseResultProposal(responseObject(workerExecution.text, "worker Result proposal"));
     const observedResources = workerChanges.map(({ path }) => path);
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
-      throw new Error("worker Result proposal changed_resources do not match the observed diff");
+      throw new Error(`worker Result proposal changed_resources do not match the observed diff: proposed=${JSON.stringify(workerProposal.changed_resources)} observed=${JSON.stringify(observedResources)}`);
     }
     if (workerProposal.output_snapshot && workerProposal.output_snapshot !== workerSnapshot.digest) {
       throw new Error("worker Result proposal output_snapshot does not match the observed snapshot");
@@ -2466,23 +2534,6 @@ export async function runLocalChange({
       promotedResources: [targetFile],
       taskWorkspace,
     });
-    const material = materialAmbiguities(request);
-    if (material.length > 0) {
-      const decisionCheckpoint = materialDecisionRequest(ctx, state, {
-        requestRef,
-        promotionRef,
-        question: material.join(" "),
-      });
-      state = decisionCheckpoint.state;
-      return {
-        run_id: runId,
-        run_dir: runDir,
-        result_ref: resultRefName,
-        output_snapshot: workerSnapshot.digest,
-        checkpoint: "material_decision_required",
-        inspect: inspectRun(runDir),
-      };
-    }
     const { promotedRefOid, promotedSnapshot } = reconcilePromotion(ctx, {
       resultRepo,
       resultRefName,
@@ -2540,6 +2591,7 @@ async function main() {
     const runDir = join(root, "runs", selected);
     const result = command === "resume"
       ? await resumeRun(runDir, {
+        workspace,
         decision: parseOption(argv, "--decision"),
         decisionDisposition: parseOption(argv, "--decision-disposition"),
       })
