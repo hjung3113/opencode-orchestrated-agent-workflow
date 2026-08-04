@@ -702,7 +702,6 @@ export class OpenCodeAdapter {
 
   async execute({ role, attemptId, taskId, attempt, binding, prompt, beforeSnapshot, deadlineSeconds = m1AttemptDeadlineSeconds }) {
     const eventsSubscription = subscribeEvents({ port: this.port });
-    await eventsSubscription.ready;
     const deadlineController = new AbortController();
     const deadlineTimer = setTimeout(() => deadlineController.abort(), Math.max(1, deadlineSeconds) * 1_000);
     let response;
