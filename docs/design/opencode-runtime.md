@@ -16,8 +16,11 @@ execute(attempt specification, cancellation signal) -> runtime observation
 
 An attempt specification contains:
 
-- run and attempt ids, plus a task id for scheduled work;
-- planner, worker, or verifier role and a packet reference;
+- run and attempt ids, plus a task id for scheduled work when the Attempt is
+  Task-bound;
+- planner, worker, or verifier role and its execution contract: a Packet
+  reference for worker and verifier Attempts, or a Kernel-owned bootstrap
+  envelope reference for the pre-intake planner Attempt;
 - target working directory and output-staging directory;
 - selected OpenCode agent and optional model constraint;
 - effective capability envelope;
@@ -29,6 +32,9 @@ A runtime observation records:
 - server, session, and message ids;
 - actual agent and model;
 - runtime Permission requests and relevant runtime events;
+- typed command-execution records for every Kernel-runner request, including
+  the admitted argv, repository-relative cwd, outcome or exit code, bounded
+  output digest, and executed environment-policy identity;
 - the adapter-observed workspace diff and kernel-computed output snapshot;
 - usage when available;
 - `idle`, `runtime_error`, `runtime_unreachable`, `cancelled`,
@@ -43,6 +49,8 @@ verification.
 
 Each planner Attempt, worker Attempt (including an Attempt for the `repair`
 Workflow Definition), and verifier Attempt receives a fresh OpenCode session.
+A pre-intake planner Attempt runs under a Kernel-owned bootstrap envelope and
+does not claim a Task Packet; worker and verifier Attempts remain Packet-bound.
 A retry is a successor Attempt with a new session; a repair is a new Task
 with worker role and Workflow Definition `repair`, linked to a finding. The baseline never
 continues or forks a worker's chat to perform verification.
@@ -53,7 +61,7 @@ admission requires both the verifier session and `agent_identity` to differ
 from those of the worker that produced the target snapshot. The verifier packet
 contains no worker conversation history.
 
-OpenCode's Task tool is denied for execution attempts. Model-created
+OpenCode's Task tool is denied for execution Attempts. Model-created
 subagents would create work outside the admitted graph. OpenCode child-session
 relationships may be recorded for diagnosis but have no scheduling,
 provenance, or authority meaning.
@@ -114,6 +122,11 @@ An OpenCode Permission prompt is normalized as a Runtime Observation event. It
 becomes a human question only when the existing Material Decision rule requires one.
 Unsupported enforcement produces `unsupported_capability_enforcement` rather
 than broad permission or a prompt-driven bypass.
+
+Command Evidence must cite a typed command-execution record through the exact
+Runtime Observation reference and output digest. A Permission event string is
+not command Evidence; the Kernel checks that the cited command id, admitted
+argv, cwd, and output digest match the frozen observation.
 
 ### Declared external reads
 

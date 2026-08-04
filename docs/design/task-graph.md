@@ -124,6 +124,11 @@ The baseline uses three model proposal kinds:
 2. graph revision proposal, including proposed packets;
 3. Review proposal.
 
+The first Request proposal is produced by a pre-intake planner Attempt under a
+Kernel-owned Bootstrap Planner Envelope, before any graph Task or Task Packet
+exists. Later planner Attempts propose graph revisions and Packets; those
+planner Attempts are still not Task Attempts.
+
 The kernel assigns durable ids and admits proposals only after schema,
 reference, graph, capability, budget, and proposer-role validation. A Repair
 is another graph revision proposal triggered by an admitted Finding. Agent

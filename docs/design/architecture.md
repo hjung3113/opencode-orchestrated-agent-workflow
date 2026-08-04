@@ -16,6 +16,7 @@ orchestrator.
 
 ~~~text
 request
+  -> Kernel-owned pre-intake Run State and bootstrap planner envelope
   -> bounded model proposal
   -> deterministic kernel <-> file store <-> llm-wiki retrieval
   -> admitted graph revision and task packet
@@ -84,8 +85,9 @@ next task.
 
 A Workflow Definition specifies the kind of work, required inputs and outputs, and
 verification expectation. Skill adapters name the concrete skills used for
-that Workflow Definition. They are explicit Packet inputs, not implicit developer-tool
-state.
+that Workflow Definition; each selected skill is recorded with its id, version,
+repository-visible source, and content digest. They are explicit Packet inputs,
+not implicit developer-tool state.
 
 ### Graph compiler and executor
 
@@ -100,8 +102,10 @@ graph contract and its deferred features are defined in
 
 ### OpenCode runtime adapter
 
-One admitted task attempt maps to one fresh OpenCode session. The adapter
-executes a kernel-issued attempt specification and returns observations; it
+One admitted Task Attempt maps to one fresh OpenCode session. The pre-intake
+planner Attempt also maps to one fresh session, but uses the Kernel-owned
+bootstrap envelope rather than a Task Packet. The adapter executes a
+kernel-issued attempt specification and returns observations; it
 does not schedule graph work, grant Execution Authority, exercise Publication
 Authority, or declare success. For an admitted External Read Target, the same runtime observation
 also preserves the requested URL and exact content exposed to the agent.

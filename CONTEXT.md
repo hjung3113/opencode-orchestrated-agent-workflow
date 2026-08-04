@@ -62,9 +62,17 @@ The immutable execution contract for a Workflow Instance, including its scope,
 inputs, constraints, and authority envelope.
 _Avoid_: Task, prompt, manifest
 
+**Bootstrap Planner Envelope**:
+The Kernel-owned, file-backed Intake execution contract for the pre-intake
+planner Attempt, derived from the raw request and repository policy. It carries
+bounded capabilities, a deadline, an idempotency key, and a Runtime
+Observation reference, but never claims a Task Packet.
+_Avoid_: Packet, Task, planner prompt
+
 **Attempt**:
-One actual runtime execution of a Task under its Packet; a retry is a successor
-Attempt and a repair is a new Task.
+One actual runtime execution of a Task under its Packet, or of the pre-intake
+planner under its Bootstrap Planner Envelope; a retry is a successor Attempt
+and a repair is a new Task.
 _Avoid_: Task, session, workflow instance
 
 **Attempt Lifecycle State**:
@@ -80,6 +88,12 @@ _Avoid_: Chat history, mutable state, temporary file
 An adapter-authored Artifact recording observed runtime facts; it is not a task
 verdict.
 _Avoid_: Evidence verdict, Result, session
+
+**Command Execution Record**:
+A typed Runtime Observation record for one Kernel-runner request, binding the
+admitted argv and repository-relative cwd to its outcome, bounded output
+digest, and executed environment-policy identity.
+_Avoid_: Permission event, shell transcript, command Evidence
 
 **Evidence**:
 Provenance-linked, digest-bound information from an Artifact that supports a

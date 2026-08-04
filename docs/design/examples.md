@@ -6,8 +6,11 @@ schema and exact digests.
 
 ## Local change with one repair
 
-1. A human requests a bounded local correction. Intake records an unrelated
-   pre-existing dirty file as protected and proposes `local-change@1`.
+1. A human requests a bounded local correction. The Kernel first records a
+   `pre_intake` Run State and Bootstrap Planner Envelope with its runtime
+   observation reference. Intake then records an unrelated pre-existing dirty
+   file as protected and proposes `local-change@1` through structured Preset
+   selection evidence.
 2. The kernel admits the request and graph revision 1 containing implementation
    task `t1`. The packet grants repository read, declared local writes, and
    selected test commands; external mutation and OpenCode Task delegation are

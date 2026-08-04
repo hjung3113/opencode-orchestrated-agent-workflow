@@ -55,9 +55,13 @@ repository-defined preset catalogs are not supported in v1.
 
 Each Preset records an id and version, applicability and non-applicability
 signals, default capabilities and budgets, evidence and verification
-expectations, and completion conditions. The model may propose a preset and a
-narrowing override. The Kernel admits the effective Run Policy and records the
-selection evidence, defaults, deviations, and rationale in the Run and Receipt.
+expectations, and completion conditions. The model proposes a structured
+`preset_selection` containing the selected Preset, selection Evidence, any
+proposed narrowing override, and rationale. The Kernel admits the effective
+Run Policy and records `preset_selection_ref` plus the typed defaults,
+proposed and admitted narrowing overrides, deviations, and rationale in the
+Run and Receipt. These fields are protocol objects, not prose folded into a
+summary; the admitted override may only narrow the Preset defaults.
 A Preset cannot weaken independent verification, provenance, or the
 Material Decision rule.
 
