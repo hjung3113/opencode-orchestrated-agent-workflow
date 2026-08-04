@@ -13,14 +13,22 @@
   paired low-risk ambiguity are complete through the public CLI and
   file-backed Run artifacts. `cancel` records intent before abort, confirms a
   stopped runtime or durably blocks as `cancel_unconfirmed`; `resume` repairs
-  prepared Promotion state across all three Result Ref cases, preserves a
-  cumulative Run limit as a Typed Block, admits exactly one human Decision
-  successor, and records the paired low-risk Assumption before continuing.
+  prepared Promotion state across all three Result Ref cases, reconciles a
+  cancelling Run through its durable runtime binding, preserves cumulative
+  limits as Typed Blocks, and records paired low-risk Assumptions before
+  continuing.
+- Material responses use explicit `--decision-disposition accepted|rejected`.
+  Rejection is an immutable human Decision that never promotes; a later
+  accepted successor may supersede it. Accepted Decision refs survive restart
+  into the final Receipt.
+- Materiality is derived from the durable admitted Request ambiguity marker,
+  not caller-text keyword inference. The Intake prompt explicitly forbids
+  treating neutral wording or model confidence as materiality.
 - Current branch is `agent/executable-opencode-harness-design` at
-  implementation tip `c07da36`; this handoff update is the next local commit.
+  implementation tip `5241eae`; this handoff update is the next local commit.
   Nothing has been pushed and no PR exists.
 - Current evidence: protocol 4/4, M0 16/16, full M1 7/7 including a fresh
-  successful real OpenCode trace, M2 10/10, kernel 1/1, JavaScript syntax
+  successful real OpenCode trace, M2 14/14, kernel 1/1, JavaScript syntax
   checks, and `git diff --check` all pass.
 
 ### Next task
@@ -60,24 +68,34 @@ performed. Before any future publication:
   consume the same durable Run counters; exhaustion produces a Typed Block
   rather than another attempt.
 - Material Decision: `material_decision_request` survives restart with its
-  prepared Promotion reference. `resume --decision` admits exactly one
-  `producer.role=human`, `disposition=accepted` Decision artifact under
-  `artifacts/decisions/decision-1/0001.json`, then reconciles Promotion and
-  resumes. Repeated responses do not create another successor.
+  prepared Promotion reference. `resume --decision ...
+  --decision-disposition accepted|rejected` admits human Decision artifacts;
+  rejection stays resumable and never promotes, while exactly one accepted
+  successor may supersede it and resume. Its durable ref is included in the
+  final Receipt input and artifact refs. Repeated responses do not create
+  another accepted successor.
+- Materiality: the Kernel uses only the admitted Request's explicit
+  `material:`/`decision:` ambiguity marker; it does not inspect raw caller
+  wording. Neutral real OpenCode requests continue without a gate unless the
+  durable Request explicitly records that marker.
 - Paired low-risk ambiguity: exactly two non-material ambiguity strings create
   one durable Assumption before proposal continuation. Materiality is not
   inferred from model confidence.
+- Cancelling resume: public `resume` after a crash before/after runtime abort
+  records `cancel_unconfirmed` and blocks; the injectable adapter seam can
+  confirm `cancelled`. A Run with no active binding also writes a fallback
+  Runtime Observation and block rather than remaining `cancelling`.
 - Crash boundaries: deterministic hooks cover before/after Promotion
-  preparation, before/after Result Ref CAS, before/after Run-state
-  replacement, before/after runtime abort, and repeated resume at each
-  boundary.
+  preparation, before/after Result Ref CAS, before/after `receipt_admitted`
+  Run-state replacement, before/after runtime abort, and repeated public CLI
+  resume at each boundary.
 
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
 - `npm run test:m0` — 16/16 passed.
 - `npm run test:m1` — 7/7 passed, including the real OpenCode trace.
-- `npm run test:m2` — 10/10 passed.
+- `npm run test:m2` — 14/14 passed.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check scripts/local-change.mjs` and
   `node --check scripts/probe-opencode.mjs` — passed.
@@ -86,12 +104,13 @@ performed. Before any future publication:
 
 ### Remaining limitations
 
-- A CLI-only cancellation after process death cannot prove that an external
-  runtime stopped, so it fails closed as `cancel_unconfirmed`; only the live
-  adapter can confirm abort/status.
-- Material gating is deliberately fail-closed to explicit human-request
-  markers plus declared planner ambiguity prefixes; model confidence alone
-  cannot create a human gate.
+- A public resume after process death cannot reconnect to an external
+  OpenCode server that no longer exists in the process; it fails closed as
+  `cancel_unconfirmed`. The live adapter seam can confirm abort/status when
+  the binding is reachable.
+- Material gating is deliberately fail-closed to explicit durable Request
+  ambiguity markers; caller-text keywords and model confidence alone cannot
+  create a human gate.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -106,17 +125,16 @@ do not start the M1 walking skeleton or a generic kernel in this slice.
 
 ## Live state
 
-Verified on 2026-08-04 (Asia/Seoul):
+Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD: `7d0190b docs: clarify orchestration terminology`
+- HEAD: implementation tip `5241eae`; this handoff update is the next local commit
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
-- protected uncommitted work: `docs/implementation-plan.md`, this `HANDOFF.md`,
-  and the in-progress M0 files under `package.json`, `scripts/`, and `test/` are
-  intentionally untracked
-- no commit, push, PR, or issue mutation has been performed
+- no protected uncommitted work was present before this handoff edit
+- local implementation commits were authorized; no push, PR, or issue mutation
+  has been performed
 
 Recheck all mutable state before continuing.
 
