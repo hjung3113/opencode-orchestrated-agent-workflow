@@ -400,31 +400,30 @@ function subscribeEvents({ port, timeout = 2_000 }) {
 
 async function observeServer() {
   const port = await unusedPort();
-  const child = spawn("opencode", [
+  const startServer = () => spawn("opencode", [
     "serve", "--pure", "--hostname", "127.0.0.1", "--port", String(port),
   ], {
     cwd: workspace,
     env: runtimeEnv,
     stdio: "ignore",
   });
-  const childExit = once(child, "exit");
+  let child = startServer();
+  let childExit = once(child, "exit");
+  const waitForHealth = async () => {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) throw new Error(`OpenCode server exited before health check: ${child.exitCode}`);
+      try {
+        return await requestJson({ port, path: "/global/health", timeout: 500 });
+      } catch {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
+    }
+    throw new Error("OpenCode server health deadline exceeded");
+  };
 
   try {
-    const deadline = Date.now() + 10_000;
-    let health;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null) {
-        throw new Error(`OpenCode server exited before health check: ${child.exitCode}`);
-      }
-      try {
-        health = await requestJson({ port, path: "/global/health", timeout: 500 });
-        break;
-      } catch {
-        // The server has not bound the port yet.
-      }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    }
-    if (!health) throw new Error("OpenCode server health deadline exceeded");
+    const health = await waitForHealth();
 
     const resolvedAgents = await requestJson({ port, path: "/agent", timeout: 5_000 });
     const resolvedSkills = await requestJson({ port, path: "/skill", timeout: 5_000 });
@@ -568,6 +567,59 @@ async function observeServer() {
       path: `/session/${operatorSession.id}`,
       timeout: 2_000,
     });
+    const reconcileSession = await requestJson({
+      port,
+      path: "/session",
+      method: "POST",
+      body: { title: "m0-operator-cancel-unconfirmed" },
+      timeout: 5_000,
+    });
+    const reconcilePrompt = await requestOutcome({
+      port,
+      path: `/session/${reconcileSession.id}/prompt_async`,
+      body: {
+        agent: operatorAgent.name,
+        parts: [{ type: "text", text: "M0 process-death cancel reconciliation probe." }],
+      },
+      timeout: 5_000,
+    });
+    const cancelIntentRecordedBeforeProcessDeath = reconcilePrompt.status === 204;
+    child.kill("SIGKILL");
+    const processDied = await Promise.race([
+      childExit.then(() => true),
+      new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 2_000)),
+    ]);
+    let deadAbortUnconfirmed = false;
+    let deadAbortError;
+    try {
+      await requestOutcome({
+        port,
+        path: `/session/${reconcileSession.id}/abort`,
+        body: {},
+        timeout: 500,
+      });
+    } catch (error) {
+      deadAbortUnconfirmed = true;
+      deadAbortError = error.message;
+    }
+    child = startServer();
+    childExit = once(child, "exit");
+    const reconnectHealth = await waitForHealth();
+    const reconnectedSession = await requestJson({
+      port,
+      path: `/session/${reconcileSession.id}`,
+      timeout: 2_000,
+    });
+    const reconnectAbort = await requestOutcome({
+      port,
+      path: `/session/${reconcileSession.id}/abort`,
+      body: {},
+      timeout: 5_000,
+    });
+    const reconnectedStatuses = await requestJson({ port, path: "/session/status", timeout: 2_000 });
+    const abortConfirmedAfterReconnect = reconnectAbort.body === true;
+    const runtimeStopped = abortConfirmedAfterReconnect
+      || reconnectedStatuses[reconcileSession.id]?.type === "idle";
     return {
       health,
       sessions,
@@ -606,6 +658,21 @@ async function observeServer() {
         events: observedOperatorEvents,
         cancel_intent_recorded_before_abort: true,
         observed_session_id: observedOperatorSession.id,
+      },
+      operator_reconcile: {
+        session_id: reconcileSession.id,
+        prompt_http_status: reconcilePrompt.status,
+        cancel_intent_recorded_before_process_death: cancelIntentRecordedBeforeProcessDeath,
+        process_died: processDied,
+        dead_abort_unconfirmed: deadAbortUnconfirmed,
+        dead_abort_error: deadAbortError,
+        reconnect_health: reconnectHealth,
+        reconnected_session_id: reconnectedSession.id,
+        reconnect_abort_status: reconnectAbort.status,
+        reconnect_abort_body: reconnectAbort.body,
+        abort_confirmed_after_reconnect: abortConfirmedAfterReconnect,
+        runtime_stopped: runtimeStopped,
+        reconnected_status: reconnectedStatuses[reconcileSession.id]?.type ?? null,
       },
       resolvedSkills,
     };
@@ -749,19 +816,23 @@ const operatorRow = {
     },
   }),
 };
+const operatorReconcileObserved = runtimeObservation.operator_reconcile.cancel_intent_recorded_before_process_death
+  && runtimeObservation.operator_reconcile.process_died
+  && runtimeObservation.operator_reconcile.dead_abort_unconfirmed
+  && runtimeObservation.operator_reconcile.reconnect_health?.healthy === true
+  && runtimeObservation.operator_reconcile.reconnected_session_id === runtimeObservation.operator_reconcile.session_id
+  && runtimeObservation.operator_reconcile.runtime_stopped;
 const operatorUnconfirmedRow = {
   id: "operator.cancel_unconfirmed_reconcile",
   gates: ["M2"],
-  status: "incompatible",
-  evidence: {
-    observed: false,
-    requires_process_death: true,
-    message: "This M0 probe does not claim cancel_unconfirmed reconciliation without a process-death/reconnect boundary.",
-  },
-  incompatibility: {
-    type: "capability_unverified",
-    message: "M0 observed operator cancellation only; cancel_unconfirmed reconciliation belongs to the M2 harness probe.",
-  },
+  status: operatorReconcileObserved ? "pass" : "incompatible",
+  evidence: runtimeObservation.operator_reconcile,
+  ...(operatorReconcileObserved ? {} : {
+    incompatibility: {
+      type: "unsupported_runtime_observation",
+      message: "process-death cancellation did not reconnect the same session and observe a stopped runtime",
+    },
+  }),
 };
 
 process.stdout.write(`${JSON.stringify({

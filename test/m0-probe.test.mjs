@@ -246,9 +246,13 @@ test("probe confirms M2 operator cancellation and later session observation", ()
     assert.equal(row.evidence.observed_session_id, row.evidence.session_id);
     assert.notEqual(row.evidence.session_id, matrix.rows.find(({ id }) => id === "deadline.abort_and_stop").evidence.session_id);
     const unconfirmed = matrix.rows.find(({ id }) => id === "operator.cancel_unconfirmed_reconcile");
-    assert.equal(unconfirmed.status, "incompatible");
+    assert.equal(unconfirmed.status, "pass");
     assert.equal(unconfirmed.gates.includes("M2"), true);
-    assert.equal(unconfirmed.incompatibility.type, "capability_unverified");
+    assert.equal(unconfirmed.evidence.cancel_intent_recorded_before_process_death, true);
+    assert.equal(unconfirmed.evidence.process_died, true);
+    assert.equal(unconfirmed.evidence.dead_abort_unconfirmed, true);
+    assert.equal(unconfirmed.evidence.reconnected_session_id, unconfirmed.evidence.session_id);
+    assert.equal(unconfirmed.evidence.runtime_stopped, true);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
