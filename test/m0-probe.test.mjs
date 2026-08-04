@@ -168,6 +168,7 @@ test("probe reports every M1 prerequisite without inferred success", () => {
       "commands.exact_admission",
       "skills.resolved",
       "operator.cancel_and_observe",
+      "operator.cancel_unconfirmed_reconcile",
     ];
 
     assert.deepEqual(matrix.rows.map(({ id }) => id), required);
@@ -243,6 +244,11 @@ test("probe confirms M2 operator cancellation and later session observation", ()
     assert.equal(row.evidence.cancel_confirmed, true);
     assert.equal(row.evidence.runtime_stopped, true);
     assert.equal(row.evidence.observed_session_id, row.evidence.session_id);
+    assert.notEqual(row.evidence.session_id, matrix.rows.find(({ id }) => id === "deadline.abort_and_stop").evidence.session_id);
+    const unconfirmed = matrix.rows.find(({ id }) => id === "operator.cancel_unconfirmed_reconcile");
+    assert.equal(unconfirmed.status, "incompatible");
+    assert.equal(unconfirmed.gates.includes("M2"), true);
+    assert.equal(unconfirmed.incompatibility.type, "capability_unverified");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -390,7 +396,7 @@ test("probe emits a fail-closed matrix when setup fails", () => {
     { cwd: new URL("..", import.meta.url), encoding: "utf8" },
   );
   const matrix = JSON.parse(stdout);
-  assert.equal(matrix.rows.length, 13);
+  assert.equal(matrix.rows.length, 14);
   assert.ok(matrix.rows.every(({ status, incompatibility }) =>
     status === "incompatible" && incompatibility?.type === "runtime_unreachable"));
 });
@@ -420,11 +426,12 @@ test("complete M1 capability matrix passes in one disposable fixture", () => {
     );
     const matrix = JSON.parse(stdout);
 
-    assert.equal(matrix.rows.length, 13);
+    assert.equal(matrix.rows.length, 14);
     assert.deepEqual(
-      matrix.rows.filter(({ status }) => status !== "pass"),
+      matrix.rows.filter(({ gates, status }) => gates.includes("M1") && status !== "pass"),
       [],
     );
+    assert.equal(matrix.rows.find(({ id }) => id === "operator.cancel_unconfirmed_reconcile").status, "incompatible");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

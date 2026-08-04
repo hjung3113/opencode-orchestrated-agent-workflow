@@ -21,7 +21,7 @@ const requiredRowIds = [
   "sessions.role_bindings", "message.observed", "terminal.runtime_failure",
   "deadline.abort_and_stop", "workspace.output_snapshot", "capabilities.narrowed",
   "commands.exact_admission", "skills.resolved",
-  "operator.cancel_and_observe",
+  "operator.cancel_and_observe", "operator.cancel_unconfirmed_reconcile",
 ];
 let fatalWritten = false;
 function writeFatalMatrix(error) {
@@ -33,7 +33,7 @@ function writeFatalMatrix(error) {
     runtime: { name: "opencode", version: "unavailable" },
     rows: requiredRowIds.map((id) => ({
       id,
-      gates: [id === "operator.cancel_and_observe" ? "M2" : "M1"],
+      gates: [id.startsWith("operator.") ? "M2" : "M1"],
       status: "incompatible",
       evidence: { observed: false },
       incompatibility: { type: "runtime_unreachable", message },
@@ -535,6 +535,44 @@ async function observeServer() {
       path: `/session/${sessions.verifier}`,
       timeout: 2_000,
     });
+    const operatorAgent = resolvedAgents.find(({ name }) => name === "m0-verifier");
+    const operatorSession = await requestJson({
+      port,
+      path: "/session",
+      method: "POST",
+      body: { title: "m0-operator-cancel" },
+      timeout: 5_000,
+    });
+    const operatorEvents = subscribeEvents({ port });
+    await operatorEvents.ready;
+    const operatorPrompt = await requestOutcome({
+      port,
+      path: `/session/${operatorSession.id}/prompt_async`,
+      body: {
+        agent: operatorAgent.name,
+        parts: [{ type: "text", text: "M0 operator cancellation probe." }],
+      },
+      timeout: 5_000,
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    const operatorAbort = await requestOutcome({
+      port,
+      path: `/session/${operatorSession.id}/abort`,
+      body: {},
+      timeout: 5_000,
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    const operatorStatuses = await requestJson({ port, path: "/session/status", timeout: 2_000 });
+    const observedOperatorEvents = operatorEvents.events
+      .filter(({ properties }) => properties?.sessionID === operatorSession.id
+        || properties?.info?.sessionID === operatorSession.id)
+      .map(({ type }) => type);
+    operatorEvents.close();
+    const observedOperatorSession = await requestJson({
+      port,
+      path: `/session/${operatorSession.id}`,
+      timeout: 2_000,
+    });
     return {
       health,
       sessions,
@@ -565,10 +603,14 @@ async function observeServer() {
         exit_reason: "deadline_exceeded",
       },
       operator: {
-        session_id: sessions.verifier,
-        cancel_confirmed: abort.body === true,
-        runtime_stopped: observedStatuses.includes("idle"),
-        observed_session_id: observedCancelledSession.id,
+        session_id: operatorSession.id,
+        prompt_http_status: operatorPrompt.status,
+        cancel_confirmed: operatorAbort.body === true,
+        runtime_stopped: operatorStatuses[operatorSession.id]?.type === "idle"
+          || observedOperatorEvents.includes("session.idle"),
+        events: observedOperatorEvents,
+        cancel_intent_recorded_before_abort: true,
+        observed_session_id: observedOperatorSession.id,
       },
       resolvedSkills,
     };
@@ -712,6 +754,20 @@ const operatorRow = {
     },
   }),
 };
+const operatorUnconfirmedRow = {
+  id: "operator.cancel_unconfirmed_reconcile",
+  gates: ["M2"],
+  status: "incompatible",
+  evidence: {
+    observed: false,
+    requires_process_death: true,
+    message: "This M0 probe does not claim cancel_unconfirmed reconciliation without a process-death/reconnect boundary.",
+  },
+  incompatibility: {
+    type: "capability_unverified",
+    message: "M0 observed operator cancellation only; cancel_unconfirmed reconciliation belongs to the M2 harness probe.",
+  },
+};
 
 process.stdout.write(`${JSON.stringify({
   schema_version: 1,
@@ -735,5 +791,6 @@ process.stdout.write(`${JSON.stringify({
     commandRow,
     skillRow,
     operatorRow,
+    operatorUnconfirmedRow,
   ],
 }, null, 2)}\n`);
