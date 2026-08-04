@@ -3,6 +3,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import {
   existsSync,
   lstatSync,
@@ -343,7 +344,7 @@ function requestJson({ port, path, method = "GET", body, timeout = 2_000 }) {
   });
 }
 
-function requestOutcome({ port, path, body, timeout = 2_000, onSent, onResponse }) {
+function requestOutcome({ port, path, body, timeout = 2_000, onFinish, onResponse }) {
   return new Promise((resolvePromise, rejectPromise) => {
     const encoded = JSON.stringify(body);
     const req = request({
@@ -367,9 +368,9 @@ function requestOutcome({ port, path, body, timeout = 2_000, onSent, onResponse 
     });
     req.setTimeout(timeout, () => req.destroy(new Error(`OpenCode HTTP timeout: ${path}`)));
     req.on("error", rejectPromise);
+    if (onFinish) req.once("finish", onFinish);
     req.write(encoded);
     req.end();
-    onSent?.();
   });
 }
 
@@ -576,45 +577,64 @@ async function observeServer() {
       body: { title: "m0-operator-cancel-unconfirmed" },
       timeout: 5_000,
     });
-    const reconcilePrompt = await requestOutcome({
+    const reconcilePrompt = requestOutcome({
       port,
-      path: `/session/${reconcileSession.id}/prompt_async`,
+      path: `/session/${reconcileSession.id}/message`,
       body: {
         agent: operatorAgent.name,
         parts: [{ type: "text", text: "M0 process-death cancel reconciliation probe. Keep this session active until cancellation is requested." }],
       },
       timeout: 5_000,
-    });
+    }).then(
+      (response) => ({ response }),
+      (error) => ({ error }),
+    );
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     const reconcileStatusesBeforeCancel = await requestJson({ port, path: "/session/status", timeout: 2_000 });
     const runtimeActiveBeforeCancel = ["busy", "running"].includes(reconcileStatusesBeforeCancel[reconcileSession.id]?.type);
-    let cancelRequestSentBeforeProcessDeath = false;
-    let abortResponseBeforeProcessDeath = false;
-    let processDeathRequested = false;
+    let cancelRequestFinishedAtMs = null;
+    let abortResponseAtMs = null;
+    let resolveCancelRequestFinished;
+    let cancelRequestFinishedTimer;
+    const cancelRequestFinished = new Promise((resolvePromise) => {
+      resolveCancelRequestFinished = resolvePromise;
+      cancelRequestFinishedTimer = setTimeout(resolvePromise, 500);
+    });
     const cancelRequest = requestOutcome({
       port,
       path: `/session/${reconcileSession.id}/abort`,
       body: {},
       timeout: 500,
-      onSent: () => { cancelRequestSentBeforeProcessDeath = true; },
-      onResponse: () => {
-        if (!processDeathRequested) abortResponseBeforeProcessDeath = true;
+      onFinish: () => {
+        clearTimeout(cancelRequestFinishedTimer);
+        cancelRequestFinishedAtMs = performance.now();
+        resolveCancelRequestFinished();
       },
+      onResponse: () => { abortResponseAtMs = performance.now(); },
     }).then(
       (response) => ({ response }),
       (error) => ({ error }),
     );
-    const cancelRequestWasSent = cancelRequestSentBeforeProcessDeath;
-    processDeathRequested = true;
-    child.kill("SIGKILL");
+    await cancelRequestFinished;
+    const processDeathRequestedAtMs = await new Promise((resolvePromise) => {
+      setImmediate(() => {
+        const requestedAtMs = performance.now();
+        child.kill("SIGKILL");
+        resolvePromise(requestedAtMs);
+      });
+    });
     const processDied = await Promise.race([
       childExit.then(() => true),
       new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 2_000)),
     ]);
     const cancelOutcome = await cancelRequest;
     const cancelRequestError = cancelOutcome.error?.message;
+    const cancelRequestFinishedBeforeProcessDeath = cancelRequestFinishedAtMs !== null
+      && cancelRequestFinishedAtMs < processDeathRequestedAtMs;
+    const abortResponseBeforeProcessDeath = abortResponseAtMs !== null
+      && abortResponseAtMs <= processDeathRequestedAtMs;
     const cancelUnconfirmedBeforeProcessDeath = runtimeActiveBeforeCancel
-      && cancelRequestWasSent
+      && cancelRequestFinishedBeforeProcessDeath
       && !abortResponseBeforeProcessDeath
       && processDied;
     child = startServer();
@@ -675,12 +695,15 @@ async function observeServer() {
       },
       operator_reconcile: {
         session_id: reconcileSession.id,
-        prompt_http_status: reconcilePrompt.status,
+        prompt_http_status: reconcilePrompt.response?.status ?? null,
         runtime_active_before_cancel: runtimeActiveBeforeCancel,
         status_before_cancel: reconcileStatusesBeforeCancel[reconcileSession.id]?.type ?? null,
-        cancel_request_sent_before_process_death: cancelRequestWasSent,
+        cancel_request_finished_before_process_death: cancelRequestFinishedBeforeProcessDeath,
+        cancel_request_finished_at_ms: cancelRequestFinishedAtMs,
+        process_death_requested_at_ms: processDeathRequestedAtMs,
         cancel_unconfirmed_before_process_death: cancelUnconfirmedBeforeProcessDeath,
         abort_response_before_process_death: abortResponseBeforeProcessDeath,
+        abort_response_at_ms: abortResponseAtMs,
         process_died: processDied,
         cancel_request_error: cancelRequestError,
         reconnect_health: reconnectHealth,
@@ -834,7 +857,12 @@ const operatorRow = {
   }),
 };
 const operatorReconcileObserved = runtimeObservation.operator_reconcile.runtime_active_before_cancel
-  && runtimeObservation.operator_reconcile.cancel_request_sent_before_process_death
+  && ["busy", "running"].includes(runtimeObservation.operator_reconcile.status_before_cancel)
+  && runtimeObservation.operator_reconcile.cancel_request_finished_before_process_death
+  && typeof runtimeObservation.operator_reconcile.cancel_request_finished_at_ms === "number"
+  && typeof runtimeObservation.operator_reconcile.process_death_requested_at_ms === "number"
+  && runtimeObservation.operator_reconcile.cancel_request_finished_at_ms
+    < runtimeObservation.operator_reconcile.process_death_requested_at_ms
   && runtimeObservation.operator_reconcile.cancel_unconfirmed_before_process_death
   && runtimeObservation.operator_reconcile.abort_response_before_process_death === false
   && runtimeObservation.operator_reconcile.process_died

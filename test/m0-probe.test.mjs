@@ -250,7 +250,10 @@ test("probe confirms M2 operator cancellation and later session observation", ()
     assert.equal(unconfirmed.gates.includes("M2"), true);
     assert.equal(unconfirmed.evidence.runtime_active_before_cancel, true);
     assert.equal(unconfirmed.evidence.status_before_cancel, "busy");
-    assert.equal(unconfirmed.evidence.cancel_request_sent_before_process_death, true);
+    assert.equal(unconfirmed.evidence.cancel_request_finished_before_process_death, true);
+    assert.equal(typeof unconfirmed.evidence.cancel_request_finished_at_ms, "number");
+    assert.equal(typeof unconfirmed.evidence.process_death_requested_at_ms, "number");
+    assert.ok(unconfirmed.evidence.process_death_requested_at_ms > unconfirmed.evidence.cancel_request_finished_at_ms);
     assert.equal(unconfirmed.evidence.cancel_unconfirmed_before_process_death, true);
     assert.equal(unconfirmed.evidence.abort_response_before_process_death, false);
     assert.equal(unconfirmed.evidence.process_died, true);
