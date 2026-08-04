@@ -2168,8 +2168,8 @@ export async function runLocalChange({
     cloneWorkspace(workspace, taskWorkspace);
     let taskBaseline = workspaceSnapshot(taskWorkspace);
     if (continuingResult) {
-      const resultRef = existingState.tasks["implementation-1"].artifact_ref;
-      const resultArtifact = resolveArtifactReference(ctx, resultRef);
+      const resultArtifactRef = existingState.tasks["implementation-1"].artifact_ref;
+      const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
       const resultRepo = join(runDir, "result-repository.git");
       if (!existsSync(resultRepo) || !resultArtifact.result_commit) {
         throw new AttemptFailure("runtime_reconciliation_required", "published Result cannot be reconstructed from its durable Result repository");
