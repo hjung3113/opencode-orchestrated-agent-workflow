@@ -248,10 +248,14 @@ test("probe confirms M2 operator cancellation and later session observation", ()
     const unconfirmed = matrix.rows.find(({ id }) => id === "operator.cancel_unconfirmed_reconcile");
     assert.equal(unconfirmed.status, "pass");
     assert.equal(unconfirmed.gates.includes("M2"), true);
-    assert.equal(unconfirmed.evidence.cancel_intent_recorded_before_process_death, true);
+    assert.equal(unconfirmed.evidence.runtime_active_before_cancel, true);
+    assert.equal(unconfirmed.evidence.status_before_cancel, "busy");
+    assert.equal(unconfirmed.evidence.cancel_request_sent_before_process_death, true);
+    assert.equal(unconfirmed.evidence.cancel_unconfirmed_before_process_death, true);
+    assert.equal(unconfirmed.evidence.abort_response_before_process_death, false);
     assert.equal(unconfirmed.evidence.process_died, true);
-    assert.equal(unconfirmed.evidence.dead_abort_unconfirmed, true);
     assert.equal(unconfirmed.evidence.reconnected_session_id, unconfirmed.evidence.session_id);
+    assert.equal(unconfirmed.evidence.reconnect_abort_confirmed, true);
     assert.equal(unconfirmed.evidence.runtime_stopped, true);
   } finally {
     rmSync(fixture, { recursive: true, force: true });

@@ -343,7 +343,7 @@ function requestJson({ port, path, method = "GET", body, timeout = 2_000 }) {
   });
 }
 
-function requestOutcome({ port, path, body, timeout = 2_000 }) {
+function requestOutcome({ port, path, body, timeout = 2_000, onSent, onResponse }) {
   return new Promise((resolvePromise, rejectPromise) => {
     const encoded = JSON.stringify(body);
     const req = request({
@@ -356,6 +356,7 @@ function requestOutcome({ port, path, body, timeout = 2_000 }) {
         "content-length": Buffer.byteLength(encoded),
       },
     }, (response) => {
+      onResponse?.(response);
       response.setEncoding("utf8");
       let raw = "";
       response.on("data", (chunk) => { raw += chunk; });
@@ -368,6 +369,7 @@ function requestOutcome({ port, path, body, timeout = 2_000 }) {
     req.on("error", rejectPromise);
     req.write(encoded);
     req.end();
+    onSent?.();
   });
 }
 
@@ -579,29 +581,42 @@ async function observeServer() {
       path: `/session/${reconcileSession.id}/prompt_async`,
       body: {
         agent: operatorAgent.name,
-        parts: [{ type: "text", text: "M0 process-death cancel reconciliation probe." }],
+        parts: [{ type: "text", text: "M0 process-death cancel reconciliation probe. Keep this session active until cancellation is requested." }],
       },
       timeout: 5_000,
     });
-    const cancelIntentRecordedBeforeProcessDeath = reconcilePrompt.status === 204;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    const reconcileStatusesBeforeCancel = await requestJson({ port, path: "/session/status", timeout: 2_000 });
+    const runtimeActiveBeforeCancel = ["busy", "running"].includes(reconcileStatusesBeforeCancel[reconcileSession.id]?.type);
+    let cancelRequestSentBeforeProcessDeath = false;
+    let abortResponseBeforeProcessDeath = false;
+    let processDeathRequested = false;
+    const cancelRequest = requestOutcome({
+      port,
+      path: `/session/${reconcileSession.id}/abort`,
+      body: {},
+      timeout: 500,
+      onSent: () => { cancelRequestSentBeforeProcessDeath = true; },
+      onResponse: () => {
+        if (!processDeathRequested) abortResponseBeforeProcessDeath = true;
+      },
+    }).then(
+      (response) => ({ response }),
+      (error) => ({ error }),
+    );
+    const cancelRequestWasSent = cancelRequestSentBeforeProcessDeath;
+    processDeathRequested = true;
     child.kill("SIGKILL");
     const processDied = await Promise.race([
       childExit.then(() => true),
       new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 2_000)),
     ]);
-    let deadAbortUnconfirmed = false;
-    let deadAbortError;
-    try {
-      await requestOutcome({
-        port,
-        path: `/session/${reconcileSession.id}/abort`,
-        body: {},
-        timeout: 500,
-      });
-    } catch (error) {
-      deadAbortUnconfirmed = true;
-      deadAbortError = error.message;
-    }
+    const cancelOutcome = await cancelRequest;
+    const cancelRequestError = cancelOutcome.error?.message;
+    const cancelUnconfirmedBeforeProcessDeath = runtimeActiveBeforeCancel
+      && cancelRequestWasSent
+      && !abortResponseBeforeProcessDeath
+      && processDied;
     child = startServer();
     childExit = once(child, "exit");
     const reconnectHealth = await waitForHealth();
@@ -617,9 +632,8 @@ async function observeServer() {
       timeout: 5_000,
     });
     const reconnectedStatuses = await requestJson({ port, path: "/session/status", timeout: 2_000 });
-    const abortConfirmedAfterReconnect = reconnectAbort.body === true;
-    const runtimeStopped = abortConfirmedAfterReconnect
-      || reconnectedStatuses[reconcileSession.id]?.type === "idle";
+    const abortConfirmedAfterReconnect = reconnectAbort.status === 200 && reconnectAbort.body === true;
+    const runtimeStopped = abortConfirmedAfterReconnect;
     return {
       health,
       sessions,
@@ -662,15 +676,18 @@ async function observeServer() {
       operator_reconcile: {
         session_id: reconcileSession.id,
         prompt_http_status: reconcilePrompt.status,
-        cancel_intent_recorded_before_process_death: cancelIntentRecordedBeforeProcessDeath,
+        runtime_active_before_cancel: runtimeActiveBeforeCancel,
+        status_before_cancel: reconcileStatusesBeforeCancel[reconcileSession.id]?.type ?? null,
+        cancel_request_sent_before_process_death: cancelRequestWasSent,
+        cancel_unconfirmed_before_process_death: cancelUnconfirmedBeforeProcessDeath,
+        abort_response_before_process_death: abortResponseBeforeProcessDeath,
         process_died: processDied,
-        dead_abort_unconfirmed: deadAbortUnconfirmed,
-        dead_abort_error: deadAbortError,
+        cancel_request_error: cancelRequestError,
         reconnect_health: reconnectHealth,
         reconnected_session_id: reconnectedSession.id,
         reconnect_abort_status: reconnectAbort.status,
         reconnect_abort_body: reconnectAbort.body,
-        abort_confirmed_after_reconnect: abortConfirmedAfterReconnect,
+        reconnect_abort_confirmed: abortConfirmedAfterReconnect,
         runtime_stopped: runtimeStopped,
         reconnected_status: reconnectedStatuses[reconcileSession.id]?.type ?? null,
       },
@@ -816,11 +833,14 @@ const operatorRow = {
     },
   }),
 };
-const operatorReconcileObserved = runtimeObservation.operator_reconcile.cancel_intent_recorded_before_process_death
+const operatorReconcileObserved = runtimeObservation.operator_reconcile.runtime_active_before_cancel
+  && runtimeObservation.operator_reconcile.cancel_request_sent_before_process_death
+  && runtimeObservation.operator_reconcile.cancel_unconfirmed_before_process_death
+  && runtimeObservation.operator_reconcile.abort_response_before_process_death === false
   && runtimeObservation.operator_reconcile.process_died
-  && runtimeObservation.operator_reconcile.dead_abort_unconfirmed
   && runtimeObservation.operator_reconcile.reconnect_health?.healthy === true
   && runtimeObservation.operator_reconcile.reconnected_session_id === runtimeObservation.operator_reconcile.session_id
+  && runtimeObservation.operator_reconcile.reconnect_abort_confirmed
   && runtimeObservation.operator_reconcile.runtime_stopped;
 const operatorUnconfirmedRow = {
   id: "operator.cancel_unconfirmed_reconcile",
