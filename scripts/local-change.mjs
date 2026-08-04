@@ -1307,8 +1307,15 @@ function resultRefOid(resultRepo, resultRef) {
   return git(resultRepo, ["rev-parse", "--verify", resultRef]).trim();
 }
 
-function snapshotFromResultRef(resultRepo, resultRef) {
-  const base = resultRefOid(resultRepo, resultRef);
+function maybeResultRefOid(resultRepo, resultRef) {
+  try {
+    return resultRefOid(resultRepo, resultRef);
+  } catch {
+    return null;
+  }
+}
+
+function snapshotFromCommit(resultRepo, base) {
   const records = gitRaw(resultRepo, ["ls-tree", "-r", "-z", base]).toString("utf8").split("\0").filter(Boolean);
   const entries = records.map((record) => {
     const [metadata, path] = record.split("\t");
@@ -1322,6 +1329,10 @@ function snapshotFromResultRef(resultRepo, resultRef) {
     return { path, mode: mode === "100755" ? mode : "100644", content_digest: digest(content) };
   }).sort((left, right) => left.path.localeCompare(right.path));
   return { base, entries, digest: digest({ base, entries }) };
+}
+
+function snapshotFromResultRef(resultRepo, resultRef) {
+  return snapshotFromCommit(resultRepo, resultRefOid(resultRepo, resultRef));
 }
 
 function initialRun({ runId, bootstrapRef, idempotencyKey, binding, workspaceBaseline, executionContext, runBudget = budget }) {
@@ -1344,6 +1355,148 @@ function initialRun({ runId, bootstrapRef, idempotencyKey, binding, workspaceBas
     runtime_bindings: [binding],
     transitions: [],
   });
+}
+
+function preparedPromotion(ctx, {
+  resultRepo,
+  resultCommit,
+  resultRefName,
+  resultArtifactRef,
+  reviewRef,
+  workerSnapshot,
+  promotedResources,
+  taskWorkspace,
+}) {
+  const path = "artifacts/promotions/promotion-1.json";
+  if (existsSync(join(ctx.runDir, path))) {
+    const promotion = JSON.parse(readFileSync(join(ctx.runDir, path), "utf8"));
+    return { promotionRef: reference(promotion.artifact_id, path, promotion), promotion };
+  }
+  crashAt(ctx, "before_promotion_preparation");
+  const expectedRefOid = maybeResultRefOid(resultRepo, resultRefName);
+  const promotedSnapshot = snapshotFromCommit(resultRepo, resultCommit).digest;
+  if (promotedSnapshot !== workerSnapshot.digest) throw new AttemptFailure("promotion_snapshot_mismatch", "prepared Promotion snapshot mismatch");
+  const promotion = envelope({
+    kind: "promotion",
+    artifactId: "promotion-1",
+    runId: ctx.runId,
+    producer: kernelProducer(),
+    inputRefs: [resultArtifactRef, reviewRef],
+    createdAt: now(),
+    verified_snapshot: workerSnapshot.digest,
+    result_ref: resultRefName,
+    expected_ref_oid: expectedRefOid,
+    promoted_ref_oid: resultCommit,
+    promoted_resources: promotedResources,
+    promoted_snapshot: promotedSnapshot,
+  });
+  const promotionRef = writeArtifact(ctx, path, promotion);
+  ctx.hooks?.afterPromotionPreparation?.({
+    runDir: ctx.runDir,
+    resultRepo,
+    resultRefName,
+    resultCommit,
+    promotionRef,
+    taskWorkspace,
+  });
+  crashAt(ctx, "after_promotion_preparation");
+  return { promotionRef, promotion };
+}
+
+function reconcilePromotion(ctx, {
+  resultRepo,
+  resultRefName,
+  resultCommit,
+  promotionRef,
+  taskWorkspace,
+}) {
+  const promotion = resolveArtifactReference(ctx, promotionRef);
+  const currentRefOid = maybeResultRefOid(resultRepo, resultRefName);
+  if (currentRefOid !== promotion.expected_ref_oid && currentRefOid !== promotion.promoted_ref_oid) {
+    throw new AttemptFailure("result_ref_drift", "Result Ref is neither the prepared expected value nor the prepared promoted value");
+  }
+  if (currentRefOid === promotion.expected_ref_oid) {
+    crashAt(ctx, "before_result_ref_update");
+    ctx.hooks?.beforeResultRefCas?.({ resultRepo, resultRefName, resultCommit, taskWorkspace });
+    try {
+      git(resultRepo, ["update-ref", resultRefName, resultCommit, promotion.expected_ref_oid ?? ""]);
+    } catch (error) {
+      throw new AttemptFailure("result_ref_drift", `Result Ref CAS failed: ${error.message}`);
+    }
+    ctx.hooks?.afterResultRefCas?.({ resultRepo, resultRefName, resultCommit, taskWorkspace });
+    crashAt(ctx, "after_result_ref_update");
+  }
+  const promotedRefOid = maybeResultRefOid(resultRepo, resultRefName);
+  if (promotedRefOid !== promotion.promoted_ref_oid) {
+    throw new AttemptFailure("result_ref_drift", "Result Ref changed during Promotion reconciliation");
+  }
+  const promotedSnapshot = snapshotFromResultRef(resultRepo, resultRefName).digest;
+  if (promotedSnapshot !== promotion.promoted_snapshot
+    || promotedSnapshot !== promotion.verified_snapshot) {
+    throw new AttemptFailure("promotion_snapshot_mismatch", "Promotion tree does not match the verified snapshot");
+  }
+  return { promotion, promotedRefOid, promotedSnapshot };
+}
+
+function nextOutcomePath(runDir) {
+  const outcomeDir = join(runDir, "artifacts/outcomes");
+  if (!existsSync(outcomeDir)) return { number: 1, path: "artifacts/outcomes/0001.json" };
+  const numbers = readdirSync(outcomeDir)
+    .filter((file) => /^\d{4}\.json$/.test(file))
+    .map((file) => Number(file.slice(0, -5)));
+  const number = (numbers.length === 0 ? 0 : Math.max(...numbers)) + 1;
+  return { number, path: `artifacts/outcomes/${String(number).padStart(4, "0")}.json` };
+}
+
+function receiptFor(ctx, state, {
+  requestRef,
+  graphRef,
+  resultRef,
+  reviewRef,
+  promotionRef,
+  promotedSnapshot,
+}) {
+  const existing = latestOutcome(ctx.runDir);
+  if (existing?.outcome_kind === "receipt") {
+    const path = `artifacts/outcomes/${readdirSync(join(ctx.runDir, "artifacts/outcomes")).find((file) => file.endsWith(".json") && JSON.parse(readFileSync(join(ctx.runDir, "artifacts/outcomes", file), "utf8")).artifact_id === existing.artifact_id)}`;
+    return { state, outcome: existing, outcomeRef: reference(existing.artifact_id, path, existing) };
+  }
+  const refs = [
+    requestRef,
+    graphRef,
+    resultRef,
+    reviewRef,
+    promotionRef,
+    ...ctx.admittedRefs,
+  ].filter(Boolean);
+  const uniqueRefs = [...new Map(refs.map((ref) => [ref.path, ref])).values()];
+  const outcomePath = nextOutcomePath(ctx.runDir);
+  const receipt = envelope({
+    kind: "outcome",
+    artifactId: `outcome-${String(outcomePath.number).padStart(4, "0")}`,
+    runId: ctx.runId,
+    producer: kernelProducer(),
+    inputRefs: uniqueRefs,
+    createdAt: now(),
+    preset: "local-change@1",
+    effective_policy: state.effective_policy,
+    outcome_kind: "receipt",
+    summary: "Verified local-change result preserved under the harness-owned Result Ref.",
+    artifact_refs: uniqueRefs,
+    limitations: ["v1 preserved a harness-owned Result Ref; it did not apply changes to the user branch."],
+    accepted_snapshot: promotedSnapshot,
+    verified_snapshot: promotedSnapshot,
+    promoted_snapshot: promotedSnapshot,
+    promotion_ref: promotionRef,
+  });
+  const outcomeRef = writeArtifact(ctx, outcomePath.path, receipt);
+  const next = state.lifecycle_state === "completed"
+    ? state
+    : applyTransition(ctx, state, "receipt_admitted", {
+      lifecycle_state: "completed",
+      active_graph_ref: graphRef,
+    }, [outcomeRef, promotionRef]);
+  return { state: next, outcome: receipt, outcomeRef };
 }
 
 function latestOutcome(runDir) {
@@ -1375,8 +1528,39 @@ export function resumeRun(runDir) {
   validateProtocol(state, "run state");
   resolveArtifactReferences({ runDir }, state);
   const inspect = inspectRun(runDir);
-  if (["completed", "cancelled"].includes(state.lifecycle_state)) {
+  if (["completed", "cancelled", "blocked"].includes(state.lifecycle_state)) {
     return { ...inspect, next_action: null };
+  }
+  const promotionPath = "artifacts/promotions/promotion-1.json";
+  if (existsSync(join(runDir, promotionPath)) && existsSync(join(runDir, "result-repository.git"))) {
+    const promotion = JSON.parse(readFileSync(join(runDir, promotionPath), "utf8"));
+    const promotionRef = reference(promotion.artifact_id, promotionPath, promotion);
+    const ctx = { runDir, runId: state.run_id, admittedRefs: [], hooks: {} };
+    ctx.admittedRefs.push(promotionRef);
+    const resultRef = state.tasks?.["implementation-1"]?.artifact_ref;
+    const reviewRef = state.tasks?.["verification-1"]?.artifact_ref;
+    try {
+      const { promotedSnapshot } = reconcilePromotion(ctx, {
+        resultRepo: join(runDir, "result-repository.git"),
+        resultRefName: promotion.result_ref,
+        resultCommit: promotion.promoted_ref_oid,
+        promotionRef,
+        taskWorkspace: null,
+      });
+      const { state: completedState } = receiptFor(ctx, state, {
+        requestRef: state.request_ref,
+        graphRef: state.active_graph_ref,
+        resultRef,
+        reviewRef,
+        promotionRef,
+        promotedSnapshot,
+      });
+      return { ...inspectRun(runDir), next_action: null, lifecycle_state: completedState.lifecycle_state };
+    } catch (error) {
+      if (!error.code) throw error;
+      recordFailure(ctx, state, error);
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
   }
   return {
     ...inspect,
@@ -1862,57 +2046,35 @@ export async function runLocalChange({
     }, [verifierRuntimeRef, reviewRef]);
 
     const resultRepo = join(runDir, "result-repository.git");
-    git(runDir, ["init", "--bare", "-q", resultRepo]);
+    if (!existsSync(resultRepo)) git(runDir, ["init", "--bare", "-q", resultRepo]);
     git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
     const resultRefName = `refs/orchestrator/results/${runId}`;
-    git(resultRepo, ["update-ref", resultRefName, resultCommit, ""]);
-    await hooks.afterResultRefCas?.({ resultRepo, resultRefName, resultCommit, taskWorkspace });
-    const promotedRefOid = resultRefOid(resultRepo, resultRefName);
-    if (promotedRefOid !== resultCommit) throw new Error("result_ref_drift");
-    const promotedSnapshot = snapshotFromResultRef(resultRepo, resultRefName).digest;
-    if (promotedSnapshot !== workerSnapshot.digest) {
-      throw new Error("Promotion snapshot mismatch");
-    }
-    const promotion = envelope({
-      kind: "promotion",
-      artifactId: "promotion-1",
-      runId,
-      producer: kernelProducer(),
-      inputRefs: [resultRef, reviewRef],
-      createdAt: now(),
-      verified_snapshot: workerSnapshot.digest,
-      result_ref: resultRefName,
-      expected_ref_oid: null,
-      promoted_ref_oid: promotedRefOid,
-      promoted_resources: [targetFile],
-      promoted_snapshot: promotedSnapshot,
+    const { promotionRef } = preparedPromotion(ctx, {
+      resultRepo,
+      resultCommit,
+      resultRefName,
+      resultArtifactRef: resultRef,
+      reviewRef,
+      workerSnapshot,
+      promotedResources: [targetFile],
+      taskWorkspace,
     });
-    const promotionRef = writeArtifact(ctx, "artifacts/promotions/promotion-1.json", promotion);
-    const receipt = envelope({
-      kind: "outcome",
-      artifactId: "outcome-0001",
-      runId,
-      producer: kernelProducer(),
-      inputRefs: [requestRef, graphOneRef, graphTwoRef, resultRef, reviewRef, promotionRef],
-      createdAt: now(),
-      preset: "local-change@1",
-      effective_policy: effectivePolicy,
-      outcome_kind: "receipt",
-      summary: "Verified local-change result preserved under the harness-owned Result Ref.",
-      artifact_refs: [requestRef, graphOneRef, graphTwoRef, implementationPacketRef, resultRef, verificationPacketRef, reviewRef, promotionRef],
-      limitations: ["v1 preserved a harness-owned Result Ref; it did not apply changes to the user branch."],
-      accepted_snapshot: workerSnapshot.digest,
-      verified_snapshot: workerSnapshot.digest,
-      promoted_snapshot: promotedSnapshot,
-      promotion_ref: promotionRef,
+    const { promotedRefOid, promotedSnapshot } = reconcilePromotion(ctx, {
+      resultRepo,
+      resultRefName,
+      resultCommit,
+      promotionRef,
+      taskWorkspace,
     });
-    const outcomeRef = writeArtifact(ctx, "artifacts/outcomes/0001.json", receipt);
-    state = applyTransition(ctx, state, "receipt_admitted", {
-      lifecycle_state: "completed",
-      active_graph_ref: graphTwoRef,
-      runtime_bindings: state.runtime_bindings,
-    }, [outcomeRef, promotionRef]);
-    writeRunState(ctx, state);
+    const { state: completedState, outcomeRef } = receiptFor(ctx, state, {
+      requestRef,
+      graphRef: graphTwoRef,
+      resultRef,
+      reviewRef,
+      promotionRef,
+      promotedSnapshot,
+    });
+    state = completedState;
     const finalTarget = workspaceSnapshot(workspace);
     const finalStatus = gitStatus(workspace);
     const finalBranch = git(workspace, ["branch", "--show-current"]).trim();
@@ -1931,7 +2093,7 @@ export async function runLocalChange({
       inspect: inspectRun(runDir),
     };
   } catch (error) {
-    await recordFailure(ctx, state, error);
+    if (error.code !== "simulated_crash") await recordFailure(ctx, state, error);
     throw error;
   } finally {
     await adapter?.stop();

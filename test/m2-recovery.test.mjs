@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { cancelRun, digest, runLocalChange } from "../scripts/local-change.mjs";
+import { cancelRun, digest, resumeRun, runLocalChange } from "../scripts/local-change.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -186,6 +186,64 @@ test("cancel_unconfirmed is durable and never permits successor dispatch", async
     const cancellation = readdirSync(join(result.run_dir, "artifacts/runtime")).find((name) => name.includes("cancel"));
     assert.ok(cancellation);
     assert.equal(JSON.parse(readFileSync(join(result.run_dir, "artifacts/runtime", cancellation))).exit_reason, "cancel_unconfirmed");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("prepared Promotion resumes across absent, committed, and conflicting Result Ref states", async () => {
+  for (const crashAt of ["after_promotion_preparation", "after_result_ref_update"]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      let run;
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => new Runtime(options),
+        hooks: { crashAt },
+      }), /simulated process death/);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const prepared = JSON.parse(readFileSync(join(runDir, "artifacts/promotions/promotion-1.json")));
+      assert.equal(prepared.expected_ref_oid, null);
+      run = resumeRun(runDir);
+      assert.equal(run.lifecycle_state, "completed");
+      assert.equal(run.next_action, null);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+      assert.equal(resumeRun(runDir).lifecycle_state, "completed");
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json"))).outcome_kind, "receipt");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+
+  const { workspace, runRoot } = fixture();
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => new Runtime(options),
+      hooks: { crashAt: "after_promotion_preparation" },
+    }), /simulated process death/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const promotion = JSON.parse(readFileSync(join(runDir, "artifacts/promotions/promotion-1.json")));
+    const tree = git(join(runDir, "result-repository.git"), ["rev-parse", `${promotion.promoted_ref_oid}^{tree}`]).trim();
+    const drift = execFileSync("git", ["commit-tree", tree, "-m", "drift"], {
+      cwd: join(runDir, "result-repository.git"),
+      encoding: "utf8",
+      env: { ...process.env, GIT_AUTHOR_NAME: "M2 Drift", GIT_AUTHOR_EMAIL: "m2@example.invalid", GIT_COMMITTER_NAME: "M2 Drift", GIT_COMMITTER_EMAIL: "m2@example.invalid" },
+    }).trim();
+    git(join(runDir, "result-repository.git"), ["update-ref", `refs/orchestrator/results/${runId}`, drift]);
+    const resumed = resumeRun(runDir);
+    assert.equal(resumed.lifecycle_state, "blocked");
+    assert.equal(JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/failure.json"))).block_type, "result_ref_drift");
+    assert.equal(git(join(runDir, "result-repository.git"), ["rev-parse", `refs/orchestrator/results/${runId}`]).trim(), drift);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
