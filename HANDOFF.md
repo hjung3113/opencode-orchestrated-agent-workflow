@@ -34,14 +34,15 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current branch is `agent/executable-opencode-harness-design` after local
-  repair commits through `3e25a90`; this handoff update is the next local
+- Current branch is `agent/executable-opencode-harness-design` after task-unit
+  commits `e36eb8d` (one-action Promotion fixture replay) and `270a403` (live
+  M0 cancel-unconfirmed event proof). This handoff update is the next local
   commit. Nothing has been pushed and no PR exists.
-- Current evidence: protocol 4/4, M0 16/16 including the live
-  cancel-request-before-SIGKILL/reconnect probe, full M1 12/12 including a
-  fresh successful real OpenCode trace, M2 22/22, kernel 1/1, JavaScript
-  syntax checks, and `git diff --check` pass. Two simultaneous full M2 runs
-  also completed 22/22 each; no shared-runtime isolation defect reproduced.
+- Final serial evidence: protocol 4/4, M0 16/16, full M1 12/12 including a
+  fresh successful real OpenCode trace, M2 26/26, kernel 1/1, every checked
+  `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
+  `git diff --check` passed. An earlier concurrent M2 run did not reproduce a
+  shared-runtime isolation defect; the final gate was intentionally serial.
 
 ### Next task
 
@@ -99,14 +100,16 @@ performed. Before any future publication:
   confirm `cancelled`. A Run with no active binding also writes a fallback
   Runtime Observation and block rather than remaining `cancelling`.
 - Crash boundaries: deterministic hooks cover before/after Promotion
-  preparation, before/after Result Ref CAS, after Result publication with
-  graph-2 Packet/Graph/dispatch continuation, after Review publication,
-  before/after `receipt_admitted` Run-state replacement, before/after runtime
-  abort, and repeated public CLI resume at each boundary. The deterministic
-  Result-only sequence uses the injectable runtime seam while all artifacts
-  and Run transitions remain file-backed. The Packet/Graph recovery sides are
-  exercised through the public CLI; verifier/Review continuation uses the
-  deterministic injected runtime seam.
+  preparation, before/after Result Ref CAS, Result-only graph-2 Runtime
+  Observation/Packet/Graph/dispatch publication, verifier Runtime publication,
+  Review publication, before/after `receipt_admitted` Run-state replacement,
+  before/after runtime abort, and repeated public CLI resume at each boundary.
+  Each resume admits at most one next action; prepared Review, Promotion, and
+  Receipt replay are duplicate-free. The deterministic Result-only sequence
+  uses the injectable runtime seam while all artifacts and Run transitions
+  remain file-backed. Packet/Graph recovery sides are exercised through the
+  public CLI; verifier/Review continuation uses the deterministic injected
+  runtime seam.
 
 ### Verification
 
@@ -114,21 +117,24 @@ performed. Before any future publication:
 - `npm run test:m0` — 16/16 passed, including the live process-death/reconnect
   cancellation probe.
 - `npm run test:m1` — 12/12 passed, including the real OpenCode trace.
-- `npm run test:m2` — 22/22 passed after the final recovery/provenance repair;
-  two concurrent invocations also passed 22/22 each.
+- `npm run test:m2` — 26/26 passed after the one-action Promotion fixture
+  repair and final M0 changes.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
-- `node --check scripts/local-change.mjs` and
-  `node --check scripts/probe-opencode.mjs` — passed.
+- `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
 - `git diff --check` — passed before this handoff edit; it is rerun after the
   edit and commit.
 
 ### Remaining limitations
 
-- The M0 operator probe now observes a busy session, sends the actual abort
-  request before SIGKILL, records that no abort response arrived before death,
-  reconnects the same session, and requires explicit post-reconnect abort
-  confirmation/stopped evidence. It does not claim recovery of an unrelated
-  external server or a runtime outside the fixture-local binding.
+- The M0 operator probe records the live pre-cancel `busy` status, observes the
+  Node `ClientRequest` `finish` event for the actual abort request, yields one
+  event-loop turn so a real abort-response race can win, and records the raw
+  finish/death timestamps. The focused live sample was
+  `finish=2350.286791`, `process_death=2350.395041`, with no response before
+  death; it then reconnected the same session and confirmed abort 200/true and
+  a stopped runtime. A response observed first makes the row incompatible. It
+  does not claim recovery of an unrelated external server or a runtime outside
+  the fixture-local binding.
 - Public repeated resume of an unresolved cancellation is deliberately
   idempotent when no runtime adapter is reachable: it returns the durable
   `cancel_unconfirmed` checkpoint without rewriting fixed artifacts or
@@ -151,8 +157,8 @@ performed. Before any future publication:
 - The one-action Result-only continuation is deterministic through the
   injectable runtime seam; its immutable Packet/Graph recovery sides are also
   exercised through the public CLI, while live verifier calls remain
-  provider-dependent. No concurrent M2 isolation repair was needed because two
-  full concurrent runs passed.
+  provider-dependent. The final full gate was serial; no concurrent M2
+  isolation repair was evidenced by the earlier concurrent run.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -171,7 +177,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD: repair tip `3e25a90`; this handoff update is the next local commit
+- HEAD: repair tip `270a403`; this handoff update is the next local commit
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
 - no protected uncommitted work was present before this handoff edit
