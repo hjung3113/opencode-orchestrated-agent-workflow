@@ -1304,6 +1304,11 @@ function isRecoverableProviderFailure(error) {
     || /fetch failed|network timeout/i.test(message);
 }
 
+function isAmbiguousProviderFailure(error) {
+  if (["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(error?.code)) return true;
+  return /fetch failed|network timeout|socket hang up/i.test(String(error?.message ?? ""));
+}
+
 export class BudgetExceeded extends Error {
   constructor(kind, limit) {
     super(`${kind} budget exhausted at ${limit}`);
@@ -1351,6 +1356,17 @@ function admitAttemptExecution(ctx, execution, label) {
   }
   if (!execution.snapshot) throw new AttemptFailure("missing_output_snapshot", `${label} produced no Output Snapshot`);
   return execution;
+}
+
+function markRuntimeDispatchFailure(ctx, attemptId, bindingState) {
+  const statePath = join(ctx.runDir, "run.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === attemptId);
+  if (!binding || binding.binding_state === bindingState) return state;
+  return applyTransition(ctx, state, "runtime_dispatch_failed", {
+    runtime_bindings: state.runtime_bindings.map((current) => current.attempt_id === attemptId
+      ? { ...current, binding_state: bindingState } : current),
+  });
 }
 
 async function recordFailure(ctx, state, error) {
@@ -2179,6 +2195,11 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
     } catch (error) {
       if (error.code !== "simulated_crash") {
         if (isRecoverableProviderFailure(error)) {
+          markRuntimeDispatchFailure(
+            reconciliationCtx,
+            "planner-graph-2",
+            isAmbiguousProviderFailure(error) ? "unreachable" : "error",
+          );
           return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
         }
         if (error.code) {
@@ -2813,7 +2834,12 @@ export async function runLocalChange({
         const preparedGraphTwoBinding = state.runtime_bindings.find(({ attempt_id }) =>
           attempt_id === "planner-graph-2");
         let graphTwoExecution;
-        if (preparedGraphTwoBinding) {
+        const graphTwoPrompt = [
+          "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
+          "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
+          "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
+        ].join("\n");
+        if (preparedGraphTwoBinding?.binding_state === "unreachable") {
           if (typeof adapter.reconcileAttempt !== "function") {
             throw new AttemptFailure("runtime_reconciliation_required", "planner-graph-2 has a durable binding but no reconciliation adapter");
           }
@@ -2826,22 +2852,29 @@ export async function runLocalChange({
             beforeSnapshot: workerSnapshot,
           });
         } else {
-          admitBudget(state, "planner_attempt");
-          admitBudget(state, "graph_revision");
-          const graphTwoAttempt = await adapter.newAttempt({
-            role: "planner",
-            attemptId: "planner-graph-2",
-            attempt: 3,
-          });
-          graphTwoBinding = graphTwoAttempt.binding;
-          state = applyTransition(ctx, state, "runtime_dispatch_prepared", {
-            runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
-          }, []);
-          const graphTwoPrompt = [
-            "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the worker Result artifact reference.",
-            "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
-            "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
-          ].join("\n");
+          if (preparedGraphTwoBinding) {
+            graphTwoBinding = preparedGraphTwoBinding;
+          } else {
+            admitBudget(state, "planner_attempt");
+            admitBudget(state, "graph_revision");
+            const graphTwoAttempt = await adapter.newAttempt({
+              role: "planner",
+              attemptId: "planner-graph-2",
+              attempt: 3,
+            });
+            graphTwoBinding = graphTwoAttempt.binding;
+            state = applyTransition(ctx, state, "runtime_dispatch_prepared", {
+              runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
+            }, []);
+            if (continuingResult) {
+              return {
+                run_id: runId,
+                run_dir: runDir,
+                inspect: inspectRun(runDir),
+                checkpoint: "runtime_dispatch_prepared",
+              };
+            }
+          }
           graphTwoExecution = await adapter.execute({
             role: "planner",
             attemptId: "planner-graph-2",
@@ -3114,6 +3147,17 @@ export async function runLocalChange({
       inspect: inspectRun(runDir),
     };
   } catch (error) {
+    const durableState = existsSync(join(runDir, "run.json"))
+      ? JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")) : null;
+    if (isRecoverableProviderFailure(error)
+      && durableState?.runtime_bindings?.some(({ attempt_id }) => attempt_id === "planner-graph-2")
+      && !existsSync(join(runDir, "artifacts/graphs/0002.json"))) {
+      markRuntimeDispatchFailure(
+        ctx,
+        "planner-graph-2",
+        isAmbiguousProviderFailure(error) ? "unreachable" : "error",
+      );
+    }
     if (error.code !== "simulated_crash") await recordFailure(ctx, state, error);
     throw error;
   } finally {

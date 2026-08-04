@@ -686,7 +686,7 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
     after_promotion_preparation: ["result_ref_promoted", "receipt_admitted"],
     before_result_ref_update: ["result_ref_promoted", "receipt_admitted"],
     after_result_ref_update: ["receipt_admitted"],
-    after_result_publication: ["implementation_result_admitted", "graph_revision_2_admitted", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
+    after_result_publication: ["implementation_result_admitted", "runtime_dispatch_prepared", "graph_revision_2_admitted", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
     after_review_publication: ["review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
     "before_run_state_replacement:receipt_admitted": ["receipt_admitted"],
     "after_run_state_replacement:receipt_admitted": [],
@@ -904,6 +904,7 @@ test("recoverable provider failure is a typed durable checkpoint and resumes wit
     const runId = readdirSync(join(runRoot, "runs"))[0];
     const runDir = join(runRoot, "runs", runId);
     await resumeRun(runDir, { workspace, runtime });
+    await resumeRun(runDir, { workspace, runtime });
     const executionSequence = runtime.executionSequence;
     const blocked = await resumeRun(runDir, { workspace, runtime });
     assert.equal(blocked.lifecycle_state, "blocked");
@@ -1023,6 +1024,8 @@ if (args[0] === "--version") {
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       M2_FAKE_PROVIDER_STATE: providerState,
     };
+    const prepared = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(prepared.checkpoint, "runtime_dispatch_prepared");
     const failed = cliResumeWithEnv(workspace, runRoot, runId, env);
     assert.equal(failed.lifecycle_state, "blocked");
     assert.equal(failed.checkpoint, "runtime_provider_failure");
@@ -1151,6 +1154,11 @@ if (args[0] === "--version") {
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       M2_AMBIGUOUS_PROVIDER_STATE: providerState,
     };
+    const prepared = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(prepared.checkpoint, "runtime_dispatch_prepared");
+    assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 0);
+    const preparedState = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.equal(preparedState.runtime_bindings.find(({ attempt_id }) => attempt_id === "planner-graph-2")?.session_id, "session-1");
     const failed = cliResumeWithEnv(workspace, runRoot, runId, env);
     assert.equal(failed.lifecycle_state, "blocked");
     assert.equal(failed.checkpoint, "runtime_provider_failure");
