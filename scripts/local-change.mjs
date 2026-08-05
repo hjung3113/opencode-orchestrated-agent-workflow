@@ -296,6 +296,32 @@ function validateCommandEvidence(ctx, artifact) {
   }
 }
 
+function existingArtifactReference(ctx, artifactId) {
+  const root = join(ctx.runDir, "artifacts");
+  let found = null;
+  const visit = (directory) => {
+    if (!existsSync(directory)) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".json")) continue;
+      const artifact = JSON.parse(readFileSync(fullPath, "utf8"));
+      if (artifact.artifact_id !== artifactId) continue;
+      const path = fullPath.slice(`${ctx.runDir}/`.length);
+      const candidate = reference(artifact.artifact_id, path, artifact);
+      if (found && found.path !== candidate.path) {
+        throw new Error(`duplicate artifact id already exists: ${artifactId}`);
+      }
+      found = candidate;
+    }
+  };
+  visit(root);
+  return found;
+}
+
 export function admitArtifact(ctx, path, artifact, producerActorId = artifact?.producer?.actor_id) {
   validateProtocol(artifact, artifact.kind);
   const storedPath = path.startsWith("artifacts/") ? path : artifactPath(path);
@@ -305,6 +331,14 @@ export function admitArtifact(ctx, path, artifact, producerActorId = artifact?.p
   }
   resolveArtifactReferences(ctx, artifact);
   validateCommandEvidence(ctx, artifact);
+  const existing = existingArtifactReference(ctx, artifact.artifact_id);
+  if (existing) {
+    if (existing.digest !== digest(artifact)) {
+      throw new Error(`artifact id conflicts with an immutable record: ${artifact.artifact_id}`);
+    }
+    ctx.admittedRefs?.push(existing);
+    return existing;
+  }
   if (existsSync(fullPath)) throw new Error(`immutable artifact already exists: ${storedPath}`);
   const actorPath = String(producerActorId).replace(/[^A-Za-z0-9._-]/g, "_");
   const stagingPath = join(ctx.runDir, "staging", actorPath, `${artifact.artifact_id}-${randomUUID()}.json`);

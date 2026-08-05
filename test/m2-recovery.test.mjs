@@ -47,8 +47,11 @@ class Runtime {
       observed_changes: [], observed_output_snapshot: snapshot.digest, external_reads: [], exit_reason: "idle",
     };
   }
-  preflightObservation({ attemptId, role, binding }) {
-    return this.observation({ attemptId, role, binding, snapshot: this.baselineSnapshot });
+  preflightObservation({ attemptId, role, binding, artifactId }) {
+    return {
+      ...this.observation({ attemptId, role, binding, snapshot: this.baselineSnapshot }),
+      artifact_id: artifactId,
+    };
   }
   async execute({ role, attemptId, taskId, attempt, binding, beforeSnapshot }) {
     this.executionSequence += 1;
@@ -623,6 +626,10 @@ test("successful ambiguous reconciliation replays all runtime roles without anot
       assert.equal(new Set(targetPostPhases).size, targetPostPhases.length, targetAttemptId);
       assert.equal(runtime.newAttemptCalls.filter((attemptId) => attemptId === targetAttemptId).length, 1, targetAttemptId);
       assert.deepEqual(runtime.reconcileCalls, [targetAttemptId, targetAttemptId], targetAttemptId);
+      const artifacts = artifactEntries(runDir);
+      const artifactIds = artifacts.map(([, artifact]) => artifact.artifact_id);
+      const duplicateIds = artifactIds.filter((artifactId, index) => artifactIds.indexOf(artifactId) !== index);
+      assert.deepEqual(duplicateIds, [], `${targetAttemptId}: every Run artifact id must be unique`);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(runRoot, { recursive: true, force: true });
