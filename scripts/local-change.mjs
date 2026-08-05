@@ -1369,6 +1369,91 @@ function markRuntimeDispatchFailure(ctx, attemptId, bindingState) {
   });
 }
 
+async function prepareRuntimeAttempt(ctx, state, adapter, spec) {
+  const existing = state.runtime_bindings.find(({ attempt_id }) => attempt_id === spec.attemptId);
+  if (existing) return { state, binding: existing, prepared: false };
+  const attempt = await adapter.newAttempt(spec);
+  const next = applyTransition(ctx, state, "runtime_dispatch_prepared", {
+    runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, attempt.binding),
+  });
+  return { state: next, binding: attempt.binding, prepared: true };
+}
+
+async function executeRuntimeAttempt(ctx, state, adapter, spec) {
+  const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === spec.attemptId);
+  if (!binding) throw new AttemptFailure("missing_runtime_binding", `${spec.label ?? spec.attemptId} has no durable Runtime Binding`);
+  try {
+    const execution = binding.binding_state === "unreachable"
+      ? typeof adapter.reconcileAttempt === "function"
+        ? await adapter.reconcileAttempt({
+          role: spec.role,
+          attemptId: spec.attemptId,
+          taskId: spec.taskId,
+          attempt: spec.attempt,
+          binding,
+          beforeSnapshot: spec.beforeSnapshot,
+        })
+        : (() => {
+          throw new AttemptFailure("runtime_reconciliation_required", `${spec.attemptId} has no reconciliation adapter`);
+        })()
+      : await adapter.execute({
+        role: spec.role,
+        attemptId: spec.attemptId,
+        taskId: spec.taskId,
+        attempt: spec.attempt,
+        binding,
+        prompt: spec.prompt,
+        beforeSnapshot: spec.beforeSnapshot,
+        deadlineSeconds: spec.deadlineSeconds,
+      });
+    return { execution, reconciled: binding.binding_state === "unreachable" };
+  } catch (error) {
+    if (isRecoverableProviderFailure(error)) {
+      markRuntimeDispatchFailure(
+        ctx,
+        spec.attemptId,
+        isAmbiguousProviderFailure(error) ? "unreachable" : "error",
+      );
+    }
+    throw error;
+  }
+}
+
+function admitRuntimeAttempt(ctx, state, execution, spec) {
+  try {
+    return admitAttemptExecution(ctx, execution, spec.label);
+  } catch (error) {
+    const bindingState = execution?.binding?.binding_state;
+    if (bindingState === "unreachable" || execution?.stop_confirmed === false) {
+      markRuntimeDispatchFailure(ctx, spec.attemptId, "unreachable");
+    }
+    throw error;
+  }
+}
+
+async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSnapshot) {
+  const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === attemptId);
+  if (!binding) throw new AttemptFailure("missing_runtime_binding", `${attemptId} has no durable Runtime Binding`);
+  const { execution } = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: binding.role,
+    attemptId: binding.attempt_id,
+    taskId: binding.task_id,
+    attempt: binding.attempt,
+    beforeSnapshot,
+    label: `${binding.role} ${attemptId} reconciliation`,
+  });
+  const observation = {
+    ...execution.observation,
+    artifact_id: `runtime-${attemptId}-reconciled`,
+  };
+  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
+  const next = applyTransition(ctx, state, "runtime_reconciled", {
+    runtime_bindings: state.runtime_bindings.map((current) =>
+      current.attempt_id === attemptId ? { ...execution.binding, binding_state: "idle" } : current),
+  }, [observationRef]);
+  return { state: next, observationRef };
+}
+
 async function recordFailure(ctx, state, error) {
   let durableState = state;
   try {
@@ -2130,6 +2215,33 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
+  const unresolvedBinding = state.runtime_bindings.find(({ binding_state }) => binding_state === "unreachable");
+  if (unresolvedBinding && workspace) {
+    try {
+      const runRoot = dirname(dirname(resolve(runDir)));
+      const resumed = await runLocalChange({
+        workspace,
+        runRoot,
+        existingRunDir: runDir,
+        reconcileOnlyAttemptId: unresolvedBinding.attempt_id,
+        runtimeFactory: runtime ? async (options) => {
+          Object.assign(runtime, options);
+          return runtime;
+        } : undefined,
+        hooks,
+      });
+      return { ...resumed.inspect, next_action: null, ...resumed };
+    } catch (error) {
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        if (error.code) return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+        throw error;
+      }
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
   if ((state.lifecycle_state === "active" || resumableProviderBlock)
     && (state.decision_refs ?? []).length > 0
     && !state.tasks?.["implementation-1"]) {
@@ -2195,11 +2307,6 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
     } catch (error) {
       if (error.code !== "simulated_crash") {
         if (isRecoverableProviderFailure(error)) {
-          markRuntimeDispatchFailure(
-            reconciliationCtx,
-            "planner-graph-2",
-            isAmbiguousProviderFailure(error) ? "unreachable" : "error",
-          );
           return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
         }
         if (error.code) {
@@ -2329,6 +2436,7 @@ export async function runLocalChange({
   requestText,
   runtimeFactory,
   hooks = {},
+  reconcileOnlyAttemptId = null,
   budgetOverride = {},
   existingRunDir = null,
 }) {
@@ -2429,6 +2537,15 @@ export async function runLocalChange({
     }
     adapter.runId = runId;
     await adapter.start();
+    if (reconcileOnlyAttemptId) {
+      await reconcileRuntimeAttempt(ctx, state, adapter, reconcileOnlyAttemptId, taskBaseline);
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        inspect: inspectRun(runDir),
+        checkpoint: "runtime_reconciled",
+      };
+    }
 
     let request;
     let requestRef;
@@ -2488,16 +2605,20 @@ export async function runLocalChange({
       "Materiality is a protocol fact, not model uncertainty: record a material: ambiguity only when the raw human request explicitly leaves a durable scope or Decision Authority choice unresolved; never invent one from neutral wording or confidence. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
       "Use this shape: {\"objective\":\"...\",\"scope\":[\"...\"],\"exclusions\":[\"...\"],\"ambiguities\":[],\"assumptions\":[],\"target_snapshot\":\"...\",\"preset_selection\":{\"preset\":\"local-change@1\",\"selection_evidence\":[{\"claim\":\"...\",\"source\":\"intake\",\"observation\":\"...\"}],\"proposed_narrowing\":null,\"rationale\":\"...\"}}",
     ].join("\n");
-    const requestExecution = await adapter.execute({
+    const requestExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
       role: "planner",
       attemptId: "planner-request",
       attempt: 1,
-      binding: requestAttempt.binding,
       prompt: requestPrompt,
       beforeSnapshot: taskBaseline,
       deadlineSeconds: bootstrap.deadline_seconds,
+      label: "Request planner Attempt",
     });
-    admitAttemptExecution(ctx, requestExecution, "Request planner Attempt");
+    const requestExecution = requestExecutionResult.execution;
+    admitRuntimeAttempt(ctx, state, requestExecution, {
+      attemptId: "planner-request",
+      label: "Request planner Attempt",
+    });
     const requestRuntime = requestExecution.observation;
     const requestRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-request.json", requestRuntime);
     request = requestProposal(responseObject(requestExecution.text, "Request planner"), {
@@ -2558,27 +2679,33 @@ export async function runLocalChange({
     admitBudget(state, "graph_revision");
     const admittedCommand = hooks.commandOverride?.({ targetFile, expectedContent })
       ?? commandSpec(targetFile, expectedContent);
-    const graphOneAttempt = await adapter.newAttempt({
+    const graphOnePrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
       role: "planner",
       attemptId: "planner-graph-1",
       attempt: 2,
     });
+    state = graphOnePrepared.state;
+    const graphOneAttempt = { binding: graphOnePrepared.binding };
     const graphOnePrompt = [
       "Return exactly one JSON object and no Markdown for graph revision 1 and its implementation Packet. Do not inspect or read any file and do not use any tool; the kernel already supplied the skill record.",
       `Implement the single file ${targetFile} for this objective: ${request.objective}`,
       `Return graph.nodes[0].task_id=implementation-1, workflow_definition=implementation, and a Packet that names skill ${skill.id}@${skill.version} and command verify-change.`,
       "Use this shape: {\"graph\":{\"nodes\":[{\"task_id\":\"implementation-1\",\"workflow_definition\":\"implementation\",\"requires\":[],\"read_resources\":[],\"write_resources\":[\"target\"]}]},\"packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"skills\":[{\"id\":\"m1-local-change\",\"version\":\"1\",\"source\":\".opencode/skills/m1-local-change/SKILL.md\",\"digest\":\"...\"}],\"capabilities\":[\"repository_read\",\"local_write\",\"command_execute\"],\"admitted_commands\":[{\"command_id\":\"verify-change\",\"argv\":[],\"cwd\":\".\",\"timeout_seconds\":10}],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
     ].join("\n");
-    const graphOneExecution = await adapter.execute({
+    const graphOneExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
       role: "planner",
       attemptId: "planner-graph-1",
       attempt: 2,
-      binding: graphOneAttempt.binding,
       prompt: graphOnePrompt,
       beforeSnapshot: taskBaseline,
       deadlineSeconds: admittedAttemptDeadlineSeconds,
+      label: "graph revision 1 planner Attempt",
     });
-    admitAttemptExecution(ctx, graphOneExecution, "graph revision 1 planner Attempt");
+    const graphOneExecution = graphOneExecutionResult.execution;
+    admitRuntimeAttempt(ctx, state, graphOneExecution, {
+      attemptId: "planner-graph-1",
+      label: "graph revision 1 planner Attempt",
+    });
     const graphOneRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-1.json", graphOneExecution.observation);
     implementation = implementationPlan(responseObject(graphOneExecution.text, "revision 1 planner"), {
       targetFile,
@@ -2616,15 +2743,17 @@ export async function runLocalChange({
     }, [graphOneRef, implementationPacketRef, graphOneRuntimeRef]);
 
     admitBudget(state, "execution_attempt");
-    const workerAttempt = await adapter.newAttempt({
+    const workerPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
       role: "worker",
       attemptId: "worker-implementation-1",
       taskId: "implementation-1",
       attempt: 1,
     });
+    state = workerPrepared.state;
+    const workerAttempt = { binding: workerPrepared.binding };
     workerIdentity = workerAttempt.binding.agent_identity;
     state = applyTransition(ctx, state, "implementation_dispatched", {
-      runtime_bindings: [...state.runtime_bindings, workerAttempt.binding],
+      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, workerAttempt.binding),
       tasks: {
         "implementation-1": { task_state: "active", attempts: 1 },
       },
@@ -2640,17 +2769,21 @@ export async function runLocalChange({
       "Do not modify protected unrelated files, the Git metadata, the skill file, or any other path.",
       "Use your edit/write tool, never shell or network. After editing, report only that the edit is complete; the Kernel will independently observe and command-check the isolated workspace before requesting your Result proposal.",
     ].join("\n");
-    const workerExecution = await adapter.execute({
+    const workerExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
       role: "worker",
       attemptId: "worker-implementation-1",
       taskId: "implementation-1",
       attempt: 1,
-      binding: workerAttempt.binding,
       prompt: workerPrompt,
       beforeSnapshot: taskBaseline,
       deadlineSeconds: implementation.packet.deadline_seconds,
+      label: "implementation worker Attempt",
     });
-    admitAttemptExecution(ctx, workerExecution, "implementation worker Attempt");
+    const workerExecution = workerExecutionResult.execution;
+    admitRuntimeAttempt(ctx, state, workerExecution, {
+      attemptId: "worker-implementation-1",
+      label: "implementation worker Attempt",
+    });
     const workerEditObservation = {
       ...workerExecution.observation,
       artifact_id: "runtime-worker-implementation-1-edit",
@@ -2668,12 +2801,11 @@ export async function runLocalChange({
     resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
     const observedResources = workerChanges.map(({ path }) => path);
     workerSnapshot = workspaceSnapshot(taskWorkspace);
-    const proposalExecution = await adapter.execute({
+    const proposalExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
       role: "worker",
       attemptId: "worker-implementation-1",
       taskId: "implementation-1",
       attempt: 1,
-      binding: workerExecution.binding,
       prompt: [
         "The Kernel observed and command-checked your isolated edit and committed the Result candidate.",
         `The canonical Output Snapshot digest is ${workerSnapshot.digest}. Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal ${workerSnapshot.digest}.`,
@@ -2681,8 +2813,13 @@ export async function runLocalChange({
       ].join("\n"),
       beforeSnapshot: workerSnapshot,
       deadlineSeconds: implementation.packet.deadline_seconds,
+      label: "worker Result proposal Attempt",
     });
-    admitAttemptExecution(ctx, proposalExecution, "worker Result proposal Attempt");
+    const proposalExecution = proposalExecutionResult.execution;
+    admitRuntimeAttempt(ctx, state, proposalExecution, {
+      attemptId: "worker-implementation-1",
+      label: "worker Result proposal Attempt",
+    });
     const workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
       throw new Error(`worker Result proposal changed_resources do not match the observed diff: proposed=${JSON.stringify(workerProposal.changed_resources)} observed=${JSON.stringify(observedResources)}`);
@@ -2839,53 +2976,43 @@ export async function runLocalChange({
           "Carry forward implementation-1 by its worker Result artifact reference and add exactly one independent verification task.",
           "Use this shape: {\"carry_forward_task_id\":\"implementation-1\",\"verifier_task\":{\"task_id\":\"verification-1\",\"workflow_definition\":\"verification\",\"requires\":[\"implementation-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"allowed_resources\":[\"target\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
         ].join("\n");
-        if (preparedGraphTwoBinding?.binding_state === "unreachable") {
-          if (typeof adapter.reconcileAttempt !== "function") {
-            throw new AttemptFailure("runtime_reconciliation_required", "planner-graph-2 has a durable binding but no reconciliation adapter");
-          }
+        if (preparedGraphTwoBinding) {
           graphTwoBinding = preparedGraphTwoBinding;
-          graphTwoExecution = await adapter.reconcileAttempt({
-            role: "planner",
-            attemptId: "planner-graph-2",
-            attempt: 3,
-            binding: graphTwoBinding,
-            beforeSnapshot: workerSnapshot,
-          });
         } else {
-          if (preparedGraphTwoBinding) {
-            graphTwoBinding = preparedGraphTwoBinding;
-          } else {
-            admitBudget(state, "planner_attempt");
-            admitBudget(state, "graph_revision");
-            const graphTwoAttempt = await adapter.newAttempt({
-              role: "planner",
-              attemptId: "planner-graph-2",
-              attempt: 3,
-            });
-            graphTwoBinding = graphTwoAttempt.binding;
-            state = applyTransition(ctx, state, "runtime_dispatch_prepared", {
-              runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
-            }, []);
-            if (continuingResult) {
-              return {
-                run_id: runId,
-                run_dir: runDir,
-                inspect: inspectRun(runDir),
-                checkpoint: "runtime_dispatch_prepared",
-              };
-            }
-          }
-          graphTwoExecution = await adapter.execute({
+          admitBudget(state, "planner_attempt");
+          admitBudget(state, "graph_revision");
+          const graphTwoAttempt = await adapter.newAttempt({
             role: "planner",
             attemptId: "planner-graph-2",
             attempt: 3,
-            binding: graphTwoBinding,
-            prompt: graphTwoPrompt,
-            beforeSnapshot: workerSnapshot,
-            deadlineSeconds: admittedAttemptDeadlineSeconds,
           });
+          graphTwoBinding = graphTwoAttempt.binding;
+          state = applyTransition(ctx, state, "runtime_dispatch_prepared", {
+            runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoBinding),
+          }, []);
+          if (continuingResult) {
+            return {
+              run_id: runId,
+              run_dir: runDir,
+              inspect: inspectRun(runDir),
+              checkpoint: "runtime_dispatch_prepared",
+            };
+          }
         }
-        admitAttemptExecution(ctx, graphTwoExecution, "graph revision 2 planner Attempt");
+        const graphTwoExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+          role: "planner",
+          attemptId: "planner-graph-2",
+          attempt: 3,
+          prompt: graphTwoPrompt,
+          beforeSnapshot: workerSnapshot,
+          deadlineSeconds: admittedAttemptDeadlineSeconds,
+          label: "graph revision 2 planner Attempt",
+        });
+        graphTwoExecution = graphTwoExecutionResult.execution;
+        admitRuntimeAttempt(ctx, state, graphTwoExecution, {
+          attemptId: "planner-graph-2",
+          label: "graph revision 2 planner Attempt",
+        });
         writePreparedExecution(ctx, "planner-graph-2", graphTwoExecution);
         graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
         crashAt(ctx, "after_graph_two_runtime_publication");
@@ -2979,18 +3106,20 @@ export async function runLocalChange({
     let verifierBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "verifier-1");
     if (state.tasks["verification-1"]?.task_state === "planned") {
       admitBudget(state, "execution_attempt");
-      const verifierAttempt = await adapter.newAttempt({
+      const verifierPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
         role: "verifier",
         attemptId: "verifier-1",
         taskId: "verification-1",
         attempt: 1,
       });
+      state = verifierPrepared.state;
+      const verifierAttempt = { binding: verifierPrepared.binding };
       if (verifierAttempt.binding.agent_identity === workerIdentity) {
         throw new Error("verifier_not_independent");
       }
       verifierBinding = verifierAttempt.binding;
       state = applyTransition(ctx, state, "verification_dispatched", {
-        runtime_bindings: [...state.runtime_bindings, verifierAttempt.binding],
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, verifierAttempt.binding),
         tasks: {
           ...state.tasks,
           "verification-1": { task_state: "active", attempts: 1 },
@@ -3039,17 +3168,21 @@ export async function runLocalChange({
       };
       verifierRuntimeRef = reference(verifierRuntime.artifact_id, verifierRuntimePath, verifierRuntime);
     } else {
-      verifierExecution = await adapter.execute({
+      const verifierExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
         role: "verifier",
         attemptId: "verifier-1",
         taskId: "verification-1",
         attempt: 1,
-        binding: verifierBinding,
         prompt: verifierPrompt,
         beforeSnapshot: workerSnapshot,
         deadlineSeconds: verification.packet.deadline_seconds,
+        label: "independent verifier Attempt",
       });
-      admitAttemptExecution(ctx, verifierExecution, "independent verifier Attempt");
+      verifierExecution = verifierExecutionResult.execution;
+      admitRuntimeAttempt(ctx, state, verifierExecution, {
+        attemptId: "verifier-1",
+        label: "independent verifier Attempt",
+      });
       const observedVerifierSnapshot = workspaceSnapshot(taskWorkspace);
       if (observedVerifierSnapshot.digest !== workerSnapshot.digest) {
         throw new Error(`Output Snapshot changed during verification: ${JSON.stringify(diffEntries(workerSnapshot, observedVerifierSnapshot))}`);
@@ -3147,17 +3280,6 @@ export async function runLocalChange({
       inspect: inspectRun(runDir),
     };
   } catch (error) {
-    const durableState = existsSync(join(runDir, "run.json"))
-      ? JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")) : null;
-    if (isRecoverableProviderFailure(error)
-      && durableState?.runtime_bindings?.some(({ attempt_id }) => attempt_id === "planner-graph-2")
-      && !existsSync(join(runDir, "artifacts/graphs/0002.json"))) {
-      markRuntimeDispatchFailure(
-        ctx,
-        "planner-graph-2",
-        isAmbiguousProviderFailure(error) ? "unreachable" : "error",
-      );
-    }
     if (error.code !== "simulated_crash") await recordFailure(ctx, state, error);
     throw error;
   } finally {

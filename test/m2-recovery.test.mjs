@@ -464,6 +464,133 @@ test("public inspect walks planner Request, Graph, and Packet Runtime provenance
   }
 });
 
+test("ambiguous planner, worker, and verifier Attempts reconcile the same binding without re-dispatch", async () => {
+  for (const targetAttemptId of ["planner-graph-1", "worker-implementation-1", "verifier-1"]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      let runtime;
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => {
+          runtime = new Runtime(options);
+          runtime.executeCalls = [];
+          runtime.reconcileCalls = [];
+          const execute = runtime.execute.bind(runtime);
+          const newAttempt = runtime.newAttempt.bind(runtime);
+          runtime.newAttempt = async (spec) => {
+            runtime.executeCalls.push({ kind: "newAttempt", attemptId: spec.attemptId });
+            return newAttempt(spec);
+          };
+          runtime.execute = async (spec) => {
+            runtime.executeCalls.push({ kind: "execute", attemptId: spec.attemptId, sessionId: spec.binding.session_id });
+            if (spec.attemptId === targetAttemptId) {
+              throw Object.assign(new Error("socket hang up after provider accepted the Attempt"), { code: "ECONNRESET" });
+            }
+            return execute(spec);
+          };
+          runtime.reconcileAttempt = async (spec) => {
+            runtime.reconcileCalls.push({ attemptId: spec.attemptId, sessionId: spec.binding.session_id });
+            throw Object.assign(new Error("no completed provider message is observable"), { code: "runtime_reconciliation_required" });
+          };
+          return runtime;
+        },
+      }), /socket hang up|provider|Attempt/i);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const before = JSON.parse(readFileSync(join(runDir, "run.json")));
+      const bindingBefore = before.runtime_bindings.find(({ attempt_id }) => attempt_id === targetAttemptId);
+      assert.ok(bindingBefore, `${targetAttemptId} binding was not durable before the ambiguous POST`);
+      assert.equal(bindingBefore.binding_state, "unreachable", targetAttemptId);
+      const beforeTargetPosts = runtime.executeCalls.filter(({ kind, attemptId }) => kind === "execute" && attemptId === targetAttemptId).length;
+      const beforeTargetSessions = runtime.executeCalls.filter(({ kind, attemptId }) => kind === "newAttempt" && attemptId === targetAttemptId).length;
+
+      const resumed = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(resumed.checkpoint, "runtime_reconciliation_required", targetAttemptId);
+      assert.deepEqual(runtime.reconcileCalls, [{ attemptId: targetAttemptId, sessionId: bindingBefore.session_id }], targetAttemptId);
+      assert.equal(runtime.executeCalls.filter(({ kind, attemptId }) => kind === "execute" && attemptId === targetAttemptId).length, beforeTargetPosts, targetAttemptId);
+      assert.equal(runtime.executeCalls.filter(({ kind, attemptId }) => kind === "newAttempt" && attemptId === targetAttemptId).length, beforeTargetSessions, targetAttemptId);
+      const after = JSON.parse(readFileSync(join(runDir, "run.json")));
+      assert.equal(after.runtime_bindings.filter(({ attempt_id }) => attempt_id === targetAttemptId).length, 1, targetAttemptId);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("public resume reconciles an ambiguous graph-1 binding with GET only", async () => {
+  const { workspace, runRoot } = fixture();
+  const fakeBin = mkdtempSync(join(tmpdir(), "m2-graph-one-reconcile-bin-"));
+  try {
+    let runtime;
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        const execute = runtime.execute.bind(runtime);
+        runtime.execute = async (spec) => {
+          if (spec.attemptId === "planner-graph-1") {
+            throw Object.assign(new Error("socket hang up after provider accepted graph-1"), { code: "ECONNRESET" });
+          }
+          return execute(spec);
+        };
+        return runtime;
+      },
+    }), /socket hang up|provider|Attempt/i);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    const before = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.ok(before.runtime_bindings.some(({ attempt_id }) => attempt_id === "planner-graph-1"));
+    const providerState = join(fakeBin, "provider-state.json");
+    writeFileSync(providerState, JSON.stringify({ sessionPosts: 0, messagePosts: 0, gets: 0 }));
+    const fakeOpencode = join(fakeBin, "opencode");
+    writeFileSync(fakeOpencode, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+const args = process.argv.slice(2);
+const statePath = process.env.M2_GRAPH_ONE_RECONCILE_STATE;
+const readState = () => JSON.parse(readFileSync(statePath, "utf8"));
+const writeState = (state) => writeFileSync(statePath, JSON.stringify(state));
+const send = (response, status, body) => { response.statusCode = status; response.setHeader("content-type", "application/json"); response.end(JSON.stringify(body)); };
+if (args[0] === "--version") process.stdout.write("m2-graph-one-reconcile\\n");
+else if (args[0] === "debug") process.stdout.write(JSON.stringify({ instructions: [], plugin: [], mcp: {}, agent: {}, command: {}, provider: {} }) + "\\n");
+else if (args[0] === "serve") {
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    const state = readState();
+    if (url.pathname === "/global/health") return send(response, 200, { healthy: true, version: "m2-graph-one-reconcile" });
+    if (url.pathname === "/agent") return send(response, 200, ["planner", "worker", "verifier"].map((role) => ({ name: "m1-" + role, model: { providerID: "fake", modelID: "model" } })));
+    if (url.pathname === "/event") { response.statusCode = 200; response.setHeader("content-type", "text/event-stream"); response.write(": ready\\n\\n"); return; }
+    if (request.method === "GET" && url.pathname === "/session/status") { writeState({ ...state, gets: state.gets + 1 }); return send(response, 200, {}); }
+    if (request.method === "GET" && url.pathname.startsWith("/session/")) { writeState({ ...state, gets: state.gets + 1 }); return send(response, 200, []); }
+    if (request.method === "POST" && url.pathname === "/session") { writeState({ ...state, sessionPosts: state.sessionPosts + 1 }); return send(response, 500, { error: "duplicate session creation forbidden" }); }
+    if (request.method === "POST" && url.pathname.startsWith("/session/")) { writeState({ ...state, messagePosts: state.messagePosts + 1 }); return send(response, 500, { error: "duplicate message dispatch forbidden" }); }
+    return send(response, 404, { error: "not found" });
+  });
+  server.listen(Number(args[args.indexOf("--port") + 1]), "127.0.0.1");
+}
+`);
+    chmodSync(fakeOpencode, 0o755);
+    const resumed = cliResumeWithEnv(workspace, runRoot, runId, {
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      M2_GRAPH_ONE_RECONCILE_STATE: providerState,
+    });
+    assert.equal(resumed.checkpoint, "runtime_reconciliation_required");
+    const provider = JSON.parse(readFileSync(providerState));
+    assert.equal(provider.sessionPosts, 0);
+    assert.equal(provider.messagePosts, 0);
+    assert.ok(provider.gets > 0);
+  } finally {
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("cancel persists intent before abort and closes only after a confirmed stop", async () => {
   const { workspace, runRoot } = fixture();
   try {
