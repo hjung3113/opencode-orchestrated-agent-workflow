@@ -421,11 +421,14 @@ test("real local-change@1 run preserves the user worktree and emits the verified
     assert.equal(state.lifecycle_state, "completed");
     assert.deepEqual(state.transitions.map(({ event_kind }) => event_kind), [
       "request_admitted",
+      "runtime_dispatch_prepared",
       "graph_revision_1_admitted",
+      "runtime_dispatch_prepared",
       "implementation_dispatched",
       "implementation_result_admitted",
       "runtime_dispatch_prepared",
       "graph_revision_2_admitted",
+      "runtime_dispatch_prepared",
       "verification_dispatched",
       "review_admitted",
       "receipt_admitted",
