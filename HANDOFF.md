@@ -34,17 +34,18 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current implementation tip before this handoff commit is `72553bf` on
+- Current implementation tip before this handoff commit is `58af23c` on
   `agent/executable-opencode-harness-design`. This repair pass adds
   `6a6a9b6` (one authoritative reconciled Runtime Observation), `1cb9808`
   (one-action recovered graph/worker replay), `4f5ee4c` (durable GET-only
-  worker workspace recovery), and `72553bf` (immutable admission replay
-  assertion).
+  worker workspace recovery), `72553bf` (immutable admission replay
+  assertion), and `58af23c` (recovered worker-edit reference reuse).
   Nothing has been pushed and no PR exists; this handoff update is the next
   local commit.
 - Current deterministic evidence: protocol 4/4, M0 16/16 in
   64961.660166ms, kernel 1/1 in 151.896ms, deterministic M1 10/10 in
-  6054.914167ms, and focused recovery 4/4 in 13622.950875ms. All checked
+  6054.914167ms, and focused replay/worker-reference tests 4/4 in
+  9504.48025ms. All checked
   `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
   `git diff --check` passed before this edit.
 - The one fresh serial post-repair `npm run test:m2` run was not green:
@@ -119,6 +120,9 @@ performed. Before any future publication:
   once under one immutable artifact ID/reference, and the focused run-wide
   check rejects duplicate IDs. Recovered graph-1 and worker resumes each
   admit exactly one tested transition/artifact delta without re-dispatch.
+  Recovered `worker_edit` reuses that exact Runtime Observation reference in
+  the Result and admits no `runtime-worker-implementation-1-edit` clone;
+  normal non-recovered worker edits retain their separate edit Observation.
 - GET-only worker replay: both `worker_edit` and
   `worker_result_proposal` preserve and restore the bound isolated workspace;
   deterministic tests prove reconciliation uses GET only and each distinct
@@ -215,7 +219,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `72553bf`; this handoff update is the next
+- HEAD before this handoff commit: `58af23c`; this handoff update is the next
   local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
