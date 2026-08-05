@@ -34,18 +34,20 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current implementation tip before this handoff commit is `58af23c` on
+- Current implementation tip before this handoff commit is `d0e2622` on
   `agent/executable-opencode-harness-design`. This repair pass adds
   `6a6a9b6` (one authoritative reconciled Runtime Observation), `1cb9808`
   (one-action recovered graph/worker replay), `4f5ee4c` (durable GET-only
   worker workspace recovery), `72553bf` (immutable admission replay
-  assertion), and `58af23c` (recovered worker-edit reference reuse).
+  assertion), `58af23c` (recovered worker-edit reference reuse), and
+  `d0e2622` (prepared canonical Runtime reconciliation replay after crash).
   Nothing has been pushed and no PR exists; this handoff update is the next
   local commit.
 - Current deterministic evidence: protocol 4/4, M0 16/16 in
   64961.660166ms, kernel 1/1 in 151.896ms, deterministic M1 10/10 in
-  6054.914167ms, and focused replay/worker-reference tests 4/4 in
-  9504.48025ms. All checked
+  6054.914167ms, focused crash/reconciliation tests 4/4 in
+  15028.216917ms, and the focused GET-only/ambiguous replay subset 3/3 in
+  8419.637917ms. All checked
   `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
   `git diff --check` passed before this edit.
 - The one fresh serial post-repair `npm run test:m2` run was not green:
@@ -131,7 +133,11 @@ performed. Before any future publication:
   preparation, before/after Result Ref CAS, Result-only graph-2 Runtime
   Observation/Packet/Graph/dispatch publication, verifier Runtime publication,
   Review publication, before/after `receipt_admitted` Run-state replacement,
-  before/after runtime abort, and repeated public CLI resume at each boundary.
+  before/after runtime abort, and canonical reconciliation at observation
+  publication, prepared execution publication, and before
+  `runtime_reconciled` Run-state replacement. Repeated public CLI resume at
+  each boundary consumes a validated prepared canonical observation without a
+  second provider GET and preserves its immutable bytes.
   Every planner, worker, and verifier session binding is durably prepared
   before a possibly accepted POST; preparation, POST/reconciliation, and
   graph admission are separate resume actions. Explicit HTTP failure retries
@@ -156,6 +162,13 @@ performed. Before any future publication:
   its real OpenCode verifier response was not a JSON object, so no full M1
   claim is made.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
+- `node --test --test-name-pattern='(successful ambiguous reconciliation|partial Runtime publication|prepared canonical reconciliation|crash boundaries are deterministic)' test/m2-recovery.test.mjs` — 4/4 passed in
+  15028.216917ms. This includes crash points after canonical observation
+  publication, after prepared execution publication, and before
+  `runtime_reconciled` Run-state replacement; the latter replay used no
+  additional GET and admitted one transition.
+- `node --test --test-name-pattern='(GET-only worker reconciliation|prepared canonical reconciliation replays|successful ambiguous reconciliation)' test/m2-recovery.test.mjs` — 3/3 passed in
+  8419.637917ms.
 - `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
 - `git diff --check` — passed after the handoff edit before its commit.
 
@@ -219,7 +232,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `58af23c`; this handoff update is the next
+- HEAD before this handoff commit: `d0e2622`; this handoff update is the next
   local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
