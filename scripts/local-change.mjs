@@ -2028,6 +2028,103 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
   return { state: next, eventKind: null, taskId: null };
 }
 
+function validatePlannerProvenance(ctx, state, { requestArtifactRef, resultArtifactRef }) {
+  const request = resolveArtifactReference(ctx, requestArtifactRef);
+  const graphTwoRef = state.active_graph_ref;
+  const graphTwo = resolveArtifactReference(ctx, graphTwoRef);
+  const graphOneRef = graphTwo.parent_revision_ref;
+  const graphOne = resolveArtifactReference(ctx, graphOneRef);
+  const implementationNode = graphOne.nodes.find(({ task_id }) => task_id === "implementation-1");
+  const verificationNode = graphTwo.nodes.find(({ task_id }) => task_id === "verification-1");
+  if (!implementationNode?.packet_ref || !verificationNode?.packet_ref) {
+    throw new Error("completed Run planner provenance is missing an implementation or verification Packet");
+  }
+  const implementationPacket = resolveArtifactReference(ctx, implementationNode.packet_ref);
+  const verificationPacket = resolveArtifactReference(ctx, verificationNode.packet_ref);
+  const bootstrap = resolveArtifactReference(ctx, state.bootstrap_ref);
+  const plannerArtifacts = [
+    {
+      label: "Request",
+      artifact: request,
+      runtime: resolveArtifactReference(ctx, request.runtime_ref),
+      attemptId: "planner-request",
+      attempt: 1,
+      taskId: undefined,
+      graphRevision: undefined,
+    },
+    {
+      label: "graph revision 1",
+      artifact: graphOne,
+      runtime: resolveArtifactReference(ctx, graphOne.runtime_ref),
+      attemptId: "planner-graph-1",
+      attempt: 2,
+      taskId: undefined,
+      graphRevision: 1,
+    },
+    {
+      label: "implementation Packet",
+      artifact: implementationPacket,
+      runtime: resolveArtifactReference(ctx, implementationPacket.runtime_ref),
+      attemptId: "planner-graph-1",
+      attempt: 2,
+      taskId: "implementation-1",
+      graphRevision: 1,
+    },
+    {
+      label: "graph revision 2",
+      artifact: graphTwo,
+      runtime: resolveArtifactReference(ctx, graphTwo.runtime_ref),
+      attemptId: "planner-graph-2",
+      attempt: 3,
+      taskId: undefined,
+      graphRevision: 2,
+    },
+    {
+      label: "verification Packet",
+      artifact: verificationPacket,
+      runtime: resolveArtifactReference(ctx, verificationPacket.runtime_ref),
+      attemptId: "planner-graph-2",
+      attempt: 3,
+      taskId: "verification-1",
+      graphRevision: 2,
+    },
+  ];
+  for (const { label, artifact, runtime, attemptId, attempt, taskId, graphRevision } of plannerArtifacts) {
+    const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === attemptId);
+    if (!binding
+      || artifact.run_id !== state.run_id
+      || artifact.producer?.role !== "planner"
+      || artifact.producer.actor_id !== runtime.agent_identity
+      || runtime.run_id !== state.run_id
+      || runtime.role !== "planner"
+      || runtime.attempt_id !== attemptId
+      || runtime.session_id !== binding.session_id
+      || runtime.agent_identity !== binding.agent_identity
+      || runtime.agent !== binding.agent
+      || runtime.model !== binding.model
+      || runtime.configuration_digest !== binding.configuration_digest
+      || binding.role !== "planner"
+      || binding.attempt !== attempt
+      || (taskId ? artifact.task_id !== taskId : artifact.task_id !== undefined)
+      || (graphRevision ? artifact.graph_revision !== graphRevision : artifact.graph_revision !== undefined)) {
+      throw new Error(`completed Run planner ${label} provenance does not match its Runtime Binding`);
+    }
+  }
+  if (!sameArtifactReference(request.input_refs.find(({ path }) => path === state.bootstrap_ref.path), state.bootstrap_ref)
+    || bootstrap.producer?.role !== "kernel"
+    || !sameArtifactReference(graphOne.input_refs.find(({ path }) => path === requestArtifactRef.path), requestArtifactRef)
+    || !sameArtifactReference(graphOne.trigger_ref, requestArtifactRef)
+    || !sameArtifactReference(graphTwo.parent_revision_ref, graphOneRef)
+    || !sameArtifactReference(graphTwo.input_refs.find(({ path }) => path === requestArtifactRef.path), requestArtifactRef)
+    || !sameArtifactReference(graphTwo.input_refs.find(({ path }) => path === graphOneRef.path), graphOneRef)
+    || !sameArtifactReference(graphTwo.input_refs.find(({ path }) => path === resultArtifactRef.path), resultArtifactRef)
+    || !sameArtifactReference(graphTwo.trigger_ref, resultArtifactRef)
+    || !sameArtifactReference(implementationNode.packet_ref, reference(implementationPacket.artifact_id, implementationNode.packet_ref.path, implementationPacket))
+    || !sameArtifactReference(verificationNode.packet_ref, reference(verificationPacket.artifact_id, verificationNode.packet_ref.path, verificationPacket))) {
+    throw new Error("completed Run planner Request, Graph, and Packet references are semantically inconsistent");
+  }
+}
+
 function validateCompletedRun(ctx, state, outcomeEntry) {
   const receipt = outcomeEntry?.outcome;
   if (!receipt || receipt.outcome_kind !== "receipt") {
@@ -2049,6 +2146,7 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
   }
   const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
   const review = resolveArtifactReference(ctx, reviewArtifactRef);
+  validatePlannerProvenance(ctx, state, { requestArtifactRef: state.request_ref, resultArtifactRef });
   if (review.verdict !== "pass" || review.findings.length !== 0) {
     throw new Error("completed Run requires an independent pass Review with no findings");
   }

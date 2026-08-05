@@ -591,6 +591,68 @@ else if (args[0] === "serve") {
   }
 });
 
+test("public inspect rejects digest-valid planner provenance with forged semantic identity", async () => {
+  const cases = [
+    { name: "Request", path: "artifacts/request.json" },
+    { name: "graph", path: "artifacts/graphs/0001.json" },
+    { name: "Packet", path: "artifacts/tasks/implementation-1/attempts/1/packet.json" },
+  ];
+  for (const testCase of cases) {
+    const { workspace, runRoot } = fixture();
+    try {
+      const run = await runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => new Runtime(options),
+      });
+      const statePath = join(run.run_dir, "run.json");
+      const state = JSON.parse(readFileSync(statePath));
+      const entries = artifactEntries(run.run_dir).map(([absolutePath, artifact]) => [
+        absolutePath.slice(`${run.run_dir}/`.length), artifact,
+      ]);
+      const artifacts = new Map(entries);
+      const target = artifacts.get(testCase.path);
+      const runtime = artifacts.get(target.runtime_ref.path);
+      const forgedIdentity = digest(`forged-planner-${testCase.name}`);
+      target.producer.actor_id = forgedIdentity;
+      runtime.agent_identity = forgedIdentity;
+      const containers = [state, ...entries.map(([, artifact]) => artifact)];
+      const replaceRefs = (value, path, next) => {
+        if (Array.isArray(value)) return value.forEach((item) => replaceRefs(item, path, next));
+        if (!value || typeof value !== "object") return;
+        if (value.reference_kind === "artifact" && value.path === path) {
+          Object.assign(value, next);
+          return;
+        }
+        Object.values(value).forEach((item) => replaceRefs(item, path, next));
+      };
+      for (let pass = 0; pass < entries.length; pass += 1) {
+        for (const [path, artifact] of entries) {
+          const nextRef = {
+            reference_kind: "artifact",
+            artifact_id: artifact.artifact_id,
+            path,
+            digest: digest(artifact),
+          };
+          containers.forEach((value) => replaceRefs(value, path, nextRef));
+        }
+      }
+      for (const [path, artifact] of entries) {
+        writeFileSync(join(run.run_dir, path), `${JSON.stringify(artifact, null, 2)}\n`);
+      }
+      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      assert.throws(() => execFileSync(process.execPath, [
+        "scripts/local-change.mjs", "inspect", "--workspace", workspace,
+        "--run-root", runRoot, "--run-id", run.run_id,
+      ], { cwd: new URL("..", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /planner|identity|binding|provenance/i, testCase.name);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("cancel persists intent before abort and closes only after a confirmed stop", async () => {
   const { workspace, runRoot } = fixture();
   try {
