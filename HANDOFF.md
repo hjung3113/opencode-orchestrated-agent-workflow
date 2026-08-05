@@ -34,25 +34,32 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current branch is `agent/executable-opencode-harness-design` at `78213d4`.
-  The focused task-unit commits are `2f681cc` (common durable ambiguous
-  runtime binding/reconciliation), `a1d0970` (planner provenance identity
-  validation), and `78213d4` (M1 trace expectations for the required durable
-  preparation events). Nothing has been pushed and no PR exists; this handoff
-  update is the next local commit.
-- Final evidence: protocol 4/4, M0 16/16, deterministic M1 10/10, full M1
-  12/12 in 109642.459125ms, full M2 31/31 in 245600ms, kernel 1/1, all 7
-  checked `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
-  `git diff --check` will be rerun after this handoff edit. The full M2 count
-  and duration are from the completed separate terminal run; it was not
-  rerun here.
+- Current implementation tip before this handoff commit is `115e425` on
+  `agent/executable-opencode-harness-design`. The new focused task-unit
+  commits are `8bf594e` (phase-aware durable ambiguous replay), `785684f`
+  (completed planner Packet/Result target provenance), and `115e425`
+  (prepared replay ordering, persistence, and one-action expectations).
+  Nothing has been pushed and no PR exists; this handoff update is the next
+  local commit.
+- Current deterministic evidence: protocol 4/4, kernel 1/1, selected
+  deterministic M1 10/10, focused replay/provider recovery 7/7, all checked
+  `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
+  `git diff --check` passed before this edit. M0 remains the prior observed
+  16/16 live probe evidence and was not rerun after these local-change-only
+  repairs.
+- The final post-repair `npm run test:m2` was not green evidence: it emitted
+  `AttemptFailure: graph revision 1 planner Attempt did not reach a confirmed
+  idle stop` from `scripts/local-change.mjs:1364` while a child `opencode serve`
+  remained active; the owned run was stopped without retry. Full M1 was not
+  rerun after the repair because this provider gate failed.
 
 ### Current blocker
 
-No M0-M2 blocker remains after the final serial provider-backed M1 and M2
-traces. Do not advance to M3 without its own scope and acceptance evidence.
-Do not relax deadlines or add a generic recovery engine, arbitrary retry/fork
-surface, concurrency, or Application.
+The final provider-backed M2 gate is blocked by the OpenCode planner idle-stop
+failure above. Do not claim current full M1/M2 completion or advance to M3
+until a healthy provider permits one fresh serial gate run. Do not relax
+deadlines or add a generic recovery engine, arbitrary retry/fork surface,
+concurrency, or Application.
 
 ### PR gate
 
@@ -61,8 +68,10 @@ performed. Before any future publication:
 
 - every retained review finding is tied to an explicit M0-M2 contract and
   focused public/file-backed regression test;
-- protocol, M0, M1, M2, kernel, syntax, and whitespace checks pass;
-- the successful final real M1 trace satisfies the M1 exit evidence;
+- protocol, M0, M1, M2, kernel, syntax, and whitespace checks pass on the
+  exact claimed tip;
+- a successful final real M1 trace and full M2 trace satisfy their exit
+  evidence;
 - the claimed milestone boundary matches the actual M2 state and tests;
 - the handoff's exact evidence is refreshed against the live checkout.
 
@@ -123,12 +132,17 @@ performed. Before any future publication:
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
-- `npm run test:m0` — 16/16 passed, including the live process-death/reconnect
-  cancellation probe.
-- `npm run test:m1` at final HEAD — 12/12 passed in 109642.459125ms; the real
-  local-change trace passed in 101069.45675ms.
-- `npm run test:m2` — 31/31 passed in 245600ms in the completed separate
-  terminal run; it was not rerun during this finalization.
+- `npm run test:m0` — prior observed 16/16 passed, including the live
+  process-death/reconnect cancellation probe; not rerun after these
+  local-change-only repairs.
+- `npm run test:m1` — not rerun after the `115e425` repair because the final
+  provider-backed M2 gate failed first. The prior `78213d4` run was 12/12 in
+  109642.459125ms and is historical, not current-tip completion evidence.
+- `npm run test:m2` — final post-repair run stopped after the provider
+  reported no confirmed idle stop for the graph revision 1 planner Attempt;
+  no pass/total result is claimed. The pre-repair run at `8bf594e` was 26/32
+  in 243007.176625ms and its six deterministic replay failures were repaired
+  and covered by the focused 7/7 run.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
 - `git diff --check` — passed after the handoff edit before its commit.
@@ -169,10 +183,11 @@ performed. Before any future publication:
   exercised through the public CLI, while live verifier calls remain
   provider-dependent. The final full gate was serial; no concurrent M2
   isolation repair was evidenced by the earlier concurrent run.
-- Final provider evidence: the changed HEAD's real M1 local-change trace and
-  the completed full M2 run both passed without timeout changes. The M0
-  fixture still provides the independent health, message, and live
-  cancellation/reconnect observations.
+- Provider limitation: the final M2 attempt reached a real `opencode serve`
+  child but could not confirm the graph revision 1 planner Attempt idle stop;
+  it was stopped without timeout relaxation or retry. The M0 fixture still
+  provides the independent health, message, and live cancellation/reconnect
+  observations.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -191,8 +206,8 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `78213d4`; this handoff update is the next
-  local commit.
+- HEAD before this handoff commit: `115e425`; this handoff update is the next
+  local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
 - no protected uncommitted work was present before this handoff edit
