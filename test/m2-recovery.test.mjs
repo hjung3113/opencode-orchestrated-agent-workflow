@@ -985,7 +985,7 @@ test("crash boundaries are deterministic and repeated resume is idempotent", asy
     after_promotion_preparation: ["result_ref_promoted", "receipt_admitted"],
     before_result_ref_update: ["result_ref_promoted", "receipt_admitted"],
     after_result_ref_update: ["receipt_admitted"],
-    after_result_publication: ["implementation_result_admitted", "runtime_dispatch_prepared", "graph_revision_2_admitted", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
+    after_result_publication: ["implementation_result_admitted", "runtime_dispatch_prepared", "graph_revision_2_admitted", "runtime_dispatch_prepared", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
     after_review_publication: ["review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"],
     "before_run_state_replacement:receipt_admitted": ["receipt_admitted"],
     "after_run_state_replacement:receipt_admitted": [],
@@ -1050,7 +1050,7 @@ test("Result-only continuation replays graph and verifier boundaries one action 
       const runDir = join(runRoot, "runs", runId);
       const expectedActions = crashAt === "after_verification_dispatch"
         ? ["review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"]
-        : ["graph_revision_2_admitted", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"];
+        : ["graph_revision_2_admitted", "runtime_dispatch_prepared", "verification_dispatched", "review_admitted", "promotion_prepared", "result_ref_promoted", "receipt_admitted"];
       const seen = [];
       let resumeCount = 0;
       const resumeOneAction = () => {
@@ -1337,6 +1337,8 @@ if (args[0] === "--version") {
     let resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
     assert.equal(resumed.checkpoint, "graph_revision_2_admitted");
     resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(resumed.checkpoint, "runtime_dispatch_prepared");
+    resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
     assert.equal(resumed.checkpoint, "verification_dispatched");
     resumed = cliResumeWithEnv(workspace, runRoot, runId, env);
     assert.equal(resumed.checkpoint, "review_admitted");
@@ -1475,9 +1477,13 @@ if (args[0] === "--version") {
     writeFileSync(providerState, JSON.stringify(acceptedState));
 
     const reconciled = cliResumeWithEnv(workspace, runRoot, runId, env);
-    assert.equal(reconciled.checkpoint, "graph_revision_2_admitted");
+    assert.equal(reconciled.checkpoint, "runtime_reconciled");
+    assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 1);
+    const graphAdmitted = cliResumeWithEnv(workspace, runRoot, runId, env);
+    assert.equal(graphAdmitted.checkpoint, "graph_revision_2_admitted");
     assert.equal(JSON.parse(readFileSync(providerState)).messagePosts, 1);
     assert.equal(JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings.filter(({ attempt_id }) => attempt_id === "planner-graph-2").length, 1);
+    assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "runtime_dispatch_prepared");
     assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "verification_dispatched");
     assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "review_admitted");
     assert.equal(cliResumeWithEnv(workspace, runRoot, runId, env).checkpoint, "promotion_prepared");

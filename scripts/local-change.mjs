@@ -2061,15 +2061,16 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
     const artifact = JSON.parse(readFileSync(join(ctx.runDir, path), "utf8"));
     validateProtocol(artifact, artifact.kind);
     const artifactRef = reference(artifact.artifact_id, path, artifact);
+    const runtime = resolveArtifactReference(ctx, artifact.runtime_ref);
     const projection = next.tasks?.[taskId];
     if (!projection) continue;
     if (projection.artifact_ref) {
       if (projection.artifact_ref.digest !== artifactRef.digest) {
         throw new AttemptFailure("prepared_artifact_conflict", `${taskId} publication conflicts with Run State`);
       }
+      clearPreparedExecution(ctx, runtime.attempt_id);
       continue;
     }
-    const runtime = resolveArtifactReference(ctx, artifact.runtime_ref);
     next = applyTransition(ctx, next, eventKind, {
       runtime_bindings: next.runtime_bindings.map((binding) =>
         binding.attempt_id === runtime.attempt_id ? { ...binding, binding_state: "idle" } : binding),
@@ -2077,7 +2078,8 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
         ...next.tasks,
         [taskId]: { task_state: "artifacts_published", attempts: projection.attempts, artifact_ref: artifactRef },
       },
-    }, [artifact.runtime_ref, artifactRef]);
+      }, [artifact.runtime_ref, artifactRef]);
+    clearPreparedExecution(ctx, runtime.attempt_id);
     crashAt(ctx, `after_prepared_${taskId}_admission`);
     return { state: next, eventKind, taskId };
   }
@@ -2378,6 +2380,22 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
+  const reconciliationCtx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
+  try {
+    const reconciliation = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
+    state = reconciliation.state;
+    if (reconciliation.eventKind) {
+      return {
+        ...inspectRun(runDir),
+        next_action: null,
+        checkpoint: reconciliation.eventKind,
+      };
+    }
+  } catch (error) {
+    if (!error.code) throw error;
+    if (error.code !== "simulated_crash") recordFailure(reconciliationCtx, state, error);
+    return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+  }
   const unresolvedBinding = state.runtime_bindings.find(({ binding_state }) => binding_state === "unreachable");
   if (unresolvedBinding && workspace) {
     try {
@@ -2458,22 +2476,6 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       }
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
-  }
-  const reconciliationCtx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
-  try {
-    const reconciliation = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
-    state = reconciliation.state;
-    if (reconciliation.eventKind) {
-      return {
-        ...inspectRun(runDir),
-        next_action: null,
-        checkpoint: reconciliation.eventKind,
-      };
-    }
-  } catch (error) {
-    if (!error.code) throw error;
-    if (error.code !== "simulated_crash") recordFailure(reconciliationCtx, state, error);
-    return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
   }
   const promotionPath = "artifacts/promotions/promotion-1.json";
   const resultRepoPath = join(runDir, "result-repository.git");
@@ -3076,6 +3078,16 @@ export async function runLocalChange({
         label: "worker Result proposal Attempt",
       });
       proposalExecution = proposalExecutionResult.execution;
+      writePreparedExecution(ctx, "worker-implementation-1", {
+        ...proposalExecution,
+        phase: "worker_result_proposal",
+        result_commit: resultCommit,
+        worker_snapshot: workerSnapshot,
+        observed_resources: observedResources,
+        worker_changes: workerChanges,
+        command_execution: commandExecution,
+        worker_edit_runtime_ref: workerEditRuntimeRef,
+      });
       admitRuntimeAttempt(ctx, state, proposalExecution, {
         attemptId: "worker-implementation-1",
         label: "worker Result proposal Attempt",
@@ -3367,7 +3379,7 @@ export async function runLocalChange({
 
     let verifierBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "verifier-1");
     if (state.tasks["verification-1"]?.task_state === "planned") {
-      admitBudget(state, "execution_attempt");
+      if (!verifierBinding) admitBudget(state, "execution_attempt");
       const verifierPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
         role: "verifier",
         attemptId: "verifier-1",
@@ -3376,6 +3388,14 @@ export async function runLocalChange({
       });
       state = verifierPrepared.state;
       const verifierAttempt = { binding: verifierPrepared.binding };
+      if (continuingResult && verifierPrepared.prepared) {
+        return {
+          run_id: runId,
+          run_dir: runDir,
+          inspect: inspectRun(runDir),
+          checkpoint: "runtime_dispatch_prepared",
+        };
+      }
       if (verifierAttempt.binding.agent_identity === workerIdentity) {
         throw new Error("verifier_not_independent");
       }
