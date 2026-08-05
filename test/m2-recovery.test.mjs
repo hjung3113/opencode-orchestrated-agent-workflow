@@ -1315,7 +1315,7 @@ test("prepared canonical reconciliation replays after a crash without a second G
     const runDir = join(runRoot, "runs", runId);
     runtime.reconcileSuccess = true;
 
-    let crashBoundary = "after_reconciled_observation_publication";
+    let crashBoundary = "after_reconciled_prepared_publication";
     const reconciliationHooks = { crashAt: (label) => label === crashBoundary };
     const crashed = await resumeRun(runDir, {
       workspace,
@@ -1326,34 +1326,41 @@ test("prepared canonical reconciliation replays after a crash without a second G
     assert.equal(runtime.reconcileCalls.length, 1);
     assert.equal(existsSync(join(
       runDir,
-      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
-    )), true);
-    assert.equal(existsSync(join(
-      runDir,
       "staging/recovery/planner-graph-1.json",
     )), true);
-    const canonicalBeforeReplay = readFileSync(join(
+    const preparedAfterPreparedCrash = JSON.parse(readFileSync(join(
+      runDir,
+      "staging/recovery/planner-graph-1.json",
+    )));
+    assert.equal("observation" in preparedAfterPreparedCrash, true);
+    assert.equal(existsSync(join(
       runDir,
       "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
-    ), "utf8");
+    )), false);
     assert.equal(
       JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings
         .find(({ attempt_id }) => attempt_id === "planner-graph-1").binding_state,
       "unreachable",
     );
 
-    crashBoundary = "after_reconciled_prepared_publication";
-    const preparedCrash = await resumeRun(runDir, {
+    crashBoundary = "after_reconciled_observation_publication";
+    const observationCrash = await resumeRun(runDir, {
       workspace,
       runtime,
       hooks: reconciliationHooks,
     });
-    assert.equal(preparedCrash.checkpoint, "simulated_crash");
+    assert.equal(observationCrash.checkpoint, "simulated_crash");
     assert.equal(runtime.reconcileCalls.length, 1);
-    assert.equal("observation" in JSON.parse(readFileSync(join(
+    const canonicalPath = join(
       runDir,
-      "staging/recovery/planner-graph-1.json",
-    ))), true);
+      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
+    );
+    assert.equal(existsSync(canonicalPath), true);
+    const canonicalEntries = artifactEntries(runDir)
+      .filter(([, artifact]) => artifact.artifact_id === "runtime-planner-graph-1-reconciled");
+    assert.equal(canonicalEntries.length, 1);
+    assert.deepEqual(canonicalEntries[0][1], preparedAfterPreparedCrash.observation);
+    const canonicalBeforeReplay = readFileSync(canonicalPath, "utf8");
 
     crashBoundary = "before_run_state_replacement:runtime_reconciled";
     const beforeReplacement = await resumeRun(runDir, {
@@ -1380,10 +1387,11 @@ test("prepared canonical reconciliation replays after a crash without a second G
         .map(({ event_kind }) => event_kind),
       ["runtime_reconciled"],
     );
-    assert.equal(readFileSync(join(
-      runDir,
-      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
-    ), "utf8"), canonicalBeforeReplay);
+    assert.equal(readFileSync(canonicalPath, "utf8"), canonicalBeforeReplay);
+    assert.equal(
+      afterRecovery.transitions.filter(({ event_kind }) => event_kind === "runtime_reconciled").length,
+      1,
+    );
     assert.equal(
       JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings
         .find(({ attempt_id }) => attempt_id === "planner-graph-1").binding_state,

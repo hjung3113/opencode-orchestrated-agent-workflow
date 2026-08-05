@@ -1565,9 +1565,9 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
         : {}),
   };
   writePreparedExecution(ctx, attemptId, recoveredExecution);
+  crashAt(ctx, "after_reconciled_prepared_publication");
   writeArtifact(ctx, observationRef.path, observation);
   crashAt(ctx, "after_reconciled_observation_publication");
-  crashAt(ctx, "after_reconciled_prepared_publication");
   const next = applyTransition(ctx, state, "runtime_reconciled", {
     lifecycle_state: "active",
     runtime_bindings: state.runtime_bindings.map((current) =>
