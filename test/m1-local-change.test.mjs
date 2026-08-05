@@ -22,6 +22,7 @@ import {
   digest,
   OpenCodeAdapter,
   resolveArtifactReference,
+  resumeRun,
   runLocalChange,
   workspaceSnapshot,
 } from "../scripts/local-change.mjs";
@@ -82,6 +83,7 @@ class FakeRuntime {
     this.configurationDigest = digest("fake-config");
     this.version = "fake-1";
     this.nextSession = 0;
+    this.workerProposalPhases = new Set();
   }
 
   async start() {}
@@ -194,12 +196,15 @@ class FakeRuntime {
           escalation_condition: "stop on a violation",
         },
       });
-    } else if (attemptId === "worker-implementation-1") {
-      workerProposalPhase = this.workerProposalPhase === true;
+    } else if (["worker-implementation-1", "worker-repair-1"].includes(attemptId)) {
+      workerProposalPhase = this.workerProposalPhases.has(attemptId);
       if (!workerProposalPhase) {
-        if (!scenario.idleWithoutResult) writeFileSync(join(this.workspace, this.targetFile), this.expectedContent);
+        if (!scenario.idleWithoutResult) writeFileSync(
+          join(this.workspace, this.targetFile),
+          scenario.finding && attemptId === "worker-implementation-1" ? "needs repair\n" : this.expectedContent,
+        );
         if (scenario.undeclaredPathChange) writeFileSync(join(this.workspace, "unexpected.txt"), "unexpected\n");
-        this.workerProposalPhase = true;
+        this.workerProposalPhases.add(attemptId);
         text = JSON.stringify({ status: "edit complete" });
       } else {
         text = JSON.stringify({
@@ -222,20 +227,72 @@ class FakeRuntime {
           escalation_condition: "block on mismatch",
         },
       });
+    } else if (attemptId === "planner-graph-3") {
+      text = JSON.stringify({
+        repair_task: { task_id: "repair-1", workflow_definition: "repair", requires: ["verification-1"], read_resources: [this.targetFile], write_resources: [this.targetFile] },
+        repair_packet: {
+          objective: "repair the verifier finding",
+          acceptance_criteria: ["target matches"],
+          forbidden_resources: [".git"],
+          capabilities: ["repository_read", "local_write", "command_execute"],
+          admitted_commands: [],
+          deadline_seconds: 3,
+          escalation_condition: "block on recurrence",
+        },
+      });
+    } else if (attemptId === "planner-graph-4") {
+      text = JSON.stringify({
+        verifier_task: { task_id: "verification-2", workflow_definition: "verification", requires: ["repair-1"], read_resources: [this.targetFile], write_resources: [] },
+        verifier_packet: {
+          objective: "verify repaired target",
+          acceptance_criteria: ["target matches"],
+          forbidden_resources: [".git"],
+          capabilities: ["repository_read"],
+          admitted_commands: [],
+          deadline_seconds: 3,
+          escalation_condition: "block on mismatch",
+        },
+      });
     } else if (attemptId === "verifier-1") {
       if (scenario.postReviewMutation) writeFileSync(join(this.workspace, this.targetFile), "drift\n");
       text = scenario.malformedVerifier
         ? "not structured review"
+        : scenario.finding
+          ? JSON.stringify({
+            verdict: "finding",
+            findings: [{
+              finding_id: "finding-1",
+              fingerprint: digest("change.txt content mismatch"),
+              criterion: "target matches",
+              evidence: [{ claim: "target differs", source: "verifier-read", observation: "read target bytes" }],
+            }],
+            evidence: [{ claim: "target differs", source: "verifier-read", observation: "read target bytes" }],
+          })
         : JSON.stringify({
           verdict: "pass",
           findings: [],
           evidence: [{ claim: "target matches", source: "verifier-read", observation: "read target bytes" }],
         });
+    } else if (attemptId === "verifier-2") {
+      text = JSON.stringify(scenario.recurrentFinding ? {
+        verdict: "finding",
+        findings: [{
+          finding_id: "finding-2",
+          fingerprint: digest("change.txt content mismatch"),
+          criterion: "target matches",
+          evidence: [{ claim: "target still differs", source: "verifier-read", observation: "read repaired target bytes" }],
+        }],
+        evidence: [{ claim: "target still differs", source: "verifier-read", observation: "read repaired target bytes" }],
+      } : {
+        verdict: "pass",
+        findings: [],
+        evidence: [{ claim: "repaired target matches", source: "verifier-read", observation: "read repaired target bytes" }],
+      });
     } else {
       throw new Error(`unexpected fake attempt ${attemptId}`);
     }
     const snapshot = workspaceSnapshot(this.workspace);
-    if (workerProposalPhase && attemptId === "worker-implementation-1") {
+    if (workerProposalPhase && ["worker-implementation-1", "worker-repair-1"].includes(attemptId)) {
       const proposal = JSON.parse(text);
       proposal.output_snapshot = snapshot.digest;
       text = JSON.stringify(proposal);
@@ -268,6 +325,210 @@ function lastRun(runRoot) {
   const runId = readdirSync(join(runRoot, "runs")).sort().at(-1);
   return join(runRoot, "runs", runId);
 }
+
+test("M3 admits a Finding Review without preparing Promotion or Receipt", { timeout: 30_000 }, async () => {
+  const { workspace, runRoot } = fixture();
+  let runtime;
+  try {
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt with the requested local change.",
+      runtimeFactory: (options) => (runtime = new FakeRuntime({ ...options, scenario: { finding: true } })),
+      hooks: {
+        crashAt: "after_result_publication",
+        commandOverride: () => ({
+          command_id: "verify-change",
+          argv: [process.execPath, "-e", "process.exit(0)"],
+          cwd: ".",
+          timeout_seconds: 3,
+        }),
+      },
+    }), /simulated process death/);
+    const runDir = lastRun(runRoot);
+    for (let checkpoint; checkpoint !== "review_admitted";) {
+      const resumed = await resumeRun(runDir, { workspace, runtime });
+      checkpoint = resumed.checkpoint;
+      assert.notEqual(resumed.lifecycle_state, "blocked");
+    }
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const review = readArtifact(runDir, state.tasks["verification-1"].artifact_ref);
+    assert.equal(review.verdict, "finding");
+    assert.equal(review.findings[0].finding_id, "finding-1");
+    assert.equal(statSync(join(runDir, "artifacts/promotions/promotion-1.json"), { throwIfNoEntry: false }), undefined);
+    assert.equal(statSync(join(runDir, "artifacts/outcomes/0001.json"), { throwIfNoEntry: false }), undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("M3 repairs one Finding and independently verifies the successor snapshot", { timeout: 30_000 }, async () => {
+  const { workspace, runRoot } = fixture();
+  let runtime;
+  try {
+    let result = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt with the requested local change.",
+      runtimeFactory: (options) => (runtime = new FakeRuntime({ ...options, scenario: { finding: true } })),
+      budgetOverride: {
+        max_execution_attempts: 4,
+        max_planner_attempts: 5,
+        max_graph_revisions: 4,
+        max_repairs_per_finding: 1,
+      },
+      hooks: {
+        commandOverride: () => ({
+          command_id: "verify-change",
+          argv: [process.execPath, "-e", "process.exit(0)"],
+          cwd: ".",
+          timeout_seconds: 3,
+        }),
+      },
+    });
+    const runDir = result.run_dir;
+    for (let count = 0; (result.inspect?.lifecycle_state ?? result.lifecycle_state) !== "completed" && count < 8; count += 1) {
+      result = await resumeRun(runDir, { workspace, runtime });
+    }
+    assert.equal(result.inspect?.lifecycle_state ?? result.lifecycle_state, "completed");
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const originalResult = readArtifact(runDir, state.tasks["implementation-1"].artifact_ref);
+    const findingReview = readArtifact(runDir, state.tasks["verification-1"].artifact_ref);
+    const repairResult = readArtifact(runDir, state.tasks["repair-1"].artifact_ref);
+    const finalReview = readArtifact(runDir, state.tasks["verification-2"].artifact_ref);
+    const repairPacket = readArtifact(
+      runDir,
+      JSON.parse(readFileSync(join(runDir, "artifacts/graphs/0003.json"))).nodes.find(({ task_id }) => task_id === "repair-1").packet_ref,
+    );
+    assert.equal(findingReview.verdict, "finding");
+    assert.equal(repairPacket.finding_ref.digest, state.tasks["verification-1"].artifact_ref.digest);
+    assert.equal(repairPacket.finding_id, "finding-1");
+    assert.equal(repairPacket.target_snapshot, originalResult.output_snapshot);
+    assert.notEqual(repairResult.output_snapshot, originalResult.output_snapshot);
+    assert.equal(finalReview.verdict, "pass");
+    assert.equal(finalReview.target_snapshot, repairResult.output_snapshot);
+    assert.equal(state.budget.max_repairs_per_finding, 1);
+    assert.equal(statSync(join(runDir, "artifacts/promotions/promotion-1.json")).isFile(), true);
+    const receipt = JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json")));
+    for (const required of [
+      state.tasks["implementation-1"].artifact_ref,
+      state.tasks["verification-1"].artifact_ref,
+      state.tasks["repair-1"].artifact_ref,
+      state.tasks["verification-2"].artifact_ref,
+    ]) {
+      assert.ok(receipt.artifact_refs.some(({ digest: value }) => value === required.digest));
+    }
+    for (const path of [join(runDir, "run.json"), ...walkJson(join(runDir, "artifacts"))]) {
+      const artifact = JSON.parse(readFileSync(path));
+      assert.equal(validate(artifact), true, `${path}: ${JSON.stringify(validate.errors)}`);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("M3 blocks a recurrent finding without dispatching a second repair", { timeout: 30_000 }, async () => {
+  const { workspace, runRoot } = fixture();
+  let runtime;
+  try {
+    let result = await runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt with the requested local change.",
+      runtimeFactory: (options) => (runtime = new FakeRuntime({ ...options, scenario: { finding: true, recurrentFinding: true } })),
+      budgetOverride: {
+        max_execution_attempts: 4,
+        max_planner_attempts: 5,
+        max_graph_revisions: 4,
+        max_repairs_per_finding: 1,
+      },
+      hooks: {
+        commandOverride: () => ({
+          command_id: "verify-change",
+          argv: [process.execPath, "-e", "process.exit(0)"],
+          cwd: ".",
+          timeout_seconds: 3,
+        }),
+      },
+    });
+    const runDir = result.run_dir;
+    for (let count = 0; (result.inspect?.lifecycle_state ?? result.lifecycle_state) === "active" && count < 8; count += 1) {
+      result = await resumeRun(runDir, { workspace, runtime });
+    }
+    const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const block = JSON.parse(readFileSync(join(runDir, "artifacts/outcomes/0001.json")));
+    assert.equal(state.lifecycle_state, "blocked");
+    assert.equal(block.block_type, "repair_budget_exhausted");
+    assert.equal(Object.keys(state.tasks).filter((id) => id.startsWith("repair-")).length, 1);
+    assert.equal(statSync(join(runDir, "artifacts/promotions/promotion-1.json"), { throwIfNoEntry: false }), undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("M3 resumes valid publication boundaries and rejects conflicting prepared graphs", { timeout: 60_000 }, async () => {
+  for (const [boundary, recoveredCheckpoint, recurrentFinding = false, terminalState = "completed", tamperGraph = false] of [
+    ["after_graph_three_publication", "repair_admitted"],
+    ["after_repair_result_publication", "repair_result_admitted"],
+    ["after_graph_four_publication", "graph_revision_4_admitted"],
+    ["after_repair_review_publication", "review_admitted", true, "blocked"],
+    ["after_graph_three_publication", "prepared_graph_conflict", false, "blocked", true],
+    ["after_graph_four_publication", "prepared_graph_conflict", false, "blocked", true],
+  ]) {
+    const { workspace, runRoot } = fixture();
+    let runtime;
+    try {
+      let result = await runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt with the requested local change.",
+        runtimeFactory: (options) => (runtime = new FakeRuntime({ ...options, scenario: { finding: true, recurrentFinding } })),
+        budgetOverride: {
+          max_execution_attempts: 4,
+          max_planner_attempts: 5,
+          max_graph_revisions: 4,
+          max_repairs_per_finding: 1,
+        },
+        hooks: {
+          commandOverride: () => ({
+            command_id: "verify-change",
+            argv: [process.execPath, "-e", "process.exit(0)"],
+            cwd: ".",
+            timeout_seconds: 3,
+          }),
+        },
+      });
+      const runDir = result.run_dir;
+      for (let count = 0; result.checkpoint !== "simulated_crash" && count < 8; count += 1) {
+        result = await resumeRun(runDir, { workspace, runtime, hooks: { crashAt: boundary } });
+      }
+      assert.equal(result.checkpoint, "simulated_crash", boundary);
+      if (tamperGraph) {
+        const state = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const graphPath = join(runDir, "artifacts/graphs", boundary.includes("three") ? "0003.json" : "0004.json");
+        const graph = JSON.parse(readFileSync(graphPath));
+        graph.trigger_ref = state.request_ref;
+        writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`);
+      }
+      const recovered = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(recovered.checkpoint, recoveredCheckpoint, boundary);
+      let current = recovered;
+      for (let count = 0; (current.inspect?.lifecycle_state ?? current.lifecycle_state) === "active" && count < 8; count += 1) {
+        current = await resumeRun(runDir, { workspace, runtime });
+      }
+      assert.equal(current.inspect?.lifecycle_state ?? current.lifecycle_state, terminalState, boundary);
+      const ids = walkJson(join(runDir, "artifacts"))
+        .map((path) => JSON.parse(readFileSync(path)).artifact_id);
+      assert.equal(new Set(ids).size, ids.length, boundary);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
 
 async function assertBlockedScenario(scenario) {
   const { workspace, runRoot } = fixture();
@@ -412,10 +673,10 @@ test("real local-change@1 run preserves the user worktree and emits the verified
 
     assert.deepEqual(state.budget, {
       max_concurrency: 1,
-      max_execution_attempts: 2,
-      max_planner_attempts: 3,
-      max_graph_revisions: 2,
-      max_repairs_per_finding: 0,
+      max_execution_attempts: 4,
+      max_planner_attempts: 5,
+      max_graph_revisions: 4,
+      max_repairs_per_finding: 1,
     });
     assert.equal(state.admission_state, "admitted");
     assert.equal(state.lifecycle_state, "completed");
