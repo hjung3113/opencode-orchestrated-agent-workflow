@@ -34,14 +34,15 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current implementation tip before this handoff commit is `f122a80` on
+- Current implementation tip before this handoff commit is `34916fb` on
   `agent/executable-opencode-harness-design`. This repair pass adds
   `6a6a9b6` (one authoritative reconciled Runtime Observation), `1cb9808`
   (one-action recovered graph/worker replay), `4f5ee4c` (durable GET-only
   worker workspace recovery), `72553bf` (immutable admission replay
   assertion), `58af23c` (recovered worker-edit reference reuse),
   `d0e2622` (prepared canonical Runtime reconciliation replay after crash),
-  and `f122a80` (complete canonical preparation before observation publish).
+  `f122a80` (complete canonical preparation before observation publish), and
+  `34916fb` (distinct prepared-only crash-boundary evidence).
   Nothing has been pushed and no PR exists; this handoff update is the next
   local commit.
 - Current deterministic evidence: protocol 4/4, M0 16/16 in
@@ -49,7 +50,7 @@
   6054.914167ms, focused crash/reconciliation tests 4/4 in
   15028.216917ms, and the focused GET-only/ambiguous replay subset 3/3 in
   8419.637917ms. The latest canonical observation replay set is 5/5 in
-  19149.619292ms. All checked
+  19088.70925ms. All checked
   `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
   `git diff --check` passed before this edit.
 - The one fresh serial post-repair `npm run test:m2` run was not green:
@@ -137,10 +138,12 @@ performed. Before any future publication:
   Review publication, before/after `receipt_admitted` Run-state replacement,
   before/after runtime abort, and canonical reconciliation at observation
   publication, prepared execution publication, and before
-  `runtime_reconciled` Run-state replacement. The canonical observation crash
-  regression uses the direct file-backed `resumeRun` seam; it consumes a
-  validated prepared canonical observation without a second provider GET and
-  preserves its immutable bytes. It is not claimed as public CLI evidence.
+  `runtime_reconciled` Run-state replacement. The prepared-only boundary
+  leaves a complete prepared execution without a canonical artifact; the next
+  direct file-backed `resumeRun` publishes that exact observation once without
+  a provider GET. The observation-only and before-state boundaries then replay
+  the same bytes and admit one `runtime_reconciled` transition. This
+  reconciliation regression uses direct `resumeRun`, not public CLI evidence.
   Every planner, worker, and verifier session binding is durably prepared
   before a possibly accepted POST; preparation, POST/reconciliation, and
   graph admission are separate resume actions. Explicit HTTP failure retries
@@ -173,9 +176,11 @@ performed. Before any future publication:
 - `node --test --test-name-pattern='(GET-only worker reconciliation|prepared canonical reconciliation replays|successful ambiguous reconciliation)' test/m2-recovery.test.mjs` — 3/3 passed in
   8419.637917ms.
 - `node --test --test-name-pattern='(successful ambiguous reconciliation|GET-only worker reconciliation|partial Runtime publication|prepared canonical reconciliation|crash boundaries are deterministic)' test/m2-recovery.test.mjs` — 5/5 passed in
-  19149.619292ms. The changed timestamp and provider identity on the second
-  fake GET reproduce the prior immutable-ID conflict; the repaired
-  observation-only crash path performs zero additional GETs and admits one
+  19088.70925ms. The prepared-only crash has a complete prepared execution
+  and no canonical artifact; the next observation publication creates exactly
+  one unchanged canonical artifact without another GET. The changed timestamp
+  and provider identity on a hypothetical second fake GET remain covered, and
+  the observation-only and before-state boundaries admit one
   `runtime_reconciled` transition. This test uses direct `resumeRun`, not the
   public CLI.
 - `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
@@ -241,7 +246,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `f122a80`; this handoff update is the next
+- HEAD before this handoff commit: `34916fb`; this handoff update is the next
   local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
