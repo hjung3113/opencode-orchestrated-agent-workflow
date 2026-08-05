@@ -566,7 +566,7 @@ test("M1 kernel admits immutable producer-owned artifacts and detects Result/ref
   };
   try {
     const reference = admitArtifact(ctx, "artifacts/runtime/test.json", observation);
-    assert.throws(() => admitArtifact(ctx, "artifacts/runtime/test.json", observation), /immutable artifact already exists/);
+    assert.deepEqual(admitArtifact(ctx, "artifacts/runtime/test.json", observation), reference);
     writeFileSync(join(runDir, reference.path), JSON.stringify({ ...observation, observed_output_snapshot: digest("tampered") }));
     assert.throws(() => resolveArtifactReference(ctx, reference), /digest or id mismatch/);
     assert.throws(() => admitArtifact(ctx, "artifacts/runtime/other.json", observation, "wrong-owner"), /producer ownership mismatch/);
