@@ -34,7 +34,7 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current implementation tip before this handoff commit is `34916fb` on
+- Current implementation tip before this handoff commit is `71e9b1e` on
   `agent/executable-opencode-harness-design`. This repair pass adds
   `6a6a9b6` (one authoritative reconciled Runtime Observation), `1cb9808`
   (one-action recovered graph/worker replay), `4f5ee4c` (durable GET-only
@@ -43,32 +43,35 @@
   `d0e2622` (prepared canonical Runtime reconciliation replay after crash),
   `f122a80` (complete canonical preparation before observation publish), and
   `34916fb` (distinct prepared-only crash-boundary evidence).
-  Nothing has been pushed and no PR exists; this handoff update is the next
-  local commit.
+  The serial provider-backed exit gates below ran at this exact clean HEAD;
+  no implementation files changed afterward. Nothing has been pushed and no
+  PR exists; this handoff update is the next local commit.
 - Current deterministic evidence: protocol 4/4, M0 16/16 in
   64961.660166ms, kernel 1/1 in 151.896ms, deterministic M1 10/10 in
   6054.914167ms, focused crash/reconciliation tests 4/4 in
   15028.216917ms, and the focused GET-only/ambiguous replay subset 3/3 in
   8419.637917ms. The latest canonical observation replay set is 5/5 in
-  19088.70925ms. All checked
+  19088.70925ms. The single serial full real-provider `npm run test:m2`
+  gate then passed 34/34 in 273206.762375ms; because M2 was green, the single
+  serial full real-provider `npm run test:m1` gate ran and passed 12/12 in
+  42878.38775ms. All checked
   `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
   `git diff --check` passed before this edit.
-- The one fresh serial post-repair `npm run test:m2` run was not green:
-  32/33 passed in 854362.703916ms. The sole failure was
-  `Receipt after Decision restart includes the accepted Decision reference`;
-  the real OpenCode verifier returned no JSON and the public resume failed
-  with `verifier did not return a JSON object` at
-  `scripts/local-change.mjs:1019`. Full M1 was not run because M2 was not
-  green.
+- An earlier serial provider attempt was historical evidence only: 32/33
+  passed in 854362.703916ms, with the real OpenCode verifier returning no JSON
+  for `Receipt after Decision restart includes the accepted Decision
+  reference` (`verifier did not return a JSON object` at
+  `scripts/local-change.mjs:1019`). The current one-attempt M2 gate had no
+  provider failure text; M1 ran exactly once afterward because that M2 gate
+  was green.
 
 ### Current blocker
 
-The final provider-backed M2 gate is blocked by the OpenCode verifier returning
-an invalid non-JSON response during the Decision-restart Receipt case above.
-Do not claim current full M1/M2 completion or advance to M3 until a healthy
-provider permits one fresh serial gate run. Do not relax deadlines or add a
-generic recovery engine, arbitrary retry/fork surface, concurrency, or
-Application.
+No current implementation or provider blocker remains in this exit lane:
+`npm run test:m2` and the gated `npm run test:m1` both passed at clean HEAD
+`71e9b1e`. The prior non-JSON provider response is historical evidence, not a
+current failure. Do not relax deadlines or add a generic recovery engine,
+arbitrary retry/fork surface, concurrency, or Application.
 
 ### PR gate
 
@@ -161,12 +164,13 @@ performed. Before any future publication:
 - `npm run test:protocol` — 4/4 passed.
 - `npm run test:m0` — 16/16 passed in 64961.660166ms, including the live
   process-death/reconnect cancellation probe.
-- deterministic M1 selection — 10/10 passed in 6054.914167ms. Full
-  `npm run test:m1` was not run because the fresh full M2 gate was not green.
-- `npm run test:m2` — 32/33 passed in 854362.703916ms. The failed case was
-  `Receipt after Decision restart includes the accepted Decision reference`;
-  its real OpenCode verifier response was not a JSON object, so no full M1
-  claim is made.
+- deterministic M1 selection — 10/10 passed in 6054.914167ms.
+- `npm run test:m2` at clean HEAD `71e9b1e` — 34/34 passed in
+  273206.762375ms. This was the single full real-provider M2 attempt; it
+  emitted no provider failure text.
+- `npm run test:m1` at the same clean HEAD, started only after M2 passed —
+  12/12 passed in 42878.38775ms. This was the single full real-provider M1
+  attempt.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --test --test-name-pattern='(successful ambiguous reconciliation|partial Runtime publication|prepared canonical reconciliation|crash boundaries are deterministic)' test/m2-recovery.test.mjs` — 4/4 passed in
   15028.216917ms. This includes crash points after canonical observation
@@ -222,12 +226,12 @@ performed. Before any future publication:
   exercised through the public CLI, while live verifier calls remain
   provider-dependent. The final full gate was serial; no concurrent M2
   isolation repair was evidenced by the earlier concurrent run.
-- Provider limitation: the fresh serial M2 run reached real `opencode serve`
-  sessions and failed only at the Decision-restart Receipt case because the
-  verifier response was not JSON. This is not recorded as a green M2 gate;
-  no timeout relaxation, retry, or full M1 run followed it. The M0 fixture
-  still provides the independent health, message, and live
-  cancellation/reconnect observations.
+- Historical provider limitation: an earlier serial M2 run reached real
+  `opencode serve` sessions and failed only at the Decision-restart Receipt
+  case because the verifier response was not JSON. The current single serial
+  M2 run reached 34/34, so this limitation is not an active gate failure; no
+  timeout relaxation or retry was used. The M0 fixture still provides the
+  independent health, message, and live cancellation/reconnect observations.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -246,7 +250,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `34916fb`; this handoff update is the next
+- HEAD before this handoff commit: `71e9b1e`; this handoff update is the next
   local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
