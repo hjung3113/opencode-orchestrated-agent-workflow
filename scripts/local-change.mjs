@@ -1478,6 +1478,23 @@ async function executeRuntimeAttempt(ctx, state, adapter, spec) {
       });
     return { execution, reconciled: binding.binding_state === "unreachable" };
   } catch (error) {
+    if (isAmbiguousProviderFailure(error)) {
+      const preparedPath = preparedExecutionPath(ctx, spec.attemptId);
+      const previousPrepared = existsSync(preparedPath)
+        ? JSON.parse(readFileSync(preparedPath, "utf8")) : {};
+      const recoveredWorkspacePath = join(dirname(preparedPath), `${spec.attemptId}-workspace`);
+      mkdirSync(dirname(recoveredWorkspacePath), { recursive: true });
+      if (!existsSync(recoveredWorkspacePath)) {
+        cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
+      }
+      writePreparedExecution(ctx, spec.attemptId, {
+        ...previousPrepared,
+        binding: previousPrepared.binding ?? binding,
+        text: previousPrepared.text ?? "",
+        before_snapshot: previousPrepared.before_snapshot ?? spec.beforeSnapshot,
+        phase: previousPrepared.phase ?? (spec.role === "worker" ? "worker_edit" : spec.attemptId),
+      });
+    }
     if (isRecoverableProviderFailure(error)) {
       markRuntimeDispatchFailure(
         ctx,
@@ -1512,13 +1529,16 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
     beforeSnapshot,
     label: `${binding.role} ${attemptId} reconciliation`,
   });
-  const observation = {
-    ...execution.observation,
-    artifact_id: `runtime-${attemptId}-reconciled`,
-  };
   const preparedPath = preparedExecutionPath(ctx, attemptId);
   const previousPrepared = existsSync(preparedPath)
     ? JSON.parse(readFileSync(preparedPath, "utf8")) : {};
+  const observation = {
+    ...execution.observation,
+    ...(previousPrepared.worker_changes ? { observed_changes: previousPrepared.worker_changes } : {}),
+    ...(previousPrepared.worker_snapshot ? { observed_output_snapshot: previousPrepared.worker_snapshot.digest } : {}),
+    ...(previousPrepared.command_execution ? { command_executions: [previousPrepared.command_execution] } : {}),
+    artifact_id: `runtime-${attemptId}-reconciled`,
+  };
   const recoveredWorkspacePath = join(ctx.runDir, "staging", "recovery", `${attemptId}-workspace`);
   if (existsSync(recoveredWorkspacePath)) rmSync(recoveredWorkspacePath, { recursive: true, force: true });
   cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
@@ -2727,7 +2747,7 @@ export async function runLocalChange({
     const recoveredBinding = existingState?.runtime_bindings.find(({ attempt_id, binding_state }) => {
       const preparedPath = preparedExecutionPath({ runDir }, attempt_id);
       const recoveryWorkspacePath = join(dirname(preparedPath), `${attempt_id}-workspace`);
-      return binding_state !== "unreachable" && existsSync(preparedPath) && existsSync(recoveryWorkspacePath);
+      return existsSync(preparedPath) && existsSync(recoveryWorkspacePath);
     });
     let recoveredPreparedExecution = null;
     if (recoveredBinding) {
@@ -2735,13 +2755,14 @@ export async function runLocalChange({
       const recoveryWorkspacePath = join(dirname(preparedPath), `${recoveredBinding.attempt_id}-workspace`);
       recoveredPreparedExecution = JSON.parse(readFileSync(preparedPath, "utf8"));
       rmSync(taskWorkspace, { recursive: true, force: true });
-      renameSync(recoveryWorkspacePath, taskWorkspace);
+      cpSync(recoveryWorkspacePath, taskWorkspace, { recursive: true, dereference: false });
     } else {
       cloneWorkspace(workspace, taskWorkspace);
     }
     let taskBaseline = workspaceSnapshot(taskWorkspace);
     if (recoveredPreparedExecution?.before_snapshot) {
-      if (!recoveredPreparedExecution.snapshot || taskBaseline.digest !== recoveredPreparedExecution.snapshot.digest) {
+      if ((!recoveredPreparedExecution.snapshot && !reconcileOnlyAttemptId)
+        || (recoveredPreparedExecution.snapshot && taskBaseline.digest !== recoveredPreparedExecution.snapshot.digest)) {
         throw new AttemptFailure("runtime_reconciliation_required", "recovered Runtime workspace does not reproduce its Output Snapshot");
       }
       taskBaseline = recoveredPreparedExecution.before_snapshot;

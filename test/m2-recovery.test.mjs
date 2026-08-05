@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { cancelRun, digest, resumeRun, runLocalChange } from "../scripts/local-change.mjs";
+import { cancelRun, digest, resumeRun, runLocalChange, workspaceSnapshot } from "../scripts/local-change.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -544,6 +544,96 @@ test("ambiguous planner, worker, and verifier Attempts reconcile the same bindin
       const after = JSON.parse(readFileSync(join(runDir, "run.json")));
       assert.equal(after.runtime_bindings.filter(({ attempt_id }) => attempt_id === targetAttemptId).length, 1, targetAttemptId);
     } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("GET-only worker reconciliation restores the bound workspace for edit and proposal phases", async () => {
+  for (const targetPhase of ["worker_edit", "worker_result_proposal"]) {
+    const { workspace, runRoot } = fixture();
+    const preservedRoot = mkdtempSync(join(tmpdir(), "m2-worker-bound-workspace-"));
+    const preservedWorkspace = join(preservedRoot, "workspace");
+    try {
+      let runtime;
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => {
+          runtime = new Runtime(options);
+          runtime.scenario = targetPhase === "worker_result_proposal" ? "worker-proposal" : undefined;
+          runtime.executeCalls = [];
+          runtime.reconcileCalls = [];
+          runtime.reconcileSuccess = false;
+          runtime.acceptedExecutions = {};
+          runtime.ambiguousFailureConsumed = false;
+          const execute = runtime.execute.bind(runtime);
+          runtime.execute = async (spec) => {
+            const phase = spec.attemptId === "worker-implementation-1"
+              ? (spec.prompt.includes("The Kernel observed") ? "worker_result_proposal" : "worker_edit")
+              : spec.attemptId;
+            runtime.executeCalls.push({ attemptId: spec.attemptId, phase });
+            const accepted = await execute(spec);
+            if (phase === targetPhase && !runtime.ambiguousFailureConsumed) {
+              runtime.acceptedExecutions[phase] = accepted;
+              cpSync(runtime.workspace, preservedWorkspace, { recursive: true, dereference: false });
+              runtime.ambiguousFailureConsumed = true;
+              throw Object.assign(new Error(`ambiguous ${targetPhase} POST after provider acceptance`), { code: "ECONNRESET" });
+            }
+            return accepted;
+          };
+          runtime.reconcileAttempt = async (spec) => {
+            runtime.reconcileCalls.push(spec.attemptId);
+            if (!runtime.reconcileSuccess) {
+              throw Object.assign(new Error("provider GET has not exposed the completed worker response"), { code: "runtime_reconciliation_required" });
+            }
+            const accepted = runtime.acceptedExecutions[targetPhase];
+            const snapshot = workspaceSnapshot(preservedWorkspace);
+            return {
+              ...accepted,
+              binding: { ...spec.binding, binding_state: "idle" },
+              snapshot,
+              observation: { ...accepted.observation, observed_output_snapshot: snapshot.digest },
+            };
+          };
+          return runtime;
+        },
+      }), /ambiguous|provider|Attempt/i);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+      const unresolved = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(unresolved.checkpoint, "runtime_reconciliation_required", targetPhase);
+      runtime.reconcileSuccess = true;
+      const recovered = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(recovered.checkpoint, "runtime_reconciled", targetPhase);
+      const prepared = JSON.parse(readFileSync(join(runDir, "staging/recovery", "worker-implementation-1.json")));
+      assert.equal(prepared.phase, targetPhase, targetPhase);
+      assert.equal(
+        workspaceSnapshot(join(runDir, "staging/recovery", "worker-implementation-1-workspace")).digest,
+        runtime.acceptedExecutions[targetPhase].snapshot.digest,
+        `${targetPhase}: GET-only recovery must preserve the provider workspace`,
+      );
+      const beforeContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+      const continued = await resumeRun(runDir, { workspace, runtime });
+      const afterContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+      assert.deepEqual(
+        afterContinuation.transitions.slice(beforeContinuation.transitions.length).map(({ event_kind }) => event_kind),
+        ["implementation_result_admitted"],
+        targetPhase,
+      );
+      assert.equal(continued.lifecycle_state, "active", targetPhase);
+      for (let attempt = 0; attempt < 12 && continued.lifecycle_state !== "completed"; attempt += 1) {
+        await resumeRun(runDir, { workspace, runtime });
+      }
+      assert.equal((await resumeRun(runDir, { workspace, runtime })).lifecycle_state, "completed", targetPhase);
+      assert.deepEqual(runtime.executeCalls
+        .filter(({ attemptId }) => attemptId === "worker-implementation-1")
+        .map(({ phase }) => phase), ["worker_edit", "worker_result_proposal"], targetPhase);
+      assert.deepEqual(runtime.reconcileCalls, ["worker-implementation-1", "worker-implementation-1"], targetPhase);
+    } finally {
+      rmSync(preservedRoot, { recursive: true, force: true });
       rmSync(workspace, { recursive: true, force: true });
       rmSync(runRoot, { recursive: true, force: true });
     }
