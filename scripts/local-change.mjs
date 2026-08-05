@@ -2485,8 +2485,9 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
     }
   }
   if ((state.lifecycle_state === "active" || resumableProviderBlock)
-    && (state.decision_refs ?? []).length > 0
-    && !state.tasks?.["implementation-1"]) {
+    && ((state.decision_refs ?? []).length > 0 && !state.tasks?.["implementation-1"]
+      || state.tasks?.["implementation-1"] && !state.tasks["implementation-1"].artifact_ref
+        && !state.tasks?.["verification-1"]?.artifact_ref)) {
     if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "accepted Decision resume requires the target workspace");
     try {
       const runRoot = dirname(dirname(resolve(runDir)));
@@ -2989,6 +2990,14 @@ export async function runLocalChange({
       },
     }, [graphOneRef, implementationPacketRef, graphOneRuntimeRef]);
     clearPreparedExecution(ctx, "planner-graph-1");
+    if (recoveredPreparedExecution?.phase === "planner-graph-1") {
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        inspect: inspectRun(runDir),
+        checkpoint: "graph_revision_1_admitted",
+      };
+    }
 
     } else {
       graphOneRef = state.active_graph_ref;
@@ -3013,12 +3022,14 @@ export async function runLocalChange({
     state = workerPrepared.state;
     const workerAttempt = { binding: workerPrepared.binding };
     workerIdentity = workerAttempt.binding.agent_identity;
-    state = applyTransition(ctx, state, "implementation_dispatched", {
-      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, workerAttempt.binding),
-      tasks: {
-        "implementation-1": { task_state: "active", attempts: 1 },
-      },
-    }, [implementationPacketRef]);
+    if (workerPrepared.prepared || state.tasks["implementation-1"]?.task_state !== "active") {
+      state = applyTransition(ctx, state, "implementation_dispatched", {
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, workerAttempt.binding),
+        tasks: {
+          "implementation-1": { task_state: "active", attempts: 1 },
+        },
+      }, [implementationPacketRef]);
+    }
     await hooks.afterWorkerDispatch?.({ runDir, runId, state, adapter, binding: workerAttempt.binding });
     state = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
     if (state.lifecycle_state !== "active") {
@@ -3174,6 +3185,15 @@ export async function runLocalChange({
       },
     }, [workerEditRuntimeRef, workerRuntimeRef, resultArtifactRef]);
     clearPreparedExecution(ctx, "worker-implementation-1");
+    if (recoveredPreparedExecution?.phase === "worker_edit"
+      || recoveredPreparedExecution?.phase === "worker_result_proposal") {
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        inspect: inspectRun(runDir),
+        checkpoint: "implementation_result_admitted",
+      };
+    }
     } else {
       resultArtifactRef = state.tasks["implementation-1"].artifact_ref;
       const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);

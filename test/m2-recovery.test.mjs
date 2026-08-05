@@ -611,6 +611,39 @@ test("successful ambiguous reconciliation replays all runtime roles without anot
       );
 
       let resumed = recovered;
+      if (targetAttemptId === "planner-graph-1") {
+        const beforeContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const beforeArtifacts = new Set(artifactEntries(runDir).map(([path]) => path.slice(`${runDir}/`.length)));
+        resumed = await resumeRun(runDir, { workspace, runtime });
+        const afterContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const events = afterContinuation.transitions.slice(beforeContinuation.transitions.length)
+          .map(({ event_kind }) => event_kind);
+        const addedArtifacts = artifactEntries(runDir)
+          .map(([path]) => path.slice(`${runDir}/`.length))
+          .filter((path) => !beforeArtifacts.has(path));
+        assert.deepEqual(events, ["graph_revision_1_admitted"], targetAttemptId);
+        assert.deepEqual(addedArtifacts.sort(), [
+          "artifacts/graphs/0001.json",
+          "artifacts/tasks/implementation-1/attempts/1/packet.json",
+        ], targetAttemptId);
+      }
+      if (targetAttemptId === "worker-implementation-1") {
+        const beforeContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const beforeArtifacts = new Set(artifactEntries(runDir).map(([path]) => path.slice(`${runDir}/`.length)));
+        resumed = await resumeRun(runDir, { workspace, runtime });
+        const afterContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+        const events = afterContinuation.transitions.slice(beforeContinuation.transitions.length)
+          .map(({ event_kind }) => event_kind);
+        const addedArtifacts = artifactEntries(runDir)
+          .map(([path]) => path.slice(`${runDir}/`.length))
+          .filter((path) => !beforeArtifacts.has(path));
+        assert.deepEqual(events, ["implementation_result_admitted"], targetAttemptId);
+        assert.deepEqual(addedArtifacts.sort(), [
+          "artifacts/runtime/worker-implementation-1-edit.json",
+          "artifacts/runtime/worker-implementation-1.json",
+          "artifacts/tasks/implementation-1/attempts/1/result.json",
+        ], targetAttemptId);
+      }
       for (let attempt = 0; attempt < 12 && resumed.lifecycle_state !== "completed"; attempt += 1) {
         resumed = await resumeRun(runDir, { workspace, runtime });
       }
