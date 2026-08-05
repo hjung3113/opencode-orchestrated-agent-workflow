@@ -1268,6 +1268,151 @@ test("partial Runtime publication is reconciled without rewriting immutable obse
   }
 });
 
+test("prepared canonical reconciliation replays after a crash without a second GET", async () => {
+  const { workspace, runRoot } = fixture();
+  try {
+    let runtime;
+    await assert.rejects(() => runLocalChange({
+      workspace,
+      runRoot,
+      requestText: "Add change.txt.",
+      runtimeFactory: (options) => {
+        runtime = new Runtime(options);
+        runtime.reconcileCalls = [];
+        runtime.reconcileSuccess = false;
+        runtime.ambiguousFailureConsumed = false;
+        runtime.acceptedExecution = null;
+        const execute = runtime.execute.bind(runtime);
+        runtime.execute = async (spec) => {
+          if (spec.attemptId === "planner-graph-1" && !runtime.ambiguousFailureConsumed) {
+            runtime.ambiguousFailureConsumed = true;
+            runtime.acceptedExecution = await execute(spec);
+            throw Object.assign(new Error("ambiguous planner POST"), { code: "ECONNRESET" });
+          }
+          return execute(spec);
+        };
+        runtime.reconcileAttempt = async (spec) => {
+          runtime.reconcileCalls.push(spec.attemptId);
+          if (!runtime.reconcileSuccess) {
+            throw Object.assign(new Error("planner response is not observable yet"), {
+              code: "runtime_reconciliation_required",
+            });
+          }
+          return {
+            ...runtime.acceptedExecution,
+            binding: { ...runtime.acceptedExecution.binding, binding_state: "idle" },
+            observation: {
+              ...runtime.acceptedExecution.observation,
+              created_at: runtime.reconcileCalls.length < 3
+                ? "2026-08-05T00:00:01.000Z"
+                : "2026-08-05T00:00:03.000Z",
+            },
+          };
+        };
+        return runtime;
+      },
+    }), /ambiguous planner POST/);
+    const runId = readdirSync(join(runRoot, "runs"))[0];
+    const runDir = join(runRoot, "runs", runId);
+    runtime.reconcileSuccess = true;
+
+    let crashBoundary = "after_reconciled_observation_publication";
+    const reconciliationHooks = { crashAt: (label) => label === crashBoundary };
+    const crashed = await resumeRun(runDir, {
+      workspace,
+      runtime,
+      hooks: reconciliationHooks,
+    });
+    assert.equal(crashed.checkpoint, "simulated_crash");
+    assert.equal(runtime.reconcileCalls.length, 1);
+    assert.equal(existsSync(join(
+      runDir,
+      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
+    )), true);
+    assert.equal(existsSync(join(
+      runDir,
+      "staging/recovery/planner-graph-1.json",
+    )), true);
+    assert.equal(
+      "observation" in JSON.parse(readFileSync(join(
+        runDir,
+        "staging/recovery/planner-graph-1.json",
+      ))),
+      false,
+    );
+    assert.equal(
+      JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings
+        .find(({ attempt_id }) => attempt_id === "planner-graph-1").binding_state,
+      "unreachable",
+    );
+
+    crashBoundary = "after_reconciled_prepared_publication";
+    const preparedCrash = await resumeRun(runDir, {
+      workspace,
+      runtime,
+      hooks: reconciliationHooks,
+    });
+    assert.equal(preparedCrash.checkpoint, "simulated_crash");
+    assert.equal(runtime.reconcileCalls.length, 2);
+    const canonicalBeforeReplay = readFileSync(join(
+      runDir,
+      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
+    ), "utf8");
+    assert.equal("observation" in JSON.parse(readFileSync(join(
+      runDir,
+      "staging/recovery/planner-graph-1.json",
+    ))), true);
+
+    crashBoundary = "before_run_state_replacement:runtime_reconciled";
+    const beforeReplacement = await resumeRun(runDir, {
+      workspace,
+      runtime,
+      hooks: reconciliationHooks,
+    });
+    assert.equal(beforeReplacement.checkpoint, "simulated_crash");
+    assert.equal(runtime.reconcileCalls.length, 2);
+    assert.equal(
+      JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings
+        .find(({ attempt_id }) => attempt_id === "planner-graph-1").binding_state,
+      "unreachable",
+    );
+
+    crashBoundary = null;
+    const beforeRecovery = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const recovered = await resumeRun(runDir, { workspace, runtime });
+    const afterRecovery = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.equal(recovered.checkpoint, "runtime_reconciled");
+    assert.equal(runtime.reconcileCalls.length, 2);
+    assert.deepEqual(
+      afterRecovery.transitions.slice(beforeRecovery.transitions.length)
+        .map(({ event_kind }) => event_kind),
+      ["runtime_reconciled"],
+    );
+    assert.equal(readFileSync(join(
+      runDir,
+      "artifacts/runtime/runtime-planner-graph-1-reconciled.json",
+    ), "utf8"), canonicalBeforeReplay);
+    assert.equal(
+      JSON.parse(readFileSync(join(runDir, "run.json"))).runtime_bindings
+        .find(({ attempt_id }) => attempt_id === "planner-graph-1").binding_state,
+      "idle",
+    );
+
+    const beforeContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+    const continued = await resumeRun(runDir, { workspace, runtime });
+    const afterContinuation = JSON.parse(readFileSync(join(runDir, "run.json")));
+    assert.deepEqual(
+      afterContinuation.transitions.slice(beforeContinuation.transitions.length)
+        .map(({ event_kind }) => event_kind),
+      ["graph_revision_1_admitted"],
+    );
+    assert.equal(continued.lifecycle_state, "active");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("prepared Review replay admits one action before Promotion and Receipt", async () => {
   const { workspace, runRoot } = fixture();
   try {

@@ -1428,7 +1428,7 @@ async function prepareRuntimeAttempt(ctx, state, adapter, spec) {
 async function executeRuntimeAttempt(ctx, state, adapter, spec) {
   const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === spec.attemptId);
   if (!binding) throw new AttemptFailure("missing_runtime_binding", `${spec.label ?? spec.attemptId} has no durable Runtime Binding`);
-  if (binding.binding_state !== "unreachable" && existsSync(preparedExecutionPath(ctx, spec.attemptId))) {
+  if (existsSync(preparedExecutionPath(ctx, spec.attemptId))) {
     const prepared = readPreparedExecution(ctx, spec.attemptId);
     if (prepared.snapshot && prepared.observation) {
       return {
@@ -1544,6 +1544,7 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
   cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
   const phase = previousPrepared.phase ?? (binding.role === "worker" ? "worker_edit" : binding.attempt_id);
   const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
+  crashAt(ctx, "after_reconciled_observation_publication");
   const recoveredExecution = {
     ...execution,
     before_snapshot: previousPrepared.before_snapshot ?? beforeSnapshot,
@@ -1561,6 +1562,7 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
         : {}),
   };
   writePreparedExecution(ctx, attemptId, recoveredExecution);
+  crashAt(ctx, "after_reconciled_prepared_publication");
   const next = applyTransition(ctx, state, "runtime_reconciled", {
     lifecycle_state: "active",
     runtime_bindings: state.runtime_bindings.map((current) =>
