@@ -1,0 +1,14 @@
+{
+  "name": "opencode-orchestrated-agent-workflow",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:m0": "node --test test/m0-probe.test.mjs",
+    "test:protocol": "node --test test/protocol-schema.test.mjs",
+    "test:m1": "node --test test/m1-local-change.test.mjs",
+    "test:m2": "node --test test/m2-recovery.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  }
+}

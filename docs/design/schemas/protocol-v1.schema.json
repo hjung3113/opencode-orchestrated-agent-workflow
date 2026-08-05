@@ -4,6 +4,7 @@
   "title": "OpenCode orchestrator protocol v1",
   "oneOf": [
     { "$ref": "#/$defs/run" },
+    { "$ref": "#/$defs/bootstrapEnvelope" },
     { "$ref": "#/$defs/request" },
     { "$ref": "#/$defs/decision" },
     { "$ref": "#/$defs/graph" },
@@ -114,6 +115,62 @@
         { "properties": { "role": { "const": "runtime" } } }
       ]
     },
+    "bootstrapEnvelope": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "kind",
+            "artifact_id",
+            "run_id",
+            "producer",
+            "input_refs",
+            "created_at",
+            "runtime_ref",
+            "role",
+            "workflow_definition",
+            "raw_request",
+            "repository_policy_refs",
+            "capabilities",
+            "admitted_commands",
+            "deadline_seconds",
+            "idempotency_key"
+          ],
+          "properties": {
+            "schema_version": { "const": "1.0" },
+            "kind": { "const": "bootstrap_envelope" },
+            "artifact_id": { "$ref": "#/$defs/id" },
+            "run_id": { "$ref": "#/$defs/id" },
+            "producer": { "$ref": "#/$defs/kernelProducer" },
+            "input_refs": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
+            "created_at": { "type": "string", "format": "date-time" },
+            "runtime_ref": { "$ref": "#/$defs/reference" },
+            "role": { "const": "planner" },
+            "workflow_definition": { "const": "intake" },
+            "raw_request": { "type": "string", "minLength": 1 },
+            "repository_policy_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/reference" }
+            },
+            "capabilities": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/capability" }
+            },
+            "admitted_commands": {
+              "type": "array",
+              "maxItems": 0,
+              "items": { "$ref": "#/$defs/command" }
+            },
+            "deadline_seconds": { "type": "integer", "minimum": 1 },
+            "idempotency_key": { "$ref": "#/$defs/id" }
+          },
+          "unevaluatedProperties": false
+        }
+      ]
+    },
     "envelope": {
       "type": "object",
       "required": [
@@ -185,9 +242,11 @@
             "input_refs",
             "created_at",
             "state_version",
-            "status",
-            "request_ref",
-            "effective_policy",
+            "lifecycle_state",
+            "admission_state",
+            "bootstrap_ref",
+            "idempotency_key",
+            "workspace_baseline",
             "budget",
             "tasks",
             "runtime_bindings",
@@ -202,25 +261,22 @@
             "input_refs": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
             "created_at": { "type": "string", "format": "date-time" },
             "state_version": { "type": "integer", "minimum": 1 },
-            "status": {
-              "enum": ["active", "cancelling", "material_decision_required", "blocked", "completed", "cancelled"]
+            "lifecycle_state": {
+              "enum": ["pre_intake", "active", "cancelling", "material_decision_required", "blocked", "completed", "cancelled"]
             },
+            "admission_state": { "enum": ["pre_intake", "admitted"] },
+            "bootstrap_ref": { "$ref": "#/$defs/reference" },
+            "idempotency_key": { "$ref": "#/$defs/id" },
+            "workspace_baseline": { "$ref": "#/$defs/workspaceBaseline" },
+            "execution_context": { "$ref": "#/$defs/executionContext" },
             "request_ref": { "$ref": "#/$defs/reference" },
             "active_graph_ref": { "$ref": "#/$defs/reference" },
-            "effective_policy": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["preset", "capabilities", "deviations"],
-              "properties": {
-                "preset": { "enum": ["inspect@1", "local-change@1"] },
-                "capabilities": {
-                  "type": "array",
-                  "uniqueItems": true,
-                  "items": { "$ref": "#/$defs/capability" }
-                },
-                "deviations": { "type": "array", "items": { "type": "string" } }
-              }
+            "decision_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/reference" }
             },
+            "prepared_promotion_ref": { "$ref": "#/$defs/reference" },
+            "effective_policy": { "$ref": "#/$defs/effectivePolicy" },
             "budget": { "$ref": "#/$defs/budget" },
             "tasks": {
               "type": "object",
@@ -234,7 +290,33 @@
               "type": "array",
               "items": { "$ref": "#/$defs/transition" }
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "admission_state": { "const": "pre_intake" } },
+                "required": ["admission_state"]
+              },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    { "required": ["request_ref"] },
+                    { "required": ["effective_policy"] }
+                  ]
+                },
+                "properties": {
+                  "lifecycle_state": { "enum": ["pre_intake", "blocked", "cancelled"] }
+                }
+              },
+              "else": {
+                "required": ["request_ref", "effective_policy"],
+                "not": {
+                  "properties": { "lifecycle_state": { "const": "pre_intake" } },
+                  "required": ["lifecycle_state"]
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -243,7 +325,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "objective", "scope", "exclusions", "ambiguities", "assumptions", "target_snapshot", "proposed_preset"],
+          "required": ["kind", "objective", "scope", "exclusions", "ambiguities", "assumptions", "target_snapshot", "preset_selection"],
           "properties": {
             "kind": { "const": "request" },
             "producer": { "$ref": "#/$defs/plannerProducer" },
@@ -253,7 +335,7 @@
             "ambiguities": { "type": "array", "items": { "type": "string" } },
             "assumptions": { "type": "array", "items": { "type": "string" } },
             "target_snapshot": { "$ref": "#/$defs/digest" },
-            "proposed_preset": { "enum": ["inspect@1", "local-change@1"] }
+            "preset_selection": { "$ref": "#/$defs/presetSelection" }
           }
         }
       ],
@@ -264,11 +346,11 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "decision_id", "status", "rationale", "scope", "authority_ref"],
+          "required": ["kind", "decision_id", "disposition", "rationale", "scope", "authority_ref"],
           "properties": {
             "kind": { "const": "decision" },
             "decision_id": { "$ref": "#/$defs/id" },
-            "status": { "enum": ["proposed", "accepted", "rejected", "superseded", "invalidated"] },
+            "disposition": { "enum": ["proposed", "accepted", "rejected", "superseded", "invalidated"] },
             "rationale": { "type": "string", "minLength": 1 },
             "scope": { "type": "array", "items": { "type": "string" } },
             "authority_ref": { "$ref": "#/$defs/reference" },
@@ -276,11 +358,11 @@
           },
           "allOf": [
             {
-              "if": { "properties": { "status": { "const": "accepted" } } },
+              "if": { "properties": { "disposition": { "const": "accepted" } } },
               "then": { "properties": { "producer": { "$ref": "#/$defs/humanProducer" } } }
             },
             {
-              "if": { "properties": { "status": { "enum": ["superseded", "invalidated"] } } },
+              "if": { "properties": { "disposition": { "enum": ["superseded", "invalidated"] } } },
               "then": { "required": ["supersedes"] }
             }
           ]
@@ -320,19 +402,19 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "graph_revision", "task_id", "role", "workflow", "objective", "acceptance_criteria", "allowed_resources", "forbidden_resources", "skills", "capabilities", "commands", "deadline_seconds", "escalation_condition"],
+          "required": ["kind", "graph_revision", "task_id", "role", "workflow_definition", "objective", "acceptance_criteria", "allowed_resources", "forbidden_resources", "skills", "capabilities", "admitted_commands", "deadline_seconds", "escalation_condition"],
           "properties": {
             "kind": { "const": "packet" },
             "producer": { "$ref": "#/$defs/plannerProducer" },
             "role": { "enum": ["planner", "worker", "verifier"] },
-            "workflow": { "$ref": "#/$defs/workflow" },
+            "workflow_definition": { "$ref": "#/$defs/workflowDefinition" },
             "objective": { "type": "string", "minLength": 1 },
             "acceptance_criteria": { "type": "array", "minItems": 1, "items": { "type": "string" } },
             "allowed_resources": { "type": "array", "items": { "$ref": "#/$defs/resourcePath" } },
             "forbidden_resources": { "type": "array", "items": { "$ref": "#/$defs/resourcePath" } },
             "skills": { "type": "array", "items": { "$ref": "#/$defs/skill" } },
             "capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
-            "commands": { "type": "array", "items": { "$ref": "#/$defs/command" } },
+            "admitted_commands": { "type": "array", "items": { "$ref": "#/$defs/command" } },
             "deadline_seconds": { "type": "integer", "minimum": 1 },
             "escalation_condition": { "type": "string", "minLength": 1 },
             "target_task_ref": { "$ref": "#/$defs/reference" },
@@ -347,14 +429,14 @@
           },
           "allOf": [
             {
-              "if": { "properties": { "workflow": { "const": "verification" } } },
+              "if": { "properties": { "workflow_definition": { "const": "verification" } } },
               "then": {
                 "required": ["target_task_ref", "target_snapshot"],
                 "properties": { "role": { "const": "verifier" } }
               }
             },
             {
-              "if": { "properties": { "workflow": { "const": "repair" } } },
+              "if": { "properties": { "workflow_definition": { "const": "repair" } } },
               "then": {
                 "required": ["finding_ref", "finding_id", "target_snapshot"],
                 "properties": { "role": { "const": "worker" } }
@@ -371,8 +453,8 @@
                 "required": ["external_read_targets"],
                 "properties": {
                   "role": { "const": "worker" },
-                  "workflow": { "const": "research" },
-                  "commands": { "maxItems": 0 },
+                  "workflow_definition": { "const": "research" },
+                  "admitted_commands": { "maxItems": 0 },
                   "capabilities": {
                     "not": {
                       "contains": {
@@ -401,7 +483,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "claims", "evidence", "changed_resources", "output_snapshot", "runtime_ref"],
+          "required": ["kind", "claims", "evidence", "changed_resources", "output_snapshot", "runtime_ref", "result_commit"],
           "properties": {
             "kind": { "const": "result" },
             "producer": { "$ref": "#/$defs/workerProducer" },
@@ -409,6 +491,7 @@
             "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
             "changed_resources": { "type": "array", "items": { "type": "string" } },
             "output_snapshot": { "$ref": "#/$defs/digest" },
+            "result_commit": { "$ref": "#/$defs/gitOid" },
             "runtime_ref": { "$ref": "#/$defs/reference" }
           }
         }
@@ -440,7 +523,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "verified_snapshot", "result_ref", "expected_ref_oid", "delivered_ref_oid", "applied_resources", "delivered_snapshot"],
+          "required": ["kind", "verified_snapshot", "result_ref", "expected_ref_oid", "promoted_ref_oid", "promoted_resources", "promoted_snapshot"],
           "properties": {
             "kind": { "const": "promotion" },
             "producer": { "$ref": "#/$defs/kernelProducer" },
@@ -452,18 +535,18 @@
                 { "type": "null" }
               ]
             },
-            "delivered_ref_oid": {
+            "promoted_ref_oid": {
               "$ref": "#/$defs/gitOid",
-              "description": "Compatibility name for the object stored at the harness-owned result ref."
+              "description": "Object stored at the harness-owned Result Ref by this Promotion."
             },
-            "applied_resources": {
+            "promoted_resources": {
               "type": "array",
               "items": { "$ref": "#/$defs/resourcePath" },
-              "description": "Compatibility name for paths materialized in the result snapshot, not paths applied to a user target."
+              "description": "Paths materialized in the Result Ref's promoted snapshot."
             },
-            "delivered_snapshot": {
+            "promoted_snapshot": {
               "$ref": "#/$defs/digest",
-              "description": "Compatibility name for the tree digest stored at the harness-owned result ref."
+              "description": "Tree digest stored at the harness-owned Result Ref by this Promotion."
             }
           }
         }
@@ -475,12 +558,13 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "preset", "status", "summary", "artifact_refs", "limitations"],
+          "required": ["kind", "preset", "outcome_kind", "summary", "artifact_refs", "limitations"],
           "properties": {
             "kind": { "const": "outcome" },
             "producer": { "$ref": "#/$defs/kernelProducer" },
             "preset": { "enum": ["inspect@1", "local-change@1"] },
-            "status": { "enum": ["receipt", "material_decision_request", "block"] },
+            "effective_policy": { "$ref": "#/$defs/effectivePolicy" },
+            "outcome_kind": { "enum": ["receipt", "material_decision_request", "block"] },
             "summary": { "type": "string", "minLength": 1 },
             "artifact_refs": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
             "limitations": { "type": "array", "items": { "type": "string" } },
@@ -489,14 +573,14 @@
             "resume_condition": { "type": "string" },
             "accepted_snapshot": { "$ref": "#/$defs/digest" },
             "verified_snapshot": { "$ref": "#/$defs/digest" },
-            "delivered_snapshot": { "$ref": "#/$defs/digest" },
+            "promoted_snapshot": { "$ref": "#/$defs/digest" },
             "promotion_ref": { "$ref": "#/$defs/reference" }
           },
           "allOf": [
             {
-              "if": { "properties": { "status": { "const": "receipt" } } },
+              "if": { "properties": { "outcome_kind": { "const": "receipt" } } },
               "then": {
-                "required": ["accepted_snapshot"],
+                "required": ["accepted_snapshot", "effective_policy"],
                 "not": {
                   "anyOf": [
                     { "required": ["question"] },
@@ -509,15 +593,15 @@
             {
               "if": {
                 "properties": {
-                  "status": { "const": "receipt" },
+                  "outcome_kind": { "const": "receipt" },
                   "preset": { "const": "local-change@1" }
                 },
-                "required": ["status", "preset"]
+                "required": ["outcome_kind", "preset"]
               },
-              "then": { "required": ["promotion_ref", "verified_snapshot", "delivered_snapshot"] }
+              "then": { "required": ["promotion_ref", "verified_snapshot", "promoted_snapshot"] }
             },
             {
-              "if": { "properties": { "status": { "const": "material_decision_request" } } },
+              "if": { "properties": { "outcome_kind": { "const": "material_decision_request" } } },
               "then": {
                 "required": ["question"],
                 "not": {
@@ -526,14 +610,14 @@
                     { "required": ["resume_condition"] },
                     { "required": ["accepted_snapshot"] },
                     { "required": ["verified_snapshot"] },
-                    { "required": ["delivered_snapshot"] },
+                    { "required": ["promoted_snapshot"] },
                     { "required": ["promotion_ref"] }
                   ]
                 }
               }
             },
             {
-              "if": { "properties": { "status": { "const": "block" } } },
+              "if": { "properties": { "outcome_kind": { "const": "block" } } },
               "then": {
                 "required": ["block_type", "resume_condition"],
                 "not": {
@@ -541,7 +625,7 @@
                     { "required": ["question"] },
                     { "required": ["accepted_snapshot"] },
                     { "required": ["verified_snapshot"] },
-                    { "required": ["delivered_snapshot"] },
+                    { "required": ["promoted_snapshot"] },
                     { "required": ["promotion_ref"] }
                   ]
                 }
@@ -555,23 +639,23 @@
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task_id", "workflow", "packet_ref", "requires", "read_resources", "write_resources"],
+      "required": ["task_id", "workflow_definition", "packet_ref", "requires", "read_resources", "write_resources"],
       "properties": {
         "task_id": { "$ref": "#/$defs/id" },
-        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_definition": { "$ref": "#/$defs/workflowDefinition" },
         "packet_ref": { "$ref": "#/$defs/reference" },
         "requires": { "type": "array", "items": { "$ref": "#/$defs/id" } },
         "read_resources": { "type": "array", "items": { "$ref": "#/$defs/resourcePath" } },
         "write_resources": { "type": "array", "items": { "$ref": "#/$defs/resourcePath" } }
       }
     },
-    "workflow": {
+    "workflowDefinition": {
       "enum": ["intake", "research", "design", "specification", "ticketing", "implementation", "verification", "repair", "maintenance"]
     },
     "skill": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version", "source"],
+      "required": ["id", "version", "source", "digest"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "version": { "type": "string", "minLength": 1 },
@@ -600,26 +684,26 @@
     "externalReadObservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target_id", "requested_url", "message_id", "status"],
+      "required": ["target_id", "requested_url", "message_id", "read_outcome"],
       "properties": {
         "target_id": { "$ref": "#/$defs/id" },
         "requested_url": { "$ref": "#/$defs/externalReadUrl" },
         "message_id": { "type": "string", "minLength": 1 },
-        "status": { "enum": ["succeeded", "failed", "denied"] },
+        "read_outcome": { "enum": ["succeeded", "failed", "denied"] },
         "content": { "type": "string" },
         "content_digest": { "$ref": "#/$defs/digest" },
         "error": { "type": "string", "minLength": 1 }
       },
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "succeeded" } } },
+          "if": { "properties": { "read_outcome": { "const": "succeeded" } } },
           "then": {
             "required": ["content", "content_digest"],
             "not": { "required": ["error"] }
           }
         },
         {
-          "if": { "properties": { "status": { "enum": ["failed", "denied"] } } },
+          "if": { "properties": { "read_outcome": { "enum": ["failed", "denied"] } } },
           "then": {
             "required": ["error"],
             "not": {
@@ -647,6 +731,184 @@
         "timeout_seconds": { "type": "integer", "minimum": 1 }
       }
     },
+    "commandExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "argv", "cwd", "outcome", "output_digest", "environment_policy_id"],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/id" },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "cwd": { "$ref": "#/$defs/relativePath" },
+        "outcome": { "enum": ["succeeded", "failed", "timed_out", "denied"] },
+        "exit_code": { "type": "integer" },
+        "output_digest": { "$ref": "#/$defs/digest" },
+        "environment_policy_id": { "$ref": "#/$defs/id" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["succeeded", "failed"] } },
+            "required": ["outcome"]
+          },
+          "then": { "required": ["exit_code"] }
+        }
+      ]
+    },
+    "budgetOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "max_concurrency": { "const": 1 },
+        "max_execution_attempts": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "max_planner_attempts": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "max_graph_revisions": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "max_repairs_per_finding": { "type": "integer", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "workspaceBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "head", "status_digest", "snapshot_digest", "protected_paths"],
+      "properties": {
+        "branch": { "type": "string" },
+        "head": { "$ref": "#/$defs/gitOid" },
+        "status_digest": { "$ref": "#/$defs/digest" },
+        "snapshot_digest": { "$ref": "#/$defs/digest" },
+        "protected_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/resourcePath" }
+        }
+      }
+    },
+    "executionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_file", "expected_content", "request_text"],
+      "properties": {
+        "target_file": { "$ref": "#/$defs/resourcePath" },
+        "expected_content": { "type": "string" },
+        "request_text": { "type": "string", "minLength": 1 }
+      }
+    },
+    "policyNarrowing": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "budget": { "$ref": "#/$defs/budgetOverride" }
+      }
+    },
+    "presetDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities", "budget", "evidence_expectations", "verification_expectations", "completion_conditions"],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "budget": { "$ref": "#/$defs/budget" },
+        "evidence_expectations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "verification_expectations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "completion_conditions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "policyValue": {
+      "oneOf": [
+        {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        { "type": "integer", "minimum": 0 }
+      ]
+    },
+    "policyDeviation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "preset_value", "admitted_value", "rationale"],
+      "properties": {
+        "field": {
+          "enum": ["capabilities", "max_execution_attempts", "max_planner_attempts", "max_graph_revisions", "max_repairs_per_finding"]
+        },
+        "preset_value": { "$ref": "#/$defs/policyValue" },
+        "admitted_value": { "$ref": "#/$defs/policyValue" },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "presetSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preset", "selection_evidence", "proposed_narrowing", "rationale"],
+      "properties": {
+        "preset": { "enum": ["inspect@1", "local-change@1"] },
+        "selection_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "proposed_narrowing": {
+          "oneOf": [
+            { "$ref": "#/$defs/policyNarrowing" },
+            { "type": "null" }
+          ]
+        },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "effectivePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preset", "preset_selection_ref", "preset_defaults", "capabilities", "proposed_narrowing", "admitted_narrowing", "deviations", "rationale"],
+      "properties": {
+        "preset": { "enum": ["inspect@1", "local-change@1"] },
+        "preset_selection_ref": { "$ref": "#/$defs/reference" },
+        "preset_defaults": { "$ref": "#/$defs/presetDefaults" },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "proposed_narrowing": {
+          "oneOf": [
+            { "$ref": "#/$defs/policyNarrowing" },
+            { "type": "null" }
+          ]
+        },
+        "admitted_narrowing": {
+          "oneOf": [
+            { "$ref": "#/$defs/policyNarrowing" },
+            { "type": "null" }
+          ]
+        },
+        "deviations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/policyDeviation" }
+        },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
     "budget": {
       "type": "object",
       "additionalProperties": false,
@@ -662,18 +924,18 @@
     "taskProjection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "attempts"],
+      "required": ["task_state", "attempts"],
       "properties": {
-        "state": { "enum": ["planned", "dispatched", "running", "artifacts_published", "runtime_failed", "blocked", "cancelled", "superseded"] },
+        "task_state": { "enum": ["planned", "active", "artifacts_published", "blocked", "cancelled", "superseded"] },
         "attempts": { "type": "integer", "minimum": 0 },
-        "terminal_reason": { "type": "string" },
+        "task_state_reason": { "type": "string" },
         "artifact_ref": { "$ref": "#/$defs/reference" }
       }
     },
     "runtimeBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["attempt_id", "attempt", "session_id", "role", "agent_identity", "agent", "configuration_digest", "state"],
+      "required": ["attempt_id", "attempt", "session_id", "role", "agent_identity", "agent", "configuration_digest", "binding_state"],
       "properties": {
         "attempt_id": { "$ref": "#/$defs/id" },
         "task_id": { "$ref": "#/$defs/id" },
@@ -684,7 +946,7 @@
         "agent": { "type": "string", "minLength": 1 },
         "model": { "type": "string" },
         "configuration_digest": { "$ref": "#/$defs/digest" },
-        "state": { "enum": ["active", "idle", "error", "cancelled", "unreachable"] }
+        "binding_state": { "enum": ["active", "idle", "error", "cancelled", "unreachable"] }
       },
       "if": { "properties": { "role": { "enum": ["worker", "verifier"] } } },
       "then": { "required": ["task_id"] }
@@ -709,7 +971,35 @@
       "properties": {
         "claim": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
-        "observation": { "type": "string", "minLength": 1 }
+        "observation": { "type": "string", "minLength": 1 },
+        "command_ref": { "$ref": "#/$defs/commandEvidenceSource" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "source": { "pattern": "^command:" } },
+            "required": ["source"]
+          },
+          "then": {
+            "required": ["command_ref"],
+            "properties": {
+              "command_ref": {
+                "properties": { "kind": { "const": "command_execution" } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "commandEvidenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "runtime_ref", "command_id", "output_digest"],
+      "properties": {
+        "kind": { "const": "command_execution" },
+        "runtime_ref": { "$ref": "#/$defs/reference" },
+        "command_id": { "$ref": "#/$defs/id" },
+        "output_digest": { "$ref": "#/$defs/digest" }
       }
     },
     "finding": {
@@ -728,7 +1018,7 @@
         { "$ref": "#/$defs/envelope" },
         {
           "type": "object",
-          "required": ["kind", "attempt_id", "role", "opencode_version", "configuration_digest", "session_id", "agent_identity", "message_ids", "agent", "permission_events", "observed_changes", "observed_output_snapshot", "external_reads", "exit_reason"],
+          "required": ["kind", "attempt_id", "role", "opencode_version", "configuration_digest", "session_id", "agent_identity", "message_ids", "agent", "runtime_permission_events", "command_executions", "observed_changes", "observed_output_snapshot", "external_reads", "exit_reason"],
           "properties": {
             "kind": { "const": "runtime_observation" },
             "producer": { "$ref": "#/$defs/runtimeProducer" },
@@ -742,7 +1032,11 @@
             "message_ids": { "type": "array", "items": { "type": "string" } },
             "agent": { "type": "string", "minLength": 1 },
             "model": { "type": "string" },
-            "permission_events": { "type": "array", "items": { "type": "string" } },
+            "runtime_permission_events": { "type": "array", "items": { "type": "string" } },
+            "command_executions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/commandExecution" }
+            },
             "observed_changes": { "type": "array", "items": { "$ref": "#/$defs/diffEntry" } },
             "observed_output_snapshot": { "$ref": "#/$defs/digest" },
             "external_reads": {
