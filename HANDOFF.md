@@ -34,32 +34,35 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current implementation tip before this handoff commit is `115e425` on
-  `agent/executable-opencode-harness-design`. The new focused task-unit
-  commits are `8bf594e` (phase-aware durable ambiguous replay), `785684f`
-  (completed planner Packet/Result target provenance), and `115e425`
-  (prepared replay ordering, persistence, and one-action expectations).
+- Current implementation tip before this handoff commit is `72553bf` on
+  `agent/executable-opencode-harness-design`. This repair pass adds
+  `6a6a9b6` (one authoritative reconciled Runtime Observation), `1cb9808`
+  (one-action recovered graph/worker replay), `4f5ee4c` (durable GET-only
+  worker workspace recovery), and `72553bf` (immutable admission replay
+  assertion).
   Nothing has been pushed and no PR exists; this handoff update is the next
   local commit.
-- Current deterministic evidence: protocol 4/4, kernel 1/1, selected
-  deterministic M1 10/10, focused replay/provider recovery 7/7, all checked
+- Current deterministic evidence: protocol 4/4, M0 16/16 in
+  64961.660166ms, kernel 1/1 in 151.896ms, deterministic M1 10/10 in
+  6054.914167ms, and focused recovery 4/4 in 13622.950875ms. All checked
   `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
-  `git diff --check` passed before this edit. M0 remains the prior observed
-  16/16 live probe evidence and was not rerun after these local-change-only
-  repairs.
-- The final post-repair `npm run test:m2` was not green evidence: it emitted
-  `AttemptFailure: graph revision 1 planner Attempt did not reach a confirmed
-  idle stop` from `scripts/local-change.mjs:1364` while a child `opencode serve`
-  remained active; the owned run was stopped without retry. Full M1 was not
-  rerun after the repair because this provider gate failed.
+  `git diff --check` passed before this edit.
+- The one fresh serial post-repair `npm run test:m2` run was not green:
+  32/33 passed in 854362.703916ms. The sole failure was
+  `Receipt after Decision restart includes the accepted Decision reference`;
+  the real OpenCode verifier returned no JSON and the public resume failed
+  with `verifier did not return a JSON object` at
+  `scripts/local-change.mjs:1019`. Full M1 was not run because M2 was not
+  green.
 
 ### Current blocker
 
-The final provider-backed M2 gate is blocked by the OpenCode planner idle-stop
-failure above. Do not claim current full M1/M2 completion or advance to M3
-until a healthy provider permits one fresh serial gate run. Do not relax
-deadlines or add a generic recovery engine, arbitrary retry/fork surface,
-concurrency, or Application.
+The final provider-backed M2 gate is blocked by the OpenCode verifier returning
+an invalid non-JSON response during the Decision-restart Receipt case above.
+Do not claim current full M1/M2 completion or advance to M3 until a healthy
+provider permits one fresh serial gate run. Do not relax deadlines or add a
+generic recovery engine, arbitrary retry/fork surface, concurrency, or
+Application.
 
 ### PR gate
 
@@ -112,6 +115,14 @@ performed. Before any future publication:
   records `cancel_unconfirmed` and blocks; the injectable adapter seam can
   confirm `cancelled`. A Run with no active binding also writes a fallback
   Runtime Observation and block rather than remaining `cancelling`.
+- Ambiguous runtime replay: the reconciled Runtime Observation is admitted
+  once under one immutable artifact ID/reference, and the focused run-wide
+  check rejects duplicate IDs. Recovered graph-1 and worker resumes each
+  admit exactly one tested transition/artifact delta without re-dispatch.
+- GET-only worker replay: both `worker_edit` and
+  `worker_result_proposal` preserve and restore the bound isolated workspace;
+  deterministic tests prove reconciliation uses GET only and each distinct
+  worker phase is posted at most once.
 - Crash boundaries: deterministic hooks cover before/after Promotion
   preparation, before/after Result Ref CAS, Result-only graph-2 Runtime
   Observation/Packet/Graph/dispatch publication, verifier Runtime publication,
@@ -132,17 +143,14 @@ performed. Before any future publication:
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
-- `npm run test:m0` — prior observed 16/16 passed, including the live
-  process-death/reconnect cancellation probe; not rerun after these
-  local-change-only repairs.
-- `npm run test:m1` — not rerun after the `115e425` repair because the final
-  provider-backed M2 gate failed first. The prior `78213d4` run was 12/12 in
-  109642.459125ms and is historical, not current-tip completion evidence.
-- `npm run test:m2` — final post-repair run stopped after the provider
-  reported no confirmed idle stop for the graph revision 1 planner Attempt;
-  no pass/total result is claimed. The pre-repair run at `8bf594e` was 26/32
-  in 243007.176625ms and its six deterministic replay failures were repaired
-  and covered by the focused 7/7 run.
+- `npm run test:m0` — 16/16 passed in 64961.660166ms, including the live
+  process-death/reconnect cancellation probe.
+- deterministic M1 selection — 10/10 passed in 6054.914167ms. Full
+  `npm run test:m1` was not run because the fresh full M2 gate was not green.
+- `npm run test:m2` — 32/33 passed in 854362.703916ms. The failed case was
+  `Receipt after Decision restart includes the accepted Decision reference`;
+  its real OpenCode verifier response was not a JSON object, so no full M1
+  claim is made.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
 - `git diff --check` — passed after the handoff edit before its commit.
@@ -183,11 +191,12 @@ performed. Before any future publication:
   exercised through the public CLI, while live verifier calls remain
   provider-dependent. The final full gate was serial; no concurrent M2
   isolation repair was evidenced by the earlier concurrent run.
-- Provider limitation: the final M2 attempt reached a real `opencode serve`
-  child but could not confirm the graph revision 1 planner Attempt idle stop;
-  it was stopped without timeout relaxation or retry. The M0 fixture still
-  provides the independent health, message, and live cancellation/reconnect
-  observations.
+- Provider limitation: the fresh serial M2 run reached real `opencode serve`
+  sessions and failed only at the Decision-restart Receipt case because the
+  verifier response was not JSON. This is not recorded as a green M2 gate;
+  no timeout relaxation, retry, or full M1 run followed it. The M0 fixture
+  still provides the independent health, message, and live
+  cancellation/reconnect observations.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -206,7 +215,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `115e425`; this handoff update is the next
+- HEAD before this handoff commit: `72553bf`; this handoff update is the next
   local commit and must not be counted as prior implementation evidence.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
