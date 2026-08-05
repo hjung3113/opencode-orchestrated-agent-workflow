@@ -2091,12 +2091,14 @@ function validatePlannerProvenance(ctx, state, { requestArtifactRef, resultArtif
   const graphOneRef = graphTwo.parent_revision_ref;
   const graphOne = resolveArtifactReference(ctx, graphOneRef);
   const implementationNode = graphOne.nodes.find(({ task_id }) => task_id === "implementation-1");
+  const graphTwoImplementationNode = graphTwo.nodes.find(({ task_id }) => task_id === "implementation-1");
   const verificationNode = graphTwo.nodes.find(({ task_id }) => task_id === "verification-1");
-  if (!implementationNode?.packet_ref || !verificationNode?.packet_ref) {
+  if (!implementationNode?.packet_ref || !graphTwoImplementationNode?.packet_ref || !verificationNode?.packet_ref) {
     throw new Error("completed Run planner provenance is missing an implementation or verification Packet");
   }
   const implementationPacket = resolveArtifactReference(ctx, implementationNode.packet_ref);
   const verificationPacket = resolveArtifactReference(ctx, verificationNode.packet_ref);
+  const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
   const bootstrap = resolveArtifactReference(ctx, state.bootstrap_ref);
   const plannerArtifacts = [
     {
@@ -2165,6 +2167,13 @@ function validatePlannerProvenance(ctx, state, { requestArtifactRef, resultArtif
       || (graphRevision ? artifact.graph_revision !== graphRevision : artifact.graph_revision !== undefined)) {
       throw new Error(`completed Run planner ${label} provenance does not match its Runtime Binding`);
     }
+  }
+  if (!sameArtifactReference(graphTwoImplementationNode.packet_ref, implementationNode.packet_ref)) {
+    throw new Error("completed Run graph revision 2 does not carry the admitted implementation Packet");
+  }
+  if (!sameArtifactReference(verificationPacket.target_task_ref, resultArtifactRef)
+    || verificationPacket.target_snapshot !== resultArtifact.output_snapshot) {
+    throw new Error("completed Run verification Packet target does not match the admitted Result");
   }
   if (!sameArtifactReference(request.input_refs.find(({ path }) => path === state.bootstrap_ref.path), state.bootstrap_ref)
     || bootstrap.producer?.role !== "kernel"

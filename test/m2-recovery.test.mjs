@@ -354,6 +354,21 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       },
       expected: /Receipt|reference|exact/i,
     },
+    {
+      name: "graph 2 carry-forward Packet reference",
+      mutate: ({ graphTwo, verificationPacketRef }) => {
+        graphTwo.nodes.find(({ task_id }) => task_id === "implementation-1").packet_ref = { ...verificationPacketRef };
+      },
+      expected: /planner|Packet|reference|provenance/i,
+    },
+    {
+      name: "verification Packet target identity",
+      mutate: ({ verificationPacket, implementationPacketRef }) => {
+        verificationPacket.target_task_ref = { ...implementationPacketRef };
+        verificationPacket.target_snapshot = digest("forged-result-target");
+      },
+      expected: /target|Result|snapshot|provenance/i,
+    },
   ];
   for (const testCase of cases) {
     const { workspace, runRoot } = fixture();
@@ -379,7 +394,17 @@ test("public inspect rejects semantically malformed completed artifacts", async 
       const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
       const resultRuntime = JSON.parse(readFileSync(resultRuntimePath, "utf8"));
       const reviewRuntime = JSON.parse(readFileSync(reviewRuntimePath, "utf8"));
-      testCase.mutate({ state, result, review, resultRuntime, reviewRuntime, promotion, receipt });
+      const graphOne = JSON.parse(readFileSync(join(run.run_dir, "artifacts/graphs/0001.json"), "utf8"));
+      const graphTwoPath = join(run.run_dir, "artifacts/graphs/0002.json");
+      const graphTwo = JSON.parse(readFileSync(graphTwoPath, "utf8"));
+      const implementationPacketRef = { ...graphOne.nodes.find(({ task_id }) => task_id === "implementation-1").packet_ref };
+      const verificationPacketRef = { ...graphTwo.nodes.find(({ task_id }) => task_id === "verification-1").packet_ref };
+      const verificationPacketPath = join(run.run_dir, verificationPacketRef.path);
+      const verificationPacket = JSON.parse(readFileSync(verificationPacketPath, "utf8"));
+      testCase.mutate({
+        state, result, review, resultRuntime, reviewRuntime, promotion, receipt,
+        graphTwo, verificationPacket, implementationPacketRef, verificationPacketRef,
+      });
       const replaceRefs = (value, path, next) => {
         if (Array.isArray(value)) return value.forEach((item) => replaceRefs(item, path, next));
         if (!value || typeof value !== "object") return;
@@ -398,6 +423,8 @@ test("public inspect rejects semantically malformed completed artifacts", async 
         [reviewPath, review],
         [promotionPath, promotion],
         [receiptPath, receipt],
+        [graphTwoPath, graphTwo],
+        [verificationPacketPath, verificationPacket],
       ]) {
         const entry = artifacts.find(([path]) => path === absolutePath);
         if (entry) entry[1] = artifact;
