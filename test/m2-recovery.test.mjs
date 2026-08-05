@@ -520,6 +520,89 @@ test("ambiguous planner, worker, and verifier Attempts reconcile the same bindin
   }
 });
 
+test("successful ambiguous reconciliation replays all runtime roles without another POST", async () => {
+  for (const targetAttemptId of ["planner-graph-1", "worker-implementation-1", "verifier-1"]) {
+    const { workspace, runRoot } = fixture();
+    try {
+      let runtime;
+      await assert.rejects(() => runLocalChange({
+        workspace,
+        runRoot,
+        requestText: "Add change.txt.",
+        runtimeFactory: (options) => {
+          runtime = new Runtime(options);
+          runtime.postAttempts = [];
+          runtime.newAttemptCalls = [];
+          runtime.reconcileCalls = [];
+          runtime.reconcileSuccess = false;
+          runtime.ambiguousFailureConsumed = false;
+          const execute = runtime.execute.bind(runtime);
+          const newAttempt = runtime.newAttempt.bind(runtime);
+          runtime.newAttempt = async (spec) => {
+            runtime.newAttemptCalls.push(spec.attemptId);
+            return newAttempt(spec);
+          };
+          runtime.execute = async (spec) => {
+            const phase = spec.attemptId === "worker-implementation-1"
+              ? (spec.prompt.includes("The Kernel observed") ? "worker_result_proposal" : "worker_edit")
+              : spec.attemptId;
+            runtime.postAttempts.push({ attemptId: spec.attemptId, phase });
+            if (spec.attemptId === targetAttemptId && !runtime.ambiguousFailureConsumed) {
+              runtime.ambiguousFailureConsumed = true;
+              throw Object.assign(new Error(`ambiguous POST for ${targetAttemptId}`), { code: "ECONNRESET" });
+            }
+            return execute(spec);
+          };
+          runtime.reconcileAttempt = async (spec) => {
+            runtime.reconcileCalls.push(spec.attemptId);
+            if (!runtime.reconcileSuccess) {
+              throw Object.assign(new Error(`no completed GET response for ${targetAttemptId}`), { code: "runtime_reconciliation_required" });
+            }
+            return execute(spec);
+          };
+          return runtime;
+        },
+      }), /ambiguous POST|provider|Attempt/i);
+      const runId = readdirSync(join(runRoot, "runs"))[0];
+      const runDir = join(runRoot, "runs", runId);
+
+      const unresolved = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(unresolved.checkpoint, "runtime_reconciliation_required", targetAttemptId);
+      runtime.reconcileSuccess = true;
+      const recovered = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(recovered.checkpoint, "runtime_reconciled", targetAttemptId);
+      const prepared = JSON.parse(readFileSync(join(runDir, "staging/recovery", `${targetAttemptId}.json`), "utf8"));
+      const initialPhase = targetAttemptId === "worker-implementation-1" ? "worker_edit" : targetAttemptId;
+      assert.equal(prepared.phase, initialPhase, targetAttemptId);
+      assert.deepEqual(
+        runtime.postAttempts.filter(({ attemptId }) => attemptId === targetAttemptId).map(({ phase }) => phase),
+        [initialPhase],
+        targetAttemptId,
+      );
+
+      let resumed = recovered;
+      for (let attempt = 0; attempt < 12 && resumed.lifecycle_state !== "completed"; attempt += 1) {
+        resumed = await resumeRun(runDir, { workspace, runtime });
+      }
+      assert.equal(resumed.lifecycle_state, "completed", targetAttemptId);
+      const repeated = await resumeRun(runDir, { workspace, runtime });
+      assert.equal(repeated.lifecycle_state, "completed", targetAttemptId);
+      const targetPostPhases = runtime.postAttempts
+        .filter(({ attemptId }) => attemptId === targetAttemptId)
+        .map(({ phase }) => phase);
+      const expectedPhases = targetAttemptId === "worker-implementation-1"
+        ? ["worker_edit", "worker_result_proposal"] : [targetAttemptId];
+      assert.deepEqual(targetPostPhases, expectedPhases, targetAttemptId);
+      assert.equal(new Set(targetPostPhases).size, targetPostPhases.length, targetAttemptId);
+      assert.equal(runtime.newAttemptCalls.filter((attemptId) => attemptId === targetAttemptId).length, 1, targetAttemptId);
+      assert.deepEqual(runtime.reconcileCalls, [targetAttemptId, targetAttemptId], targetAttemptId);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("public resume reconciles an ambiguous graph-1 binding with GET only", async () => {
   const { workspace, runRoot } = fixture();
   const fakeBin = mkdtempSync(join(tmpdir(), "m2-graph-one-reconcile-bin-"));

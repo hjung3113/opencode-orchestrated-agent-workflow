@@ -336,6 +336,18 @@ function writePreparedExecution(ctx, attemptId, execution) {
     attempt_id: attemptId,
     binding: execution.binding,
     text: execution.text,
+    ...(execution.snapshot ? { snapshot: execution.snapshot } : {}),
+    ...(execution.before_snapshot ? { before_snapshot: execution.before_snapshot } : {}),
+    ...(execution.observation ? { observation: execution.observation } : {}),
+    ...(execution.changes ? { changes: execution.changes } : {}),
+    ...(execution.events ? { events: execution.events } : {}),
+    ...(execution.phase ? { phase: execution.phase } : {}),
+    ...(execution.result_commit ? { result_commit: execution.result_commit } : {}),
+    ...(execution.worker_snapshot ? { worker_snapshot: execution.worker_snapshot } : {}),
+    ...(execution.observed_resources ? { observed_resources: execution.observed_resources } : {}),
+    ...(execution.worker_changes ? { worker_changes: execution.worker_changes } : {}),
+    ...(execution.command_execution ? { command_execution: execution.command_execution } : {}),
+    ...(execution.worker_edit_runtime_ref ? { worker_edit_runtime_ref: execution.worker_edit_runtime_ref } : {}),
   });
 }
 
@@ -1382,6 +1394,30 @@ async function prepareRuntimeAttempt(ctx, state, adapter, spec) {
 async function executeRuntimeAttempt(ctx, state, adapter, spec) {
   const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === spec.attemptId);
   if (!binding) throw new AttemptFailure("missing_runtime_binding", `${spec.label ?? spec.attemptId} has no durable Runtime Binding`);
+  if (binding.binding_state !== "unreachable" && existsSync(preparedExecutionPath(ctx, spec.attemptId))) {
+    const prepared = readPreparedExecution(ctx, spec.attemptId);
+    if (prepared.snapshot && prepared.observation) {
+      return {
+        execution: {
+          binding: prepared.binding,
+          text: prepared.text,
+          snapshot: prepared.snapshot,
+          ...(prepared.before_snapshot ? { before_snapshot: prepared.before_snapshot } : {}),
+          observation: prepared.observation,
+          ...(prepared.changes ? { changes: prepared.changes } : {}),
+          ...(prepared.events ? { events: prepared.events } : {}),
+          ...(prepared.phase ? { phase: prepared.phase } : {}),
+          ...(prepared.result_commit ? { result_commit: prepared.result_commit } : {}),
+          ...(prepared.worker_snapshot ? { worker_snapshot: prepared.worker_snapshot } : {}),
+          ...(prepared.observed_resources ? { observed_resources: prepared.observed_resources } : {}),
+          ...(prepared.worker_changes ? { worker_changes: prepared.worker_changes } : {}),
+          ...(prepared.command_execution ? { command_execution: prepared.command_execution } : {}),
+          ...(prepared.worker_edit_runtime_ref ? { worker_edit_runtime_ref: prepared.worker_edit_runtime_ref } : {}),
+        },
+        prepared: true,
+      };
+    }
+  }
   try {
     const execution = binding.binding_state === "unreachable"
       ? typeof adapter.reconcileAttempt === "function"
@@ -1446,8 +1482,28 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
     ...execution.observation,
     artifact_id: `runtime-${attemptId}-reconciled`,
   };
+  const preparedPath = preparedExecutionPath(ctx, attemptId);
+  const previousPrepared = existsSync(preparedPath)
+    ? JSON.parse(readFileSync(preparedPath, "utf8")) : {};
+  const recoveredWorkspacePath = join(ctx.runDir, "staging", "recovery", `${attemptId}-workspace`);
+  if (existsSync(recoveredWorkspacePath)) rmSync(recoveredWorkspacePath, { recursive: true, force: true });
+  cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
+  const recoveredExecution = {
+    ...execution,
+    before_snapshot: previousPrepared.before_snapshot ?? beforeSnapshot,
+    observation,
+    phase: previousPrepared.phase ?? (binding.role === "worker" ? "worker_edit" : binding.attempt_id),
+    ...(previousPrepared.result_commit ? { result_commit: previousPrepared.result_commit } : {}),
+    ...(previousPrepared.worker_snapshot ? { worker_snapshot: previousPrepared.worker_snapshot } : {}),
+    ...(previousPrepared.observed_resources ? { observed_resources: previousPrepared.observed_resources } : {}),
+    ...(previousPrepared.worker_changes ? { worker_changes: previousPrepared.worker_changes } : {}),
+    ...(previousPrepared.command_execution ? { command_execution: previousPrepared.command_execution } : {}),
+    ...(previousPrepared.worker_edit_runtime_ref ? { worker_edit_runtime_ref: previousPrepared.worker_edit_runtime_ref } : {}),
+  };
+  writePreparedExecution(ctx, attemptId, recoveredExecution);
   const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
   const next = applyTransition(ctx, state, "runtime_reconciled", {
+    lifecycle_state: "active",
     runtime_bindings: state.runtime_bindings.map((current) =>
       current.attempt_id === attemptId ? { ...execution.binding, binding_state: "idle" } : current),
   }, [observationRef]);
@@ -2340,6 +2396,33 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
       return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
     }
   }
+  const preparedRuntimeBinding = state.runtime_bindings.find(({ attempt_id, binding_state }) =>
+    binding_state !== "unreachable" && existsSync(preparedExecutionPath({ runDir }, attempt_id)));
+  if (preparedRuntimeBinding && workspace) {
+    try {
+      const runRoot = dirname(dirname(resolve(runDir)));
+      const resumed = await runLocalChange({
+        workspace,
+        runRoot,
+        existingRunDir: runDir,
+        runtimeFactory: runtime ? async (options) => {
+          Object.assign(runtime, options);
+          return runtime;
+        } : undefined,
+        hooks,
+      });
+      return { ...resumed.inspect, next_action: null, ...resumed };
+    } catch (error) {
+      if (error.code !== "simulated_crash") {
+        if (isRecoverableProviderFailure(error)) {
+          return { ...inspectRun(runDir), next_action: null, checkpoint: "runtime_provider_failure" };
+        }
+        if (error.code) return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+        throw error;
+      }
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
   if ((state.lifecycle_state === "active" || resumableProviderBlock)
     && (state.decision_refs ?? []).length > 0
     && !state.tasks?.["implementation-1"]) {
@@ -2595,9 +2678,28 @@ export async function runLocalChange({
   const continuingResult = Boolean(existingState?.tasks?.["implementation-1"]?.artifact_ref
     && !existingState?.tasks?.["verification-1"]?.artifact_ref);
   try {
-    cloneWorkspace(workspace, taskWorkspace);
+    const recoveredBinding = existingState?.runtime_bindings.find(({ attempt_id, binding_state }) => {
+      const preparedPath = preparedExecutionPath({ runDir }, attempt_id);
+      const recoveryWorkspacePath = join(dirname(preparedPath), `${attempt_id}-workspace`);
+      return binding_state !== "unreachable" && existsSync(preparedPath) && existsSync(recoveryWorkspacePath);
+    });
+    let recoveredPreparedExecution = null;
+    if (recoveredBinding) {
+      const preparedPath = preparedExecutionPath({ runDir }, recoveredBinding.attempt_id);
+      const recoveryWorkspacePath = join(dirname(preparedPath), `${recoveredBinding.attempt_id}-workspace`);
+      recoveredPreparedExecution = JSON.parse(readFileSync(preparedPath, "utf8"));
+      rmSync(taskWorkspace, { recursive: true, force: true });
+      renameSync(recoveryWorkspacePath, taskWorkspace);
+    } else {
+      cloneWorkspace(workspace, taskWorkspace);
+    }
     let taskBaseline = workspaceSnapshot(taskWorkspace);
-    if (continuingResult) {
+    if (recoveredPreparedExecution?.before_snapshot) {
+      if (!recoveredPreparedExecution.snapshot || taskBaseline.digest !== recoveredPreparedExecution.snapshot.digest) {
+        throw new AttemptFailure("runtime_reconciliation_required", "recovered Runtime workspace does not reproduce its Output Snapshot");
+      }
+      taskBaseline = recoveredPreparedExecution.before_snapshot;
+    } else if (continuingResult) {
       const resultArtifactRef = existingState.tasks["implementation-1"].artifact_ref;
       const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
       const resultRepo = join(runDir, "result-repository.git");
@@ -2765,6 +2867,7 @@ export async function runLocalChange({
 
     let implementation;
     let implementationPacketRef;
+    let admittedCommand;
     let graphOneRef;
     let resultArtifactRef;
     let resultRepo;
@@ -2773,9 +2876,10 @@ export async function runLocalChange({
     let workerSnapshot;
     let workerIdentity;
     if (!continuingResult) {
+    if (state.active_graph_ref?.path !== "artifacts/graphs/0001.json") {
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
-    const admittedCommand = hooks.commandOverride?.({ targetFile, expectedContent })
+    admittedCommand = hooks.commandOverride?.({ targetFile, expectedContent })
       ?? commandSpec(targetFile, expectedContent);
     const graphOnePrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
       role: "planner",
@@ -2839,6 +2943,20 @@ export async function runLocalChange({
         "implementation-1": { task_state: "planned", attempts: 0 },
       },
     }, [graphOneRef, implementationPacketRef, graphOneRuntimeRef]);
+    clearPreparedExecution(ctx, "planner-graph-1");
+
+    } else {
+      graphOneRef = state.active_graph_ref;
+      const graphOne = resolveArtifactReference(ctx, graphOneRef);
+      implementationPacketRef = graphOne.nodes.find(({ task_id }) => task_id === "implementation-1")?.packet_ref;
+      if (!implementationPacketRef) throw new AttemptFailure("runtime_reconciliation_required", "admitted graph has no implementation Packet");
+      implementation = {
+        node: graphOne.nodes.find(({ task_id }) => task_id === "implementation-1"),
+        packet: resolveArtifactReference(ctx, implementationPacketRef),
+      };
+      admittedCommand = implementation.packet.admitted_commands?.find(({ command_id }) => command_id === "verify-change");
+      if (!admittedCommand) throw new AttemptFailure("runtime_reconciliation_required", "admitted graph has no verify-change command");
+    }
 
     admitBudget(state, "execution_attempt");
     const workerPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
@@ -2882,42 +3000,78 @@ export async function runLocalChange({
       attemptId: "worker-implementation-1",
       label: "implementation worker Attempt",
     });
-    const workerEditObservation = {
-      ...workerExecution.observation,
-      artifact_id: "runtime-worker-implementation-1-edit",
-    };
-    const workerEditRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-edit.json", workerEditObservation);
-    const commandExecution = runCommand(taskWorkspace, admittedCommand);
-    const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
-    const workerChanges = diffEntries(taskBaseline, preCommitSnapshot);
-    const allowedChanges = new Set([targetFile]);
-    if (workerChanges.length === 0 || workerChanges.some(({ path }) => !allowedChanges.has(path))) {
-      throw new Error(`worker diff violates Packet resources: ${JSON.stringify(workerChanges)}`);
+    const preparedWorkerProposal = workerExecutionResult.prepared
+      && readPreparedExecution(ctx, "worker-implementation-1").phase === "worker_result_proposal";
+    let workerEditRuntimeRef;
+    let commandExecution;
+    let workerChanges;
+    let observedResources;
+    let proposalExecution;
+    if (preparedWorkerProposal) {
+      const prepared = readPreparedExecution(ctx, "worker-implementation-1");
+      workerSnapshot = prepared.worker_snapshot;
+      resultCommit = prepared.result_commit;
+      workerChanges = prepared.worker_changes;
+      observedResources = prepared.observed_resources;
+      commandExecution = prepared.command_execution;
+      workerEditRuntimeRef = prepared.worker_edit_runtime_ref;
+      proposalExecution = workerExecution;
+    } else {
+      const workerEditObservation = {
+        ...workerExecution.observation,
+        artifact_id: "runtime-worker-implementation-1-edit",
+      };
+      workerEditRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-edit.json", workerEditObservation);
+      if (workerExecutionResult.prepared) clearPreparedExecution(ctx, "worker-implementation-1");
+      commandExecution = runCommand(taskWorkspace, admittedCommand);
+      const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
+      workerChanges = diffEntries(taskBaseline, preCommitSnapshot);
+      const allowedChanges = new Set([targetFile]);
+      if (workerChanges.length === 0 || workerChanges.some(({ path }) => !allowedChanges.has(path))) {
+        throw new Error(`worker diff violates Packet resources: ${JSON.stringify(workerChanges)}`);
+      }
+      git(taskWorkspace, ["add", "-A"]);
+      git(taskWorkspace, ["commit", "-qm", "M1 local-change Result"]);
+      resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
+      observedResources = workerChanges.map(({ path }) => path);
+      workerSnapshot = workspaceSnapshot(taskWorkspace);
+      const proposalPreparedPath = preparedExecutionPath(ctx, "worker-implementation-1");
+      const proposalRecoveryWorkspacePath = join(dirname(proposalPreparedPath), "worker-implementation-1-workspace");
+      if (existsSync(proposalRecoveryWorkspacePath)) rmSync(proposalRecoveryWorkspacePath, { recursive: true, force: true });
+      cpSync(taskWorkspace, proposalRecoveryWorkspacePath, { recursive: true, dereference: false });
+      writePreparedExecution(ctx, "worker-implementation-1", {
+        binding: workerExecution.binding,
+        text: "",
+        snapshot: workerSnapshot,
+        before_snapshot: workerSnapshot,
+        phase: "worker_result_proposal",
+        result_commit: resultCommit,
+        worker_snapshot: workerSnapshot,
+        observed_resources: observedResources,
+        worker_changes: workerChanges,
+        command_execution: commandExecution,
+        worker_edit_runtime_ref: workerEditRuntimeRef,
+      });
+      const proposalExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+        role: "worker",
+        attemptId: "worker-implementation-1",
+        taskId: "implementation-1",
+        attempt: 1,
+        prompt: [
+          "The Kernel observed and command-checked your isolated edit and committed the Result candidate.",
+          `The canonical Output Snapshot digest is ${workerSnapshot.digest}. Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal ${workerSnapshot.digest}.`,
+          "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
+        ].join("\n"),
+        beforeSnapshot: workerSnapshot,
+        deadlineSeconds: implementation.packet.deadline_seconds,
+        label: "worker Result proposal Attempt",
+      });
+      proposalExecution = proposalExecutionResult.execution;
+      admitRuntimeAttempt(ctx, state, proposalExecution, {
+        attemptId: "worker-implementation-1",
+        label: "worker Result proposal Attempt",
+      });
     }
-    git(taskWorkspace, ["add", "-A"]);
-    git(taskWorkspace, ["commit", "-qm", "M1 local-change Result"]);
-    resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
-    const observedResources = workerChanges.map(({ path }) => path);
-    workerSnapshot = workspaceSnapshot(taskWorkspace);
-    const proposalExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
-      role: "worker",
-      attemptId: "worker-implementation-1",
-      taskId: "implementation-1",
-      attempt: 1,
-      prompt: [
-        "The Kernel observed and command-checked your isolated edit and committed the Result candidate.",
-        `The canonical Output Snapshot digest is ${workerSnapshot.digest}. Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal ${workerSnapshot.digest}.`,
-        "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
-      ].join("\n"),
-      beforeSnapshot: workerSnapshot,
-      deadlineSeconds: implementation.packet.deadline_seconds,
-      label: "worker Result proposal Attempt",
-    });
-    const proposalExecution = proposalExecutionResult.execution;
-    admitRuntimeAttempt(ctx, state, proposalExecution, {
-      attemptId: "worker-implementation-1",
-      label: "worker Result proposal Attempt",
-    });
     const workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
       throw new Error(`worker Result proposal changed_resources do not match the observed diff: proposed=${JSON.stringify(workerProposal.changed_resources)} observed=${JSON.stringify(observedResources)}`);
@@ -2964,6 +3118,7 @@ export async function runLocalChange({
         "implementation-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultArtifactRef },
       },
     }, [workerEditRuntimeRef, workerRuntimeRef, resultArtifactRef]);
+    clearPreparedExecution(ctx, "worker-implementation-1");
     } else {
       resultArtifactRef = state.tasks["implementation-1"].artifact_ref;
       const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
