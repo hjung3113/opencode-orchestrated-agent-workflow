@@ -1543,8 +1543,11 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
   if (existsSync(recoveredWorkspacePath)) rmSync(recoveredWorkspacePath, { recursive: true, force: true });
   cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
   const phase = previousPrepared.phase ?? (binding.role === "worker" ? "worker_edit" : binding.attempt_id);
-  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
-  crashAt(ctx, "after_reconciled_observation_publication");
+  const observationRef = reference(
+    observation.artifact_id,
+    `artifacts/runtime/${observation.artifact_id}.json`,
+    observation,
+  );
   const recoveredExecution = {
     ...execution,
     before_snapshot: previousPrepared.before_snapshot ?? beforeSnapshot,
@@ -1562,6 +1565,8 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
         : {}),
   };
   writePreparedExecution(ctx, attemptId, recoveredExecution);
+  writeArtifact(ctx, observationRef.path, observation);
+  crashAt(ctx, "after_reconciled_observation_publication");
   crashAt(ctx, "after_reconciled_prepared_publication");
   const next = applyTransition(ctx, state, "runtime_reconciled", {
     lifecycle_state: "active",
