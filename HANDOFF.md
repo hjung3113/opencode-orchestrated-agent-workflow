@@ -4,16 +4,10 @@
 
 ### Status
 
-- The M0-M2 implementation repairs are present, but the final
-  provider-backed M1/M2 gates are not green. The final HEAD M1 run was 11/12:
-  its real worker Attempt reached the 300-second bound without a provider
-  response/idle observation and the adapter recorded typed
-  `deadline_exceeded`. The duplicate rerun was stopped, and no third
-  323-second trace is authorized. The duplicate M2 rerun was also stopped
-  after the same confirmed-idle failure at graph revision 1 planner; it has
-  no passing full-suite count. The review repairs cover repository-policy
-  intake, one natural-language public execution input, Result Ref vocabulary,
-  native network denial, pre-dispatch material Decision gating, publication
+- The M0-M2 implementation repairs are present and the final deterministic
+  gates are green. The review repairs cover repository-policy intake, one
+  natural-language public execution input, Result Ref vocabulary, native
+  network denial, pre-dispatch material Decision gating, publication
   reconciliation, cancellation reconciliation, worker-authored Result
   proposals, fail-closed completed-state inspect, complete command Evidence
   validation, and a live M0 process-death/reconnect cancellation probe.
@@ -40,32 +34,25 @@
   in the Receipt, and the Run resumes.
 - Paired low-risk ambiguity records one durable Assumption and continues.
   Cumulative Run limit exhaustion produces a typed Block.
-- Current branch is `agent/executable-opencode-harness-design` at `d6e75d5`.
-  The focused task-unit commits are `778749b`/`3706c85` (durable ambiguous
-  planner dispatch binding and one-action replay), `91374ae` (complete
-  provenance validation), `b255bfb` (actual M0 child-exit timing), and
-  `bc2a0b0` (M1 trace expectation for the durable preparation event). Nothing
-  has been pushed and no PR exists; this handoff update is the next local
-  commit.
-- Final HEAD evidence that is currently valid: protocol 4/4, M0 16/16
-  including the live process-death/reconnect row, deterministic M1 focused
-  checks 10/10, kernel 1/1, all 7 checked `scripts/**/*.mjs` and
-  `test/**/*.mjs` passed `node --check`, and `git diff --check` passed before
-  this handoff edit. An earlier pre-HANDOFF M2 run at `3706c85` preserved
-  28/28 evidence; the final provider-dependent M2 rerun was not allowed to
-  continue after its real confirmed-idle failure.
+- Current branch is `agent/executable-opencode-harness-design` at `78213d4`.
+  The focused task-unit commits are `2f681cc` (common durable ambiguous
+  runtime binding/reconciliation), `a1d0970` (planner provenance identity
+  validation), and `78213d4` (M1 trace expectations for the required durable
+  preparation events). Nothing has been pushed and no PR exists; this handoff
+  update is the next local commit.
+- Final evidence: protocol 4/4, M0 16/16, deterministic M1 10/10, full M1
+  12/12 in 109642.459125ms, full M2 31/31 in 245600ms, kernel 1/1, all 7
+  checked `scripts/**/*.mjs` and `test/**/*.mjs` passed `node --check`, and
+  `git diff --check` will be rerun after this handoff edit. The full M2 count
+  and duration are from the completed separate terminal run; it was not
+  rerun here.
 
 ### Current blocker
 
-Do not advance to M3 or record M1/M2 as complete until a healthy OpenCode
-provider produces one successful final real trace. The bounded diagnosis found
-no local invariant violation: `3706c85` changes graph-2 preparation and
-reconciliation only; the initial planner/worker `execute` path, deadline, and
-typed stop admission are unchanged. The observed failures occur before Result
-publication, when the provider-backed Attempt does not return an idle
-observation. Do not relax the deadline or convert this provider failure to
-green. Do not add a generic recovery engine, arbitrary retry/fork surface,
-concurrency, or Application.
+No M0-M2 blocker remains after the final serial provider-backed M1 and M2
+traces. Do not advance to M3 without its own scope and acceptance evidence.
+Do not relax deadlines or add a generic recovery engine, arbitrary retry/fork
+surface, concurrency, or Application.
 
 ### PR gate
 
@@ -75,7 +62,7 @@ performed. Before any future publication:
 - every retained review finding is tied to an explicit M0-M2 contract and
   focused public/file-backed regression test;
 - protocol, M0, M1, M2, kernel, syntax, and whitespace checks pass;
-- a successful real trace satisfies the M1 exit evidence (currently unmet);
+- the successful final real M1 trace satisfies the M1 exit evidence;
 - the claimed milestone boundary matches the actual M2 state and tests;
 - the handoff's exact evidence is refreshed against the live checkout.
 
@@ -121,33 +108,30 @@ performed. Before any future publication:
   Observation/Packet/Graph/dispatch publication, verifier Runtime publication,
   Review publication, before/after `receipt_admitted` Run-state replacement,
   before/after runtime abort, and repeated public CLI resume at each boundary.
-  A planner session binding is durably prepared before a possibly accepted
-  POST; preparation, POST/reconciliation, and graph admission are separate
-  resume actions. Explicit HTTP failure retries that same binding, while
-  ambiguous transport failure records an unreachable binding and only performs
-  GET reconciliation. Each resume admits at most one next action; prepared
-  Review, Promotion, and Receipt replay are duplicate-free. The deterministic
-  Result-only sequence uses the injectable runtime seam while all artifacts and
-  Run transitions remain file-backed. Packet/Graph recovery sides are
-  exercised through the public CLI; verifier/Review continuation uses the
-  deterministic injected runtime seam.
+  Every planner, worker, and verifier session binding is durably prepared
+  before a possibly accepted POST; preparation, POST/reconciliation, and
+  graph admission are separate resume actions. Explicit HTTP failure retries
+  that same binding, while ambiguous transport failure records an unreachable
+  binding and only performs same-session GET reconciliation. Each resume
+  admits at most one next action; prepared Review, Promotion, and Receipt
+  replay are duplicate-free. The deterministic Result-only sequence uses the
+  injectable runtime seam while all artifacts and Run transitions remain
+  file-backed. Packet/Graph recovery sides are exercised through the public
+  CLI; verifier/Review continuation uses the deterministic injected runtime
+  seam.
 
 ### Verification
 
 - `npm run test:protocol` — 4/4 passed.
 - `npm run test:m0` — 16/16 passed, including the live process-death/reconnect
   cancellation probe.
-- `npm run test:m1` at final HEAD — 11/12; the real worker trace failed with
-  `deadline_exceeded` after 323762.026875ms. The second duplicate run was
-  stopped at roughly 4m15s and is not evidence.
-- `npm run test:m2` at final HEAD — stopped after the real graph-1 planner
-  Attempt failed to reach confirmed idle; no full-suite result is claimed.
-  The prior `3706c85` run's 28/28 evidence is retained as historical evidence,
-  not substituted for the stopped final-provider run.
+- `npm run test:m1` at final HEAD — 12/12 passed in 109642.459125ms; the real
+  local-change trace passed in 101069.45675ms.
+- `npm run test:m2` — 31/31 passed in 245600ms in the completed separate
+  terminal run; it was not rerun during this finalization.
 - `node --test test/m1-kernel.test.mjs` — 1/1 passed.
 - `node --check` — passed for every `scripts/**/*.mjs` and `test/**/*.mjs`.
-- `git diff --check` — passed before this handoff edit; it is rerun after the
-  edit and commit.
+- `git diff --check` — passed after the handoff edit before its commit.
 
 ### Remaining limitations
 
@@ -185,14 +169,10 @@ performed. Before any future publication:
   exercised through the public CLI, while live verifier calls remain
   provider-dependent. The final full gate was serial; no concurrent M2
   isolation repair was evidenced by the earlier concurrent run.
-- Bounded provider diagnosis: final HEAD's real M1 worker failure and the
-  stopped M2 graph-1 planner failure both terminate in the adapter's typed
-  deadline/confirmed-stop path before a Result or graph continuation is
-  admitted. M0's same fixture server passes health, simple message, and live
-  cancellation/reconnect observations, while deterministic M1 admission
-  checks pass 10/10. This is evidence of a provider-backed execution/idle
-  failure, not proof of the provider's internal cause; no local code repair
-  was justified and no timeout was changed.
+- Final provider evidence: the changed HEAD's real M1 local-change trace and
+  the completed full M2 run both passed without timeout changes. The M0
+  fixture still provides the independent health, message, and live
+  cancellation/reconnect observations.
 - Recovery covers the current single-task prepared Promotion and Decision
   checkpoints only. Generic recovery, concurrency, arbitrary retry/fork,
   M3 repair, and Application remain out of scope.
@@ -211,7 +191,7 @@ Verified on 2026-08-05 (Asia/Seoul):
 
 - checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`
 - branch: `agent/executable-opencode-harness-design`
-- HEAD before this handoff commit: `3706c85`; this handoff update is the next
+- HEAD before this handoff commit: `78213d4`; this handoff update is the next
   local commit.
 - upstream: `origin/agent/executable-opencode-harness-design`
 - Issue #30 is open: <https://github.com/hjung3113/opencode-orchestrated-agent-workflow/issues/30>
