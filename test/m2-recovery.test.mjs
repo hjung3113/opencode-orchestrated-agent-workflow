@@ -729,10 +729,24 @@ test("successful ambiguous reconciliation replays all runtime roles without anot
           .filter((path) => !beforeArtifacts.has(path));
         assert.deepEqual(events, ["implementation_result_admitted"], targetAttemptId);
         assert.deepEqual(addedArtifacts.sort(), [
-          "artifacts/runtime/worker-implementation-1-edit.json",
           "artifacts/runtime/worker-implementation-1.json",
           "artifacts/tasks/implementation-1/attempts/1/result.json",
         ], targetAttemptId);
+        const resultArtifact = JSON.parse(readFileSync(
+          join(runDir, "artifacts/tasks/implementation-1/attempts/1/result.json"),
+        ));
+        const recoveredEditRefs = resultArtifact.input_refs.filter(({ artifact_id }) =>
+          artifact_id === "runtime-worker-implementation-1-reconciled");
+        assert.equal(recoveredEditRefs.length, 1, targetAttemptId);
+        assert.equal(
+          recoveredEditRefs[0].path,
+          "artifacts/runtime/runtime-worker-implementation-1-reconciled.json",
+          targetAttemptId,
+        );
+        assert.equal(resultArtifact.input_refs.some(({ artifact_id }) =>
+          artifact_id === "runtime-worker-implementation-1-edit"), false, targetAttemptId);
+        assert.equal(artifactEntries(runDir).some(([, artifact]) =>
+          artifact.artifact_id === "runtime-worker-implementation-1-edit"), false, targetAttemptId);
       }
       for (let attempt = 0; attempt < 12 && resumed.lifecycle_state !== "completed"; attempt += 1) {
         resumed = await resumeRun(runDir, { workspace, runtime });

@@ -1542,20 +1542,25 @@ async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSna
   const recoveredWorkspacePath = join(ctx.runDir, "staging", "recovery", `${attemptId}-workspace`);
   if (existsSync(recoveredWorkspacePath)) rmSync(recoveredWorkspacePath, { recursive: true, force: true });
   cpSync(adapter.workspace, recoveredWorkspacePath, { recursive: true, dereference: false });
+  const phase = previousPrepared.phase ?? (binding.role === "worker" ? "worker_edit" : binding.attempt_id);
+  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
   const recoveredExecution = {
     ...execution,
     before_snapshot: previousPrepared.before_snapshot ?? beforeSnapshot,
     observation,
-    phase: previousPrepared.phase ?? (binding.role === "worker" ? "worker_edit" : binding.attempt_id),
+    phase,
     ...(previousPrepared.result_commit ? { result_commit: previousPrepared.result_commit } : {}),
     ...(previousPrepared.worker_snapshot ? { worker_snapshot: previousPrepared.worker_snapshot } : {}),
     ...(previousPrepared.observed_resources ? { observed_resources: previousPrepared.observed_resources } : {}),
     ...(previousPrepared.worker_changes ? { worker_changes: previousPrepared.worker_changes } : {}),
     ...(previousPrepared.command_execution ? { command_execution: previousPrepared.command_execution } : {}),
-    ...(previousPrepared.worker_edit_runtime_ref ? { worker_edit_runtime_ref: previousPrepared.worker_edit_runtime_ref } : {}),
+    ...(previousPrepared.worker_edit_runtime_ref
+      ? { worker_edit_runtime_ref: previousPrepared.worker_edit_runtime_ref }
+      : phase === "worker_edit" && binding.role === "worker"
+        ? { worker_edit_runtime_ref: observationRef }
+        : {}),
   };
   writePreparedExecution(ctx, attemptId, recoveredExecution);
-  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
   const next = applyTransition(ctx, state, "runtime_reconciled", {
     lifecycle_state: "active",
     runtime_bindings: state.runtime_bindings.map((current) =>
@@ -3077,15 +3082,16 @@ export async function runLocalChange({
       attemptId: "worker-implementation-1",
       label: "implementation worker Attempt",
     });
-    const preparedWorkerProposal = workerExecutionResult.prepared
-      && readPreparedExecution(ctx, "worker-implementation-1").phase === "worker_result_proposal";
+    const preparedWorkerExecution = workerExecutionResult.prepared
+      ? readPreparedExecution(ctx, "worker-implementation-1") : null;
+    const preparedWorkerProposal = preparedWorkerExecution?.phase === "worker_result_proposal";
     let workerEditRuntimeRef;
     let commandExecution;
     let workerChanges;
     let observedResources;
     let proposalExecution;
     if (preparedWorkerProposal) {
-      const prepared = readPreparedExecution(ctx, "worker-implementation-1");
+      const prepared = preparedWorkerExecution;
       workerSnapshot = prepared.worker_snapshot;
       resultCommit = prepared.result_commit;
       workerChanges = prepared.worker_changes;
@@ -3094,11 +3100,18 @@ export async function runLocalChange({
       workerEditRuntimeRef = prepared.worker_edit_runtime_ref;
       proposalExecution = workerExecution;
     } else {
-      const workerEditObservation = {
-        ...workerExecution.observation,
-        artifact_id: "runtime-worker-implementation-1-edit",
-      };
-      workerEditRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-edit.json", workerEditObservation);
+      if (preparedWorkerExecution?.phase === "worker_edit") {
+        if (!preparedWorkerExecution.worker_edit_runtime_ref) {
+          throw new AttemptFailure("runtime_reconciliation_required", "recovered worker edit has no authoritative Runtime Observation reference");
+        }
+        workerEditRuntimeRef = preparedWorkerExecution.worker_edit_runtime_ref;
+      } else {
+        const workerEditObservation = {
+          ...workerExecution.observation,
+          artifact_id: "runtime-worker-implementation-1-edit",
+        };
+        workerEditRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-edit.json", workerEditObservation);
+      }
       if (workerExecutionResult.prepared) clearPreparedExecution(ctx, "worker-implementation-1");
       commandExecution = runCommand(taskWorkspace, admittedCommand);
       const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
