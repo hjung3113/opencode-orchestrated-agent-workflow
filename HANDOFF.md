@@ -1,5 +1,104 @@
 # Handoff
 
+## Current handoff — 2026-08-08 OpenCode-native M4 design
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`.
+- Branch: `agent/opencode-native-interface-design`.
+- Design commit: `034e469d0c9241c72a208f9f97a36affe8b66e4d`, based on the completed M3
+  commit `ee5b2d0d329fe1847e7d6cac72106a6c7d4d78ec`.
+- This slice changes only product-design and implementation-roadmap documents.
+  No OpenCode command, agent, tool, skill adapter, protocol schema, or runtime
+  implementation has been added yet.
+
+### Accepted design
+
+- M4 is now the next dependency-ready v1 milestone: the OpenCode-native
+  operator interface. The former repository-inspect/external-read/llm-wiki
+  milestones move to M5a-M5c and the sequential graph moves to M6.
+- OpenCode commands are prompt UX bound to one primary `orchestrator` agent
+  with `subtask: false`. A primary-only typed operator tool calls the same
+  Kernel module as the CLI for `run`, `status`, `resume`, and `cancel`; it does
+  not shell out to the CLI or own workflow selection.
+- Planner, worker, and verifier remain the only authority roles. Workflow names
+  select versioned base agent configurations and Packet-narrowed runtime
+  profiles; Research, Design, Specification, Ticketing, Repair, and Maintenance
+  do not create new authority roles or directly user-selectable bypass agents.
+- Original Matt Pocock skill bodies remain at their canonical source. A pinned
+  manifest records repository, revision, path, and digest and classifies each
+  original as `workflow_recipe`, `attempt_skill`, or `vocabulary`. Adapters
+  compile compatible recipe steps into admitted Tasks and never copy, rewrite,
+  or pretend to execute forbidden child-agent, publication, commit, or other
+  external-effect steps.
+- Each Workflow Definition declares required/forbidden Artifact kinds,
+  role/Preset/capability compatibility, direct triggers, skill constraints,
+  ordered steps, output gates, exit conditions, and task-kind/keyword hints.
+  The Kernel computes eligible routes and records matched rule ids; an LLM may
+  rank only inside that set. Keywords narrow candidates but never grant
+  authority or decide intent alone.
+- Direct OpenCode Task-tool delegation remains denied. A worker that discovers
+  out-of-role work may call a separate Packet-bound `request_route` tool, which
+  stages a `replan_requested` Replan Request. The Kernel validates it and M6
+  may use it to trigger a successor graph Task with a fresh workflow-specific
+  agent/session. The originating agent cannot launch its delegate.
+- Plugin hooks are not baseline scope while the typed tools and existing
+  OpenCode server-event adapter expose the required facts. Add a hook only if
+  the M4 capability probe demonstrates a missing observation or enforcement.
+
+### Review and evidence
+
+- Two independent `gpt-5.6-sol` high reviews covered Spec and Standards.
+  Initial verdicts were `REVISE`: skill recipes were not executable under the
+  Task-tool denial, routing remained LLM-first, out-of-role delegation lacked a
+  durable artifact, command semantics were overstated, and native loading and
+  collision behaviour were unproven.
+- The bounded repair added executable skill classes and ordered gates,
+  deterministic eligible-route admission, Replan Request provenance, correct
+  planner/worker/verifier role taxonomy, prompt-only command semantics, and M4
+  runtime-probe rows. Both reviewers then returned `ACCEPT` with zero remaining
+  finding in their assigned axes.
+- `git diff --check` passed before commit. No runtime suite was run because this
+  is a documentation-only design change.
+
+### Next session — spec, tickets, implementation
+
+1. Read this section, `AGENTS.md`, `docs/design/architecture.md`,
+   `docs/design/workflows.md`, `docs/design/opencode-runtime.md`,
+   `docs/design/file-protocol.md`, `docs/design/task-graph.md`, and the M4
+   section plus M4 capability rows in `docs/implementation-plan.md`.
+2. Write one testable M4 specification. It must pin the supported OpenCode
+   asset layout and launcher, exact command arguments/results, primary and
+   workflow-agent permissions, the two typed-tool interfaces, canonical skill
+   manifest/adapter records, deterministic route rules, Replan Request schema,
+   runtime observations, recovery expectations, and explicit exclusions.
+3. Obtain one bounded adversarial review of that specification. Do not reopen
+   M0-M3 design or add plugin hooks, a skill marketplace, a second scheduler,
+   concurrency, new Presets, or external Application.
+4. Convert the accepted specification into the smallest dependency-aware
+   ticket graph. Start with the M4 capability-probe rows; implementation tickets
+   must depend on the exact observations they require. Serialize overlapping
+   writes to the protocol schema, runtime adapter, and `local-change.mjs`.
+5. Implement test-first in dependency order. Reuse the existing exported
+   run/status/resume/cancel Kernel path and role-profile preflight. The first
+   real black-box exit must launch a clean target through OpenCode, invoke
+   `/orchestrate`, and reconstruct the same durable outcome as the direct CLI.
+6. Keep M6 successor-task delegation implementation out of M4 except for the
+   typed `request_route`/Replan Request contract and no-authority proof. M6 owns
+   the real successor graph dispatch and Receipt chain.
+
+### Stop conditions
+
+- Stop for a material decision if the supported OpenCode distribution cannot
+  load the pinned bundle without copying into the target or depending on an
+  undeclared developer-home asset.
+- Stop with `dependency_unavailable` when an original Matt Pocock skill cannot
+  be resolved at its pinned identity; do not vendor or silently substitute it.
+- Stop and revise the M4 design if the capability probe disproves exact input
+  transport, collision rejection, permission narrowing, second-session
+  operator control, or typed-tool observation. Do not cover a failed probe with
+  a plugin hook or prompt convention.
+
 ## Current handoff — 2026-08-06 M3 implementation
 
 ### Live state
