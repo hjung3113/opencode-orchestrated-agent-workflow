@@ -66,6 +66,14 @@ subagents would create work outside the admitted graph. OpenCode child-session
 relationships may be recorded for diagnosis but have no scheduling,
 provenance, or authority meaning.
 
+When a worker discovers necessary work outside its admitted Workflow
+Definition, the only delegation surface is the Packet-bound `request_route`
+custom tool. It stages a Replan Request and ends the Attempt; it does not invoke
+the requested agent. The Kernel admits or rejects that proposal, and an
+admitted successor graph Task receives a fresh workflow-specific agent
+configuration and session. This preserves delegation without treating a child
+session as workflow state.
+
 ## Effective configuration preflight
 
 OpenCode configuration can be assembled from sources outside the target

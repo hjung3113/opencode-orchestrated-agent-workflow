@@ -47,7 +47,7 @@ bottom-up vertical slices—but its phases are adjusted as follows.
 5. Treat controlled concurrency and Application to a user branch, PR,
    deployment, or other external target as post-v1 work. V1 Promotion to a
    harness-owned Result Ref is not Application.
-6. Land llm-wiki at M4c as one cited retrieval bound to the admitted Packet's
+6. Land llm-wiki at M5c as one cited retrieval bound to the admitted Packet's
    `input_refs`. It is a v1 gate, but it must not become a second source of
    truth, a prerequisite framework, or a mandatory dependency for a Run whose
    bounded direct file context is sufficient.
@@ -59,19 +59,21 @@ M0 fail-closed runtime capability matrix
   -> M1 local-change walking skeleton
     -> M2 hostile recovery and operator controls
       -> M3 one finding-bound repair
-        -> M4a repository-only inspect -> M4b exact external read
-                                      \-> M4c bounded llm-wiki retrieval
-        -> M5 sequential multi-node graph
+        -> M4 OpenCode-native operator interface
+          -> M5a repository-only inspect -> M5b exact external read
+                                         \-> M5c bounded llm-wiki retrieval
+          -> M6 sequential multi-node graph
 
-M4a-M4c and M5 are independent branches after M3. Both branches gate v1.
-M4a is the shared prerequisite for M4b and M4c; M4b and M4c are independent
-of each other after M4a.
+M4 is the next dependency-ready milestone after M3. M5a-M5c and M6 are
+independent branches after M4 and both branches gate v1. M5a is the shared
+prerequisite for M5b and M5c; M5b and M5c are independent of each other after
+M5a.
 
-Post-v1 independent candidates: M6 controlled concurrency, M7 additional
-presets, and M8 external Application.
+Post-v1 independent candidates: M7 controlled concurrency, M8 additional
+presets, and M9 external Application.
 ~~~
 
-M1 through M5 are product slices or extensions of an already executable slice.
+M1 through M6 are product slices or extensions of an already executable slice.
 M0 is a time-bounded risk-retirement activity with per-slice prerequisites. It
 must not be reported as a product result, and an unsupported required capability
 blocks its dependent slice rather than counting as a successful probe.
@@ -150,7 +152,8 @@ The matrix has two prerequisite groups:
 | --- | --- |
 | M1 | Fresh planner, worker, and verifier sessions; role and model identity; resolved-configuration digest and undeclared-configuration rejection; declared skill identity and unavailable-skill rejection; session/message/terminal events; idle and runtime-failure observations; runtime abort and confirmed stop on deadline; complete workspace diff and canonical Output Snapshot; capability narrowing; denied Task delegation, general model-session shell, network, and external mutation; exact admitted-command mediation. |
 | M2 | Operator-requested confirmed cancellation and `cancel_unconfirmed` reconciliation; reconnect-or-observe behaviour needed by `resume`. |
-| M4b | Exact canonical URL restriction for `webfetch`; correlation of target, message, and exact bounded agent-visible content; denial of undeclared URLs, search, browser, MCP, plugin, shell, credentials, and other network paths. |
+| M4 | Isolated launcher loading; command, primary-agent, workflow-agent, custom-tool, and skill enumeration; exact request and run-id transport; target/global name-collision rejection; typed-tool invocation; and status/cancel observation from a second native session. |
+| M5b | Exact canonical URL restriction for `webfetch`; correlation of target, message, and exact bounded agent-visible content; denial of undeclared URLs, search, browser, MCP, plugin, shell, credentials, and other network paths. |
 
 ### Exit evidence
 
@@ -159,7 +162,9 @@ The matrix has two prerequisite groups:
 - Every M1 matrix row passes before M1 implementation begins.
 - Every M2 matrix row passes before M2 implementation begins; it does not
   block M1.
-- Every M4b matrix row passes before M4b implementation begins; it need not
+- Every M4 matrix row passes before M4 implementation begins; a prompt-only
+  command or fixture-local asset listing is not sufficient evidence.
+- Every M5b matrix row passes before M5b implementation begins; it need not
   block M1 through M3.
 - An unsupported required row blocks the dependent slice and produces a typed
   compatibility result and focused design correction. M0 is not a Run and
@@ -382,7 +387,120 @@ Block after the bounded repair budget.
 Issues #26, #28, and #29: auditable graph revision, immutable repair lineage,
 independent re-verification, bounded replanning, and deterministic acceptance.
 
-## M4a — repository-only `inspect@1`
+## M4 — OpenCode-native operator interface
+
+### Observable scenario
+
+Given a clean target repository and the supported product distribution, when a
+human launches OpenCode and invokes `/orchestrate <request>`, then the exact
+request enters the existing Kernel-owned run path and the same OpenCode session
+shows the resulting Receipt, focused Material Decision Request, or Typed Block.
+The native status, resume, and cancel commands address the same file-backed run
+ids as the public CLI.
+
+### Work
+
+- Ship one versioned OpenCode adapter bundle containing four prompt commands
+  (`/orchestrate`, `/orchestrate-status`, `/orchestrate-resume`, and
+  `/orchestrate-cancel`), one primary `orchestrator` agent, one primary-only
+  operator tool, one worker-only `request_route` tool, versioned workflow-agent
+  base configurations, a canonical skill-source manifest, and only the skill
+  adapters required by completed workflows.
+- Bind every command to the primary agent with `subtask: false`. Give that
+  agent only the typed operator tool and deny Task, shell, writes, and arbitrary
+  skill loading; a command is a prompt template, not a deterministic Kernel
+  adapter.
+- Give the operator tool one deep interface over the existing Kernel actions.
+  It imports the same operator module as the CLI rather than shelling out to the
+  CLI. Neither the command nor primary agent may select workflows, construct
+  graphs, dispatch role agents, or write run artifacts.
+- Expose `request_route` as a separate Packet-bound tool so an execution worker
+  cannot invoke operator controls and the primary agent cannot manufacture an
+  in-graph delegation request.
+- Keep planner, worker, and verifier as the only authority roles. Derive each
+  Packet-narrowed runtime profile from the admitted Workflow Definition's base
+  agent configuration; Research and other workflows are worker-role Attempts,
+  not new protocol roles or directly user-selectable agents.
+- Resolve the original Matt Pocock skill bodies without copying or editing
+  them. Pin source repository, revision, path, and digest; allow only an
+  identity-matching cache, and return `dependency_unavailable` for missing,
+  changed, or incompatible originals.
+- Extend the protocol skill record only with the source-revision, source-path,
+  and adapter identity needed to reconstruct that binding; reuse the existing
+  id, version, source, and digest fields instead of adding a parallel manifest
+  object to every artifact.
+- Classify pinned originals as `workflow_recipe`, `attempt_skill`, or
+  `vocabulary`. Compile each completed Workflow Definition into ordered steps
+  with preconditions, output gates, and allowed capabilities; record admitted
+  and observed skill invocation order. Commands and agents may invoke the
+  orchestrator but may not choose skills or carry duplicated workflow recipes.
+- Add only the adapters exercised by completed workflows. Each adapter binds
+  Packet inputs and declared Artifacts, disables incompatible external effects,
+  and cannot widen runtime capabilities or Kernel authority.
+- Add the versioned Workflow Definition route contract: required/forbidden
+  Artifact kinds, role/Preset/capability compatibility, direct triggers,
+  skill constraints, task-kind/keyword hints, and exit conditions. The Kernel
+  computes eligible candidates and matched rule ids; the planner only ranks
+  inside that set.
+- Add the Packet-bound `request_route` custom-tool action and
+  `replan_requested` Artifact. It records an out-of-role need and ends the
+  Attempt without direct OpenCode Task delegation or authority widening.
+- Load the bundle through one explicit product launcher or installation path.
+  Do not copy product assets into the target repository or depend on similarly
+  named files in a developer-home configuration directory.
+- Reuse the public CLI and Kernel implementation. The OpenCode surface is an
+  adapter, not a second orchestration path or a new workflow registry.
+- Reuse the existing OpenCode server-event adapter. Do not add plugin hooks
+  unless the M4 capability probe demonstrates a required observation or
+  enforcement that the typed tool and current event stream cannot provide.
+- Preserve the resolved OpenCode configuration and selected skill identities
+  already carried by runtime evidence; fail with a typed setup error when the
+  supported bundle is missing, shadowed, or incompatible.
+
+### Exit evidence
+
+- A clean target loads the expected command, agent, tool, and completed-preset
+  original-skill identities and adapters through the supported launcher or
+  installation path, even when no developer-home skill installation exists.
+- The supported launcher enumerates the expected commands, primary and
+  workflow-agent configurations, typed tool, and skills; it rejects target or
+  global collisions before dispatch.
+- `/orchestrate` completes one real `local-change@1` trace, and its canonical
+  artifacts and terminal outcome match the direct CLI path for the same
+  admitted request.
+- Native status and repeated resume reconstruct the same run from files alone;
+  native cancel records the same confirmed or unconfirmed outcome as the CLI,
+  including when status or cancel originates in a second native session.
+- Undeclared global or target-local assets with colliding names cannot replace
+  the supported bundle, and missing or incompatible assets fail before a Run is
+  dispatched.
+- The Receipt reconstructs the selected Workflow Definitions, ordered original
+  skill identities, adapter versions, matched route-rule ids, observed skill
+  invocation order, and the Attempts that used them.
+- One worker calls `request_route`; the resulting `replan_requested` Artifact
+  is durable and grants no capability or direct child-agent execution.
+- The target checkout remains unchanged by loading the bundle itself.
+
+### Explicit exclusions
+
+- No phase-selecting `/research`, `/design`, `/spec`, `/ticket`, `/implement`,
+  or `/verify` commands; the orchestrator owns workflow selection.
+- No second scheduler, state store, agent hierarchy, workflow registry, or
+  product-wide skill catalog.
+- No vendored, rewritten, or prompt-embedded copies of Matt Pocock skill
+  bodies, and no automatic adoption of an upstream skill update.
+- No package-registry publication or global installer unless the clean-target
+  proof shows the explicit launcher cannot provide the supported interface.
+- No plugin hook merely to mirror facts already available from the typed tool
+  or server-event adapter.
+
+### Contract mapping
+
+Restores the original OpenCode-native product surface while preserving the
+accepted one-request interface, orchestrator-owned routing, explicit skill
+composition, and file-backed authority model.
+
+## M5a — repository-only `inspect@1`
 
 ### Observable scenario
 
@@ -419,7 +537,7 @@ network access, local changes, Promotion, or Application claims.
 - #28: cited repository provenance.
 - #29: deterministic policy admission and denial of authority widening.
 
-## M4b — declared exact external read
+## M5b — declared exact external read
 
 ### Observable scenario
 
@@ -430,7 +548,7 @@ reviews the frozen observation without a live refetch.
 
 ### Work
 
-- Start only after every M4b row in the M0 capability matrix passes.
+- Start only after every M5b row in the M0 capability matrix passes.
 - Add External Read Target admission and Runtime Observation correlation for
   target id, canonical requested URL, message id, outcome, exact content, and
   digest.
@@ -452,7 +570,7 @@ reviews the frozen observation without a live refetch.
 Issues #25, #27, #28, and #29: exact external reads, policy narrowing, frozen
 provenance, and deterministic denial.
 
-## M4c — bounded llm-wiki retrieval
+## M5c — bounded llm-wiki retrieval
 
 ### Observable scenario
 
@@ -482,7 +600,7 @@ for an individual Run whose bounded direct file context is sufficient.
 Issues #28 and #29: authoritative-source linkage, bounded context compilation,
 and deterministic admission of retrieved claims.
 
-## M5 — sequential multi-node graph
+## M6 — sequential multi-node graph
 
 ### Observable scenario
 
@@ -502,6 +620,11 @@ revision when new evidence changes the plan.
 - Derive readiness rather than persisting it; keep provenance relations in
   Artifact references instead of inventing edge types.
 - Keep stable serial dispatch and `max_concurrency: 1`.
+- Admit a `replan_requested` Artifact only when its source Task, Attempt,
+  Evidence, recommended Workflow Definition, and required capability validate.
+  Use it as a graph-revision trigger, compute eligible successors from the
+  route registry, and dispatch the admitted workflow-specific agent in a fresh
+  session. Direct OpenCode Task-tool delegation remains denied.
 - Demonstrate one fan-out/fan-in trace and one failure that blocks only its
   descendants.
 - Fit the normative success trace within the v1 execution budget: two fan-out
@@ -523,6 +646,9 @@ revision when new evidence changes the plan.
   required.
 - No scheduler, lock service, graph database, or inferred semantic-resource
   system is introduced.
+- An out-of-role worker request is linked through Replan Request, graph
+  revision, successor Task, workflow-specific agent identity, and result in the
+  Receipt; a request outside the deterministic eligible set is rejected.
 - The normative fan-out/fan-in trace declares `{execution: 4, planner: 3,
   revisions: 2, repairs_per_finding: 0}`.
 
@@ -533,24 +659,28 @@ publication, deterministic scheduling, failure propagation, and provenance.
 
 ## V1 release gate
 
-V1 is ready only when the relevant M0 matrix rows and M1 through M3, M4a through
-M4c, and M5 are complete, and a clean machine can run the following without
+V1 is ready only when the relevant M0 matrix rows and M1 through M4, M5a through
+M5c, and M6 are complete, and a clean machine can run the following without
 hidden developer-home dependencies:
 
-1. a successful `local-change@1` request with real planner, worker, and verifier
+1. a successful OpenCode-native `/orchestrate` request with the supported
+   command, primary agent, typed operator tool, and completed-preset skill;
+2. a successful `local-change@1` request with real planner, worker, and verifier
    Attempts, independent verification, and Promotion;
-2. the same path with one verifier Finding, one Repair, and re-verification;
-3. interruption and resume at each authoritative commit boundary;
-4. confirmed and unconfirmed cancellation;
-5. a material ambiguity that persists a Material Decision Request, accepts one
+3. the same path with one verifier Finding, one Repair, and re-verification;
+4. interruption and resume at each authoritative commit boundary;
+5. confirmed and unconfirmed cancellation;
+6. a material ambiguity that persists a Material Decision Request, accepts one
    human response, records a Decision successor, and resumes;
-6. a low-risk ambiguity that continues as an Assumption without a human gate;
-7. an `inspect@1` repository-only report;
-8. an `inspect@1` report using one declared exact external read;
-9. a bounded llm-wiki retrieval whose admitted Packet input binds the
+7. a low-risk ambiguity that continues as an Assumption without a human gate;
+8. an `inspect@1` repository-only report;
+9. an `inspect@1` report using one declared exact external read;
+10. a bounded llm-wiki retrieval whose admitted Packet input binds the
    repository snapshot, source path, and digest;
-10. a sequential multi-node fan-out/fan-in request;
-11. the hostile outcomes listed in `docs/design/examples.md`.
+11. a sequential multi-node fan-out/fan-in request;
+12. an out-of-role worker request that deterministically routes through a
+    Replan Request and successor graph Task without direct child delegation;
+13. the hostile outcomes listed in `docs/design/examples.md`.
 
 The release evidence must include protocol validation, real OpenCode version
 and configuration identity, exact commands and outcomes, immutable run
@@ -561,7 +691,7 @@ artifacts, and reconstruction of every Receipt from files alone.
 These are independent candidates, not committed v1 scope. Their order is
 chosen only after evidence demonstrates a dependency.
 
-### M6 — controlled concurrency
+### M7 — controlled concurrency
 
 Proceed only after a real sequential trace demonstrates that parallelism is
 material. Add bounded parallel dispatch, resource locks, obsolete-task
@@ -569,7 +699,7 @@ cancellation, fairness, and timeout handling. Require equivalent sequential
 and concurrent runs to produce compatible accepted outcomes before raising
 `max_concurrency` above one.
 
-### M7 — additional presets
+### M8 — additional presets
 
 Add a preset only when at least two completed traces demonstrate a policy
 difference that cannot be represented by `inspect@1`, `local-change@1`, or a
@@ -577,7 +707,7 @@ narrowing override. Bug-fix, feature, refactor, CI, and documentation labels
 remain routing signals until then. This does not depend on controlled
 concurrency.
 
-### M8 — external Application
+### M9 — external Application
 
 Design Application separately from Promotion. Local branch updates, commits to
 user-designated refs, pushes, PR/issue mutation, deployment, migration, and
@@ -596,6 +726,7 @@ undeclared diff” over component tickets such as “implement policy engine” 
 “implement artifact manager.”
 
 The first dependency-ready ticket is the M1 prerequisite group in M0. M1 begins
-only after every named M1 matrix row passes; it does not wait for the M4b
-external-read rows or future adapter abstractions. After M3, M4a-M4c and M5 may
-advance independently. M4b begins only after its own M0 matrix rows pass.
+only after every named M1 matrix row passes; it does not wait for the M5b
+external-read rows or future adapter abstractions. After M3, M4 is next. After
+M4, M5a-M5c and M6 may advance independently. M5b begins only after its own M0
+matrix rows pass.

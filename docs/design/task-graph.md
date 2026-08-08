@@ -49,6 +49,9 @@ Other relationships remain artifact references:
 - a repair packet identifies the containing review, the immutable finding
   within it, and the output snapshot on which the finding was made;
 - a consuming packet identifies its input artifacts;
+- a Replan Request identifies the source Task and Attempt, recommended
+  Workflow Definition, Evidence, and required capability; a successor revision
+  may cite it as `trigger_ref` only after Kernel admission;
 - a revision record identifies artifacts invalidated by new evidence.
 
 This keeps scheduling separate from provenance.

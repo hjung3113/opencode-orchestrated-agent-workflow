@@ -112,6 +112,12 @@ recorded repository snapshot, repository-relative path, and content digest.
   output digest; a permission-event string cannot serve as command Evidence.
 - Result: worker claims, evidence with provenance, claimed output snapshot,
   changed resources, and its exact runtime-observation reference.
+- Replan Request: a worker-authored `replan_requested` proposal for necessary
+  work outside the current Workflow Definition. It carries the source Task and
+  Attempt, recommended Workflow Definition, reason, Evidence references, and
+  required capability. It grants no authority and launches nothing; the Kernel
+  may reject it, request a Material Decision, or use it as the trigger for a
+  planner-proposed successor graph revision.
 - Review: a Verifier-authored Artifact for one target Task and exact Output
   Snapshot, containing the Verifier identity, Verdict, Evidence, focused
   Findings, and its exact Runtime Observation reference.
@@ -158,7 +164,7 @@ output call the outcome a Verified Result to avoid implying an Applied Result.
 | --- | --- | --- |
 | Human | Request and material-decision response | Through a recorded kernel event |
 | Planner | Request, graph, and packet proposals in its unique staging area | No |
-| Worker | Result proposal in its unique staging area | No |
+| Worker | Result or Replan Request proposal in its unique staging area | No |
 | Verifier | Review proposal in its unique staging area | No |
 | OpenCode adapter | Runtime observation returned to the kernel | No |
 | Kernel | Admission, transition, graph, dispatch, Outcome Record, and validated Artifact records | Yes |
