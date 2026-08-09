@@ -6,14 +6,15 @@
 
 - Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
   `agent/opencode-native-interface-design`.
-- The implementation/review range is `2a2c2b9...c9f882e`. The three local
+- The implementation/review range is `2a2c2b9...c9f882e`. The three capability
   commits are `d5e725f` (`test: prove M4 OpenCode capabilities (#35)`),
   `fda8785` (`test: harden M4 capability evidence (#35)`), and `c9f882e`
-  (`test: pin M4 collision source evidence (#35)`). None has been pushed.
+  (`test: pin M4 collision source evidence (#35)`). `b92a069` records their
+  accepted handoff. All four commits are pushed to the branch.
 - Issue #35 remains open, assigned to `hjung3113`, and labelled
-  `ready-for-agent`. Do not close it or push without fresh authorization.
-  Issue #37 remains the next DAG ticket but is still blocked by open #35; do
-  not begin it from this handoff.
+  `ready-for-agent`. Draft PR #40 targets the still-open M3 branch/PR #33 so it
+  does not duplicate M3 against `main`; merging #40 will close #35. Issue #37
+  remains the next DAG ticket but is still blocked by open #35.
 
 ### Implemented capability gate
 
@@ -65,14 +66,28 @@
   re-review of `2a2c2b9...c9f882e` ended with terminal `ACCEPT` from all three
   reviewers and zero remaining #35 findings.
 
-### Next action
+### Next session — #37 design/implementation plan and adversarial review
 
-1. Live-check HEAD, upstream, worktree cleanliness, Issue #35, and the latest
-   remote branch before acting.
-2. With fresh user authorization, push the local branch and close #35 with the
-   exact gate/review evidence. Without that authorization, stop here.
-3. Only after #35 is closed and GitHub shows #37 unblocked, claim #37 and follow
-   its accepted scope. Do not pull #36-#39 work into the capability gate.
+1. Re-read this section, `AGENTS.md`, Issue #34, Issue #37, and the current
+   design/implementation-plan authority. Live-check HEAD/upstream, PR #33, PR
+   #40, Issue #35, native dependencies, and dirty/untracked paths. Do not treat
+   the recorded GitHub state as current.
+2. If PR #33 or #40 is still open or #37 is still dependency-blocked, do not
+   start #37 implementation. Report the exact dependency state and limit work
+   to an explicitly requested review or PR follow-up.
+3. Once #37 is unblocked, claim only #37. First reconcile the smallest design
+   and implementation-plan slice for the four closed Workflow Definitions,
+   ordered `route.*@1` rules, five-skill source manifest, adapter contracts,
+   protocol provenance, and Runtime Observation invocation order. Preserve
+   Kernel route authority and keep model-facing tools/successor dispatch out.
+4. Before implementation, run one bounded read-only adversarial review of that
+   proposed design/plan against Issue #34/#37 and repository authority. Require
+   explicit Standards and Spec verdicts, reproduce material findings, repair
+   only confirmed #37 planning defects, and obtain terminal `ACCEPT`. Do not
+   reopen a whole-M4 review or let reviewers edit overlapping files.
+5. After plan acceptance, hand off the exact implementation contract, allowed
+   paths, focused failing tests, regression gates, and fixed review range for a
+   later serial implementation session. Do not begin #38, #36, or #39.
 
 ## Current handoff — 2026-08-09 M4 specification and adversarial hardening
 
