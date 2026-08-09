@@ -1,5 +1,256 @@
 # Handoff
 
+## Current handoff — 2026-08-09 M4 capability gate #35 accepted locally
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
+  `agent/opencode-native-interface-design`.
+- The implementation/review range is `2a2c2b9...c9f882e`. The three capability
+  commits are `d5e725f` (`test: prove M4 OpenCode capabilities (#35)`),
+  `fda8785` (`test: harden M4 capability evidence (#35)`), and `c9f882e`
+  (`test: pin M4 collision source evidence (#35)`). `b92a069` records their
+  accepted handoff. All four commits are pushed to the branch.
+- Issue #35 remains open, assigned to `hjung3113`, and labelled
+  `ready-for-agent`. Draft PR #40 targets the still-open M3 branch/PR #33 so it
+  does not duplicate M3 against `main`; merging #40 will close #35. Issue #37
+  remains the next DAG ticket but is still blocked by open #35.
+
+### Implemented capability gate
+
+- `npm run test:m4-capabilities` launches the resolved OpenCode `1.18.5`
+  executable against a disposable clean Git target and asserts the external
+  bundle, exact four-command metadata and argument transport, primary and
+  worker-only agent surfaces, complete tool schemas/catalogs, provider-visible
+  tool narrowing, and the OpenCode-managed tool-output permission exception.
+- Real typed calls prove `orchestrator_operator`, `request_route`, and control
+  of the original Run identity from a second OpenCode session. Completed SSE
+  events are correlated by tool call id, input, output, and source marker.
+- Collision fixtures cover command, agent, tool, skill, plugin, MCP, and
+  instruction assets across the distribution bundle, isolated XDG global
+  configuration, target `.opencode`, isolated `HOME/.agents/skills`, and the
+  disabled `HOME/.claude/skills` source. Exact catalogs, source paths, residual
+  built-ins, and unrelated assets are assertions rather than prose.
+- Clean and collision targets are compared before/after using HEAD plus Git
+  status including ignored files. Collision dependencies are fixture inputs
+  linked to the external scratch bundle before the baseline, so OpenCode adds
+  no target package, lock, ignore, or `node_modules` state during the observed
+  launch.
+
+### Specification clarification and limitation
+
+- Live OpenCode appends exactly one managed
+  `<XDG_DATA_HOME>/opencode/tool-output/*` external-directory allow after the
+  deny-all/operator-allow entries. Issues #34 and #35 now explicitly allow
+  only that internal exception while requiring the primary provider request to
+  expose only `orchestrator_operator`; general external-directory access
+  remains unsupported.
+- OpenCode `1.18.5` does not select the same colliding `m4-skill` source on
+  every launch. The gate therefore binds the returned description to its exact
+  returned realpath and asserts the complete admissible source set. This
+  selected winner is not product authority: #36 must reject any colliding
+  source set before relying on OpenCode resolution. Issues #34/#35 record that
+  clarified boundary; production collision rejection remains wholly #36.
+
+### Gates and review
+
+- After the final repair, `npm run test:m4-capabilities` passed twice, 1/1 in
+  `5604.442792ms` and 1/1 in `5501.524625ms`; a subsequent fixed-commit review
+  run also passed 1/1. `npm run test:protocol` passed 4/4 in `134.208542ms`.
+- Every `scripts/**/*.mjs` and `test/**/*.mjs` file passed `node --check`, and
+  `git diff --check` passed.
+- The fixed-range Sol scope, OpenCode authority, and black-box evidence reviews
+  first returned confirmed `REVISE` findings. Repairs pinned catalogs and
+  sources, exercised both tools and typed second-session control, isolated
+  inherited config/home inputs, and covered ignored-file mutation. Focused
+  re-review of `2a2c2b9...c9f882e` ended with terminal `ACCEPT` from all three
+  reviewers and zero remaining #35 findings.
+
+### Next session — #37 design/implementation plan and adversarial review
+
+1. Re-read this section, `AGENTS.md`, Issue #34, Issue #37, and the current
+   design/implementation-plan authority. Live-check HEAD/upstream, PR #33, PR
+   #40, Issue #35, native dependencies, and dirty/untracked paths. Do not treat
+   the recorded GitHub state as current.
+2. If PR #33 or #40 is still open or #37 is still dependency-blocked, do not
+   start #37 implementation. Report the exact dependency state and limit work
+   to an explicitly requested review or PR follow-up.
+3. Once #37 is unblocked, claim only #37. First reconcile the smallest design
+   and implementation-plan slice for the four closed Workflow Definitions,
+   ordered `route.*@1` rules, five-skill source manifest, adapter contracts,
+   protocol provenance, and Runtime Observation invocation order. Preserve
+   Kernel route authority and keep model-facing tools/successor dispatch out.
+4. Before implementation, run one bounded read-only adversarial review of that
+   proposed design/plan against Issue #34/#37 and repository authority. Require
+   explicit Standards and Spec verdicts, reproduce material findings, repair
+   only confirmed #37 planning defects, and obtain terminal `ACCEPT`. Do not
+   reopen a whole-M4 review or let reviewers edit overlapping files.
+5. After plan acceptance, hand off the exact implementation contract, allowed
+   paths, focused failing tests, regression gates, and fixed review range for a
+   later serial implementation session. Do not begin #38, #36, or #39.
+
+## Current handoff — 2026-08-09 M4 specification and adversarial hardening
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`.
+- Branch/upstream: `agent/opencode-native-interface-design`. This HANDOFF is the
+  authorized pushed successor of `dfb761e`; local and origin were equal when
+  the handoff was published. Resolve the exact HEAD live before working rather
+  than treating the embedded parent SHA as current state.
+- OpenCode `1.18.5` was live-reverified. No M4 production code, protocol
+  schema, test, or dependency has been added; the three commits after
+  `ced7655` change only this HANDOFF.
+- GitHub Issue #34 is the accepted M4 Specification Artifact. Issues #35-#39
+  are open, labelled `ready-for-agent`, and connected with native GitHub issue
+  dependencies. Issue #35 is the only unblocked implementation frontier.
+
+### Accepted M4 specification
+
+- Issue #34, `Specify the M4 OpenCode-native orchestration interface`, pins the
+  distribution-relative asset tree, launcher command/environment, supported
+  OpenCode version, bundle digest boundary, residual built-in allowlist, exact
+  slash-command inputs, and closed operator success/error results.
+- One visible `orchestrator@1` primary may call only
+  `orchestrator_operator`. Planner, worker, and verifier profiles are generated
+  per Attempt. Pre-intake planner authority is narrowed by the Bootstrap
+  Planner Envelope; task-bound planner, worker, and verifier authority is
+  narrowed by the admitted Task/Packet plus Workflow Definition, Preset,
+  Capability, and skill identity as applicable. The OpenCode Task tool, shell,
+  plugins, MCP, undeclared skills, and model-owned commit/external mutation
+  remain denied.
+- The Kernel uses an ordered, first-matching `route.*@1` table and the closed
+  M4 Workflow Definition set: Intake, Implementation, Verification, and Repair.
+  A Finding can admit only one Repair; every Repair Result routes to fresh
+  Verification. Planner hints may narrow but never add an eligible route.
+- The Matt Pocock source manifest is pinned to
+  `https://github.com/mattpocock/skills.git` revision
+  `84fdeffd12f2ee307994d1eb6feb48173b6e0502`, with exact paths and digests for
+  `ask-matt`, `implement`, `tdd`, `code-review`, and `diagnosing-bugs`.
+  Versioned adapters enforce vocabulary, workflow-recipe, and attempt-skill
+  boundaries without copying or rewriting the original skill bodies.
+- `request_route` is worker-only and can submit only a worker-authored proposal
+  to the Kernel. The Kernel validates the active Runtime Binding, prepares one
+  acyclic `replan_requested` Artifact without a reverse `runtime_ref`, obtains
+  a Runtime Observation that references it, and uses one `run.json` CAS as the
+  sole Publication commit point. The tool cannot publish authoritative files,
+  create a successor Task/session, widen capability, publish a graph, promote
+  a Result, or emit a Receipt. M6 still owns successor dispatch and Receipt
+  chaining.
+- Native/direct equivalence uses the same deterministic provider/proposal
+  fixture and a canonical semantic projection. The separate real OpenCode test
+  proves input transport, typed-tool routing, durable files, permissions,
+  operator outcome, recovery from a second session, and unchanged target; it
+  does not require two independent model responses to be identical.
+
+### Evidence and review
+
+- A disposable external-bundle probe observed OpenCode 1.18.5 loading four
+  commands, the primary agent, and a typed custom tool through
+  `OPENCODE_CONFIG_DIR`, with deny-all then one-tool permission ordering and no
+  target mutation.
+- The probe also observed that built-in commands/agents and home-discovered
+  skills remain visible even with isolated XDG paths and `--pure`. The spec
+  therefore enumerates and constrains residual built-ins, disables selectable
+  built-ins where supported, and rejects target/global collisions instead of
+  assuming an empty catalog.
+- The original bounded `gpt-5.6-sol` high adversarial review found incomplete
+  launcher, permission, schema, routing, adapter, and equivalence contracts.
+  Two focused repair/re-review rounds ended with terminal `ACCEPT` and Issue
+  #34 records that result.
+- After `dc0c843`, one Sol High reviewer plus authority and file-protocol
+  experts each reviewed two independent perspectives. Their reproducible
+  findings were stale live state; planner Envelope/Packet ambiguity; OpenCode
+  Task/domain Task ambiguity; worker-vs-Kernel Publication Authority conflict;
+  a Replan Request/Runtime Observation digest cycle; unclear single-verifier
+  topology; duplicated #35/#36 collision ownership; underspecified #39 success
+  and recovery exits; and hidden #36/#37/#38 write/order dependencies. The
+  current hardening revises Issue #34, Issues #35-#39, native dependencies, and
+  this HANDOFF only for those findings.
+- Focused re-review verified each repaired axis. Sol High, authority, and
+  file-protocol reviewers all returned terminal `ACCEPT` with zero remaining
+  material findings after two stale HANDOFF lines were corrected.
+- The specification file passed `git diff --no-index --check`. The repository
+  remained clean throughout specification and ticket publication.
+
+### Ticket DAG
+
+1. #35 `Prove the OpenCode 1.18.5 capabilities required by M4` — unblocked
+   capability gate and current frontier. It proves collision inputs and
+   precedence but does not implement the production rejection path.
+2. #37 `Validate deterministic M4 workflow routes and original-skill
+   composition` — blocked by #35.
+3. #38 `Enforce M4 Attempt profiles and stage no-authority Replan Requests` —
+   blocked by #37; it owns the acyclic schema/runtime contract and Kernel-only
+   publication proof.
+4. #36 `Expose one shared operator path through the M4 launcher and commands`
+   — blocked by #38, so it integrates the complete bundle and owns reusable
+   production preflight/collision rejection after its data and tool assets
+   exist.
+5. #39 `Verify the real OpenCode-native M4 request-to-outcome path` — blocked
+   by #36 and is the M4 exit gate.
+
+The strict native dependency chain is #35 -> #37 -> #38 -> #36 -> #39. It
+serializes protocol, runtime-adapter, full-bundle, and shared-operator writes;
+there is no claimed parallel implementation lane in M4.
+
+### Next session — implement and adversarially verify #35
+
+1. Re-read this section, `AGENTS.md`, Issue #34, and Issue #35. Live-check the
+   branch, HEAD, upstream, OpenCode version, issue dependency summary, and any
+   dirty/untracked paths before editing.
+2. Claim only #35. Build the smallest reproducible, non-mutating capability
+   gate around a disposable clean Git target; do not begin #36-#39 or edit
+   production orchestration paths while the observations are unproven.
+3. Turn each required observation into an assertion: exact argument bytes,
+   external bundle loading, command/agent/tool enumeration, tool input schema,
+   permission ordering, residual assets, collision-source identity and
+   precedence inputs, second-session addressing, observable tool call/result
+   events, and unchanged target. Do not implement the production collision
+   rejection path; #36 owns it.
+4. Record the resolved OpenCode executable/version and capability evidence.
+   Run the narrow new gate first, then the relevant syntax and diff checks.
+5. Commit the coherent #35 implementation/evidence unit locally before review,
+   without pushing. Pin its parent and HEAD as the exact review range and use
+   Issue #35 as the Spec source; do not review the whole historical branch.
+6. Run three read-only high-reasoning reviews in parallel. Reviewers may inspect
+   the fixed diff, Issue #34/#35, design authority, runtime schemas, and test
+   evidence, but may not edit the repository or GitHub:
+   - Sol High selects two perspectives: designed-scope capability-gate
+     operability, and #35 scope/stop-condition/DAG completeness.
+   - The OpenCode authority expert selects two perspectives: repository
+     Standards, and instruction/permission/asset-precedence conflicts across
+     launcher, agents, skills, tools, built-ins, target, global, and XDG state.
+   - The black-box evidence expert selects two perspectives: exact observable
+     input/tool/session behaviour, and reproducible no-mutation/collision/
+     recovery evidence from a disposable target.
+7. Treat reviewer results as claims. Reproduce each material finding against
+   the fixed diff and live evidence, repair only confirmed #35-scope defects in
+   one serial writer, and leave #36-#39 findings deferred to their tickets. Do
+   not start another plan-wide review or let reviewers make overlapping edits.
+8. Send the bounded repairs back to the same reviewers for focused re-review of
+   their own findings. Stop when all confirmed #35 findings are repaired and
+   the narrow gate plus regression checks pass; do not chase speculative or
+   later-milestone hardening.
+9. Commit any coherent repair/evidence unit, update this HANDOFF with exact
+   commits, gate counts, duration, reviewer outcomes, remaining limitation, and
+   the live next frontier. Do not close #35 or push without fresh authorization.
+
+### Stop conditions
+
+- Stop and revise Issue #34 if OpenCode 1.18.5 cannot load the pinned external
+  bundle without copying assets into the target or depending on an undeclared
+  developer-home asset.
+- Stop if exact input transport, collision-source identity/precedence inputs,
+  permission narrowing, second-session control, or typed-tool observation
+  cannot be asserted. Do not cover a failed probe with prompt wording, skipped
+  tests, or a plugin hook. Production collision rejection remains #36's gate.
+- Stop with `dependency_unavailable` if a pinned original skill identity cannot
+  be resolved; do not vendor or silently substitute it.
+- Preserve M0-M3 behavior and keep M5 retrieval, M6 successor dispatch,
+  concurrency, new Presets, external Application, and arbitrary skill/plugin
+  systems out of #35.
+
 ## Current handoff — 2026-08-06 M3 implementation
 
 ### Live state
