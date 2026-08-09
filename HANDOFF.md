@@ -5,14 +5,13 @@
 ### Live state
 
 - Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`.
-- Branch: `agent/opencode-native-interface-design`. Local history contains the
-  HANDOFF-only commit `dc0c84314183848ba58872a87d33afe34c10cd50` plus this
-  successor HANDOFF hardening commit. Upstream remains
-  `ced7655955f5b88cac2fb7e781ebad9b062b3ad5`, so the branch is ahead by two and
-  nothing was pushed.
+- Branch/upstream: `agent/opencode-native-interface-design`. This HANDOFF is the
+  authorized pushed successor of `dfb761e`; local and origin were equal when
+  the handoff was published. Resolve the exact HEAD live before working rather
+  than treating the embedded parent SHA as current state.
 - OpenCode `1.18.5` was live-reverified. No M4 production code, protocol
-  schema, test, or dependency has been added; both local commits change only
-  this HANDOFF.
+  schema, test, or dependency has been added; the three commits after
+  `ced7655` change only this HANDOFF.
 - GitHub Issue #34 is the accepted M4 Specification Artifact. Issues #35-#39
   are open, labelled `ready-for-agent`, and connected with native GitHub issue
   dependencies. Issue #35 is the only unblocked implementation frontier.
@@ -106,7 +105,7 @@ The strict native dependency chain is #35 -> #37 -> #38 -> #36 -> #39. It
 serializes protocol, runtime-adapter, full-bundle, and shared-operator writes;
 there is no claimed parallel implementation lane in M4.
 
-### Next session — implement #35 test-first
+### Next session — implement and adversarially verify #35
 
 1. Re-read this section, `AGENTS.md`, Issue #34, and Issue #35. Live-check the
    branch, HEAD, upstream, OpenCode version, issue dependency summary, and any
@@ -122,10 +121,31 @@ there is no claimed parallel implementation lane in M4.
    rejection path; #36 owns it.
 4. Record the resolved OpenCode executable/version and capability evidence.
    Run the narrow new gate first, then the relevant syntax and diff checks.
-5. Obtain only a bounded review of the #35 diff and its evidence. If accepted,
-   commit the coherent capability-gate slice and update this HANDOFF before
-   moving the dependency frontier to #37. Do not push without fresh
-   authorization.
+5. Commit the coherent #35 implementation/evidence unit locally before review,
+   without pushing. Pin its parent and HEAD as the exact review range and use
+   Issue #35 as the Spec source; do not review the whole historical branch.
+6. Run three read-only high-reasoning reviews in parallel. Reviewers may inspect
+   the fixed diff, Issue #34/#35, design authority, runtime schemas, and test
+   evidence, but may not edit the repository or GitHub:
+   - Sol High selects two perspectives: designed-scope capability-gate
+     operability, and #35 scope/stop-condition/DAG completeness.
+   - The OpenCode authority expert selects two perspectives: repository
+     Standards, and instruction/permission/asset-precedence conflicts across
+     launcher, agents, skills, tools, built-ins, target, global, and XDG state.
+   - The black-box evidence expert selects two perspectives: exact observable
+     input/tool/session behaviour, and reproducible no-mutation/collision/
+     recovery evidence from a disposable target.
+7. Treat reviewer results as claims. Reproduce each material finding against
+   the fixed diff and live evidence, repair only confirmed #35-scope defects in
+   one serial writer, and leave #36-#39 findings deferred to their tickets. Do
+   not start another plan-wide review or let reviewers make overlapping edits.
+8. Send the bounded repairs back to the same reviewers for focused re-review of
+   their own findings. Stop when all confirmed #35 findings are repaired and
+   the narrow gate plus regression checks pass; do not chase speculative or
+   later-milestone hardening.
+9. Commit any coherent repair/evidence unit, update this HANDOFF with exact
+   commits, gate counts, duration, reviewer outcomes, remaining limitation, and
+   the live next frontier. Do not close #35 or push without fresh authorization.
 
 ### Stop conditions
 
