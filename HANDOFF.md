@@ -1,5 +1,79 @@
 # Handoff
 
+## Current handoff — 2026-08-09 M4 capability gate #35 accepted locally
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
+  `agent/opencode-native-interface-design`.
+- The implementation/review range is `2a2c2b9...c9f882e`. The three local
+  commits are `d5e725f` (`test: prove M4 OpenCode capabilities (#35)`),
+  `fda8785` (`test: harden M4 capability evidence (#35)`), and `c9f882e`
+  (`test: pin M4 collision source evidence (#35)`). None has been pushed.
+- Issue #35 remains open, assigned to `hjung3113`, and labelled
+  `ready-for-agent`. Do not close it or push without fresh authorization.
+  Issue #37 remains the next DAG ticket but is still blocked by open #35; do
+  not begin it from this handoff.
+
+### Implemented capability gate
+
+- `npm run test:m4-capabilities` launches the resolved OpenCode `1.18.5`
+  executable against a disposable clean Git target and asserts the external
+  bundle, exact four-command metadata and argument transport, primary and
+  worker-only agent surfaces, complete tool schemas/catalogs, provider-visible
+  tool narrowing, and the OpenCode-managed tool-output permission exception.
+- Real typed calls prove `orchestrator_operator`, `request_route`, and control
+  of the original Run identity from a second OpenCode session. Completed SSE
+  events are correlated by tool call id, input, output, and source marker.
+- Collision fixtures cover command, agent, tool, skill, plugin, MCP, and
+  instruction assets across the distribution bundle, isolated XDG global
+  configuration, target `.opencode`, isolated `HOME/.agents/skills`, and the
+  disabled `HOME/.claude/skills` source. Exact catalogs, source paths, residual
+  built-ins, and unrelated assets are assertions rather than prose.
+- Clean and collision targets are compared before/after using HEAD plus Git
+  status including ignored files. Collision dependencies are fixture inputs
+  linked to the external scratch bundle before the baseline, so OpenCode adds
+  no target package, lock, ignore, or `node_modules` state during the observed
+  launch.
+
+### Specification clarification and limitation
+
+- Live OpenCode appends exactly one managed
+  `<XDG_DATA_HOME>/opencode/tool-output/*` external-directory allow after the
+  deny-all/operator-allow entries. Issues #34 and #35 now explicitly allow
+  only that internal exception while requiring the primary provider request to
+  expose only `orchestrator_operator`; general external-directory access
+  remains unsupported.
+- OpenCode `1.18.5` does not select the same colliding `m4-skill` source on
+  every launch. The gate therefore binds the returned description to its exact
+  returned realpath and asserts the complete admissible source set. This
+  selected winner is not product authority: #36 must reject any colliding
+  source set before relying on OpenCode resolution. Issues #34/#35 record that
+  clarified boundary; production collision rejection remains wholly #36.
+
+### Gates and review
+
+- After the final repair, `npm run test:m4-capabilities` passed twice, 1/1 in
+  `5604.442792ms` and 1/1 in `5501.524625ms`; a subsequent fixed-commit review
+  run also passed 1/1. `npm run test:protocol` passed 4/4 in `134.208542ms`.
+- Every `scripts/**/*.mjs` and `test/**/*.mjs` file passed `node --check`, and
+  `git diff --check` passed.
+- The fixed-range Sol scope, OpenCode authority, and black-box evidence reviews
+  first returned confirmed `REVISE` findings. Repairs pinned catalogs and
+  sources, exercised both tools and typed second-session control, isolated
+  inherited config/home inputs, and covered ignored-file mutation. Focused
+  re-review of `2a2c2b9...c9f882e` ended with terminal `ACCEPT` from all three
+  reviewers and zero remaining #35 findings.
+
+### Next action
+
+1. Live-check HEAD, upstream, worktree cleanliness, Issue #35, and the latest
+   remote branch before acting.
+2. With fresh user authorization, push the local branch and close #35 with the
+   exact gate/review evidence. Without that authorization, stop here.
+3. Only after #35 is closed and GitHub shows #37 unblocked, claim #37 and follow
+   its accepted scope. Do not pull #36-#39 work into the capability gate.
+
 ## Current handoff — 2026-08-09 M4 specification and adversarial hardening
 
 ### Live state
