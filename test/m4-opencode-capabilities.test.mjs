@@ -28,8 +28,8 @@ test("OpenCode 1.18.5 exposes every capability required by M4", () => {
       "bundle.external_assets",
       "permissions.ordered",
       "command.exact_arguments",
-      "tools.schema_and_events",
       "sessions.second_session",
+      "tools.schema_and_events",
       "collisions.observable_inputs",
       "target.unchanged",
     ]);

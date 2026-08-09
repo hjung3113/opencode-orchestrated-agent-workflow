@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
-  mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 const targetIndex = args.indexOf("--target");
@@ -37,12 +38,14 @@ function json(path, value) {
   write(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+const sorted = (items) => [...items].sort();
+
 function command(path, marker) {
   write(path, `---\ndescription: ${marker}\nagent: orchestrator\nsubtask: false\n---\n\nBEGIN[$ARGUMENTS]END\n`);
 }
 
-function agent(path, marker) {
-  write(path, `---\ndescription: ${marker}\nmode: primary\nmodel: m4-fixture/fixture\ntools:\n  "*": false\n  orchestrator_operator: true\npermission:\n  "*": deny\n  orchestrator_operator: allow\n---\n\nM4 capability fixture. Call orchestrator_operator once, then stop.\n`);
+function agent(path, marker, allowedTool = "orchestrator_operator", mode = "primary") {
+  write(path, `---\ndescription: ${marker}\nmode: ${mode}\nmodel: m4-fixture/fixture\ntools:\n  "*": false\n  ${allowedTool}: true\npermission:\n  "*": deny\n  ${allowedTool}: allow\n---\n\nM4 capability fixture. Call ${allowedTool} once, then stop.\n`);
 }
 
 function skill(path, marker) {
@@ -59,16 +62,21 @@ function plugin(path, marker) {
 
 function source(scope, root, marker) {
   command(join(root, "commands", "orchestrate.md"), marker);
-  command(join(root, "commands", `${scope}-only.md`), `${scope}-only-marker`);
   agent(join(root, "agents", "orchestrator.md"), marker);
-  agent(join(root, "agents", `${scope}-only.md`), `${scope}-only-marker`);
   tool(join(root, "tools", "orchestrator_operator.ts"), marker);
   tool(join(root, "tools", "request_route.ts"), `${marker}-request-route`);
-  tool(join(root, "tools", `${scope}_only.ts`), `${scope}-only-marker`);
-  if (scope !== "bundle") {
-    skill(join(root, "skills", "m4-skill", "SKILL.md"), marker);
-    skill(join(root, "skills", `${scope}-only`, "SKILL.md"), `${scope}-only-marker`);
+  if (scope === "bundle") {
+    for (const name of ["orchestrate-status", "orchestrate-resume", "orchestrate-cancel"]) {
+      command(join(root, "commands", `${name}.md`), `${marker}-${name}`);
+    }
+    agent(join(root, "agents", "request-route-probe.md"), `${marker}-request-route`, "request_route", "subagent");
+    return;
   }
+  command(join(root, "commands", `${scope}-only.md`), `${scope}-only-marker`);
+  agent(join(root, "agents", `${scope}-only.md`), `${scope}-only-marker`);
+  tool(join(root, "tools", `${scope}_only.ts`), `${scope}-only-marker`);
+  skill(join(root, "skills", "m4-skill", "SKILL.md"), marker);
+  skill(join(root, "skills", `${scope}-only`, "SKILL.md"), `${scope}-only-marker`);
   plugin(join(root, "plugins", "collision.js"), marker);
   plugin(join(root, "plugins", `${scope}-only.js`), `${scope}-only-marker`);
   write(join(root, "collision.md"), `${marker}\n`);
@@ -147,7 +155,7 @@ function startProvider() {
     }
     const body = JSON.parse(raw);
     observed.push(body);
-    const hasToolResult = body.messages?.some(({ role }) => role === "tool");
+    const hasToolResult = body.messages?.at(-1)?.role === "tool";
     res.setHeader("content-type", "text/event-stream");
     const chunk = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({
       id: "m4-fixture", object: "chat.completion.chunk", created: 1, model: "fixture",
@@ -157,9 +165,14 @@ function startProvider() {
       chunk({ role: "assistant", content: "fixture complete" });
       chunk({}, "stop");
     } else {
+      const availableTools = body.tools?.map(({ function: definition }) => definition.name) ?? [];
+      const toolName = availableTools.includes("orchestrator_operator")
+        ? "orchestrator_operator" : "request_route";
+      const content = body.messages?.findLast(({ role }) => role === "user")?.content ?? "";
+      const value = content.match(/^BEGIN\[([\s\S]*)\]END$/)?.[1] ?? content;
       chunk({ role: "assistant", tool_calls: [{
         index: 0, id: `call_${observed.length}`, type: "function",
-        function: { name: "orchestrator_operator", arguments: JSON.stringify({ value: "fixture" }) },
+        function: { name: toolName, arguments: JSON.stringify({ value }) },
       }] });
       chunk({}, "tool_calls");
     }
@@ -185,6 +198,7 @@ try {
   execFileSync("git", ["init", "-q"], { cwd: collisionTarget });
   source("target", join(collisionTarget, ".opencode"), "target-marker");
   json(join(collisionTarget, "opencode.json"), {
+    $schema: "https://opencode.ai/config.json",
     instructions: [
       join(collisionTarget, ".opencode", "collision.md"),
       join(collisionTarget, ".opencode", "target-only-instruction.md"),
@@ -199,17 +213,9 @@ try {
     },
   });
   json(join(bundle, "opencode.json"), {
+    $schema: "https://opencode.ai/config.json",
     model: "m4-fixture/fixture",
     default_agent: "orchestrator",
-    instructions: [join(bundle, "collision.md"), join(bundle, "bundle-only-instruction.md")],
-    plugin: [
-      `file://${join(bundle, "plugins", "collision.js")}`,
-      `file://${join(bundle, "plugins", "bundle-only.js")}`,
-    ],
-    mcp: {
-      collision: { type: "local", command: ["false", "bundle"], enabled: false },
-      bundle_marker: { type: "local", command: ["false"], enabled: false },
-    },
     provider: {
       "m4-fixture": {
         npm: "@ai-sdk/openai-compatible",
@@ -219,9 +225,14 @@ try {
       },
     },
   });
+  execFileSync("git", ["config", "user.email", "m4@example.invalid"], { cwd: collisionTarget });
+  execFileSync("git", ["config", "user.name", "M4 Probe"], { cwd: collisionTarget });
+  execFileSync("git", ["add", "."], { cwd: collisionTarget });
+  execFileSync("git", ["commit", "-qm", "collision fixture"], { cwd: collisionTarget });
 
   const env = {
     ...process.env,
+    HOME: join(scratch, "home"),
     XDG_CONFIG_HOME: join(scratch, "xdg", "config"),
     XDG_CACHE_HOME: join(scratch, "xdg", "cache"),
     XDG_DATA_HOME: join(scratch, "xdg", "data"),
@@ -231,9 +242,16 @@ try {
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
     OPENCODE_DISABLE_MODELS_FETCH: "true",
   };
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  mkdirSync(env.HOME, { recursive: true });
   const baseline = {
     head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8" }).trim(),
     status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: target, encoding: "utf8" }),
+  };
+  const collisionBaseline = {
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: collisionTarget, encoding: "utf8" }).trim(),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: collisionTarget, encoding: "utf8" }),
   };
   let port = await freePort();
   runtime = spawn(executable, ["serve", "--pure", "--hostname", "127.0.0.1", "--port", String(port)], {
@@ -261,7 +279,34 @@ try {
   assert.equal(orchestrator.description, "bundle-marker");
   assert.equal(operatorTool.description, "bundle-marker");
   assert.equal(requestRouteTool.description, "bundle-marker-request-route");
-  assert.deepEqual(operatorTool.parameters.required, ["value"]);
+  for (const definition of [operatorTool, requestRouteTool]) {
+    assert.equal(definition.parameters.type, "object");
+    assert.deepEqual(definition.parameters.properties, { value: { type: "string" } });
+    assert.deepEqual(definition.parameters.required, ["value"]);
+  }
+  for (const name of ["orchestrate", "orchestrate-status", "orchestrate-resume", "orchestrate-cancel"]) {
+    const definition = commands.find((item) => item.name === name);
+    assert.equal(definition.agent, "orchestrator");
+    assert.equal(definition.subtask, false);
+    assert.ok(definition.description.startsWith("bundle-marker"));
+  }
+  assert.deepEqual(sorted(commands.map(({ name }) => name)), sorted([
+    "init", "review", "customize-opencode", "orchestrate", "orchestrate-status",
+    "orchestrate-resume", "orchestrate-cancel",
+  ]));
+  assert.deepEqual(sorted(agents.map(({ name }) => name)), sorted([
+    "orchestrator", "request-route-probe", "build", "plan", "general", "explore", "compaction", "summary", "title",
+  ]));
+  assert.deepEqual(sorted(toolIds), sorted([
+    "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
+    "webfetch", "todowrite", "websearch", "skill", "apply_patch",
+    "orchestrator_operator", "request_route",
+  ]));
+  assert.deepEqual(skills.map(({ name }) => name), ["customize-opencode"]);
+  assert.deepEqual(config.instructions ?? [], []);
+  assert.deepEqual(config.plugin ?? [], []);
+  assert.deepEqual(config.mcp ?? {}, {});
+  assert.deepEqual(mcp, {});
   rows.push({ id: "bundle.external_assets", status: "pass", evidence: {
     config_dir: bundle,
     commands: commands.map(({ name, description, subtask }) => ({ name, description, subtask })),
@@ -306,7 +351,6 @@ try {
     });
   }
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-  subscription.close();
   const observedInputs = provider.observed
     .map(({ messages }) => messages?.findLast(({ role }) => role === "user")?.content)
     .filter(Boolean);
@@ -323,26 +367,79 @@ try {
   const messages = await request(port, `/session/${session.id}/message${directory}`);
   const toolParts = messages.flatMap(({ parts }) => parts)
     .filter(({ type, state }) => type === "tool" && state?.status === "completed");
-  assert.ok(toolParts.some(({ tool, state }) => tool === "orchestrator_operator" && JSON.parse(state.output).marker === "bundle-marker"));
-  const eventTypes = subscription.events.map(({ type }) => type);
-  assert.ok(eventTypes.includes("message.part.updated"));
-  rows.push({ id: "tools.schema_and_events", status: "pass", evidence: {
-    tool_id: operatorTool.id, schema: operatorTool.parameters, completed_calls: toolParts.length, event_types: [...new Set(eventTypes)],
-  } });
+  assert.ok(toolParts.some(({ tool, state }) => tool === "orchestrator_operator"
+    && exactArguments.includes(state.input.value)
+    && JSON.parse(state.output).marker === "bundle-marker"
+    && JSON.parse(state.output).value === state.input.value));
 
   const secondSession = await request(port, `/session${directory}`, {
     method: "POST", body: JSON.stringify({ title: "m4-second-session" }),
   });
   assert.notEqual(secondSession.id, session.id);
-  const firstFromSecondControl = await request(port, `/session/${session.id}${directory}`);
-  assert.equal(firstFromSecondControl.id, session.id);
+  await request(port, `/session/${secondSession.id}/command${directory}`, {
+    method: "POST", body: JSON.stringify({ command: "orchestrate-status", arguments: session.id }),
+  });
+  const secondMessages = await request(port, `/session/${secondSession.id}/message${directory}`);
+  const secondControl = secondMessages.flatMap(({ parts }) => parts).find(({ type, tool, state }) =>
+    type === "tool" && tool === "orchestrator_operator" && state?.status === "completed");
+  assert.equal(secondControl.state.input.value, session.id);
+  assert.equal(JSON.parse(secondControl.state.output).session_id, secondSession.id);
   rows.push({ id: "sessions.second_session", status: "pass", evidence: {
-    original_session_id: session.id, second_session_id: secondSession.id, addressed_original: firstFromSecondControl.id,
+    original_session_id: session.id,
+    second_session_id: secondSession.id,
+    addressed_original: secondControl.state.input.value,
+    control_tool_session_id: JSON.parse(secondControl.state.output).session_id,
+  } });
+
+  const routeSession = await request(port, `/session${directory}`, {
+    method: "POST", body: JSON.stringify({ title: "m4-request-route" }),
+  });
+  await request(port, `/session/${routeSession.id}/message${directory}`, {
+    method: "POST",
+    body: JSON.stringify({
+      agent: "request-route-probe",
+      parts: [{ type: "text", text: "route fixture" }],
+    }),
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  subscription.close();
+  const routeMessages = await request(port, `/session/${routeSession.id}/message${directory}`);
+  const routePart = routeMessages.flatMap(({ parts }) => parts).find(({ type, tool, state }) =>
+    type === "tool" && tool === "request_route" && state?.status === "completed");
+  assert.equal(routePart.state.input.value, "route fixture");
+  assert.equal(JSON.parse(routePart.state.output).marker, "bundle-marker-request-route");
+  const eventTypes = subscription.events.map(({ type }) => type);
+  const toolEvents = subscription.events
+    .map(({ properties }) => properties?.part)
+    .filter(({ type, tool, state } = {}) => type === "tool"
+      && ["orchestrator_operator", "request_route"].includes(tool)
+      && state?.status === "completed");
+  assert.deepEqual(sorted(new Set(toolEvents.map(({ tool }) => tool))), ["orchestrator_operator", "request_route"]);
+  for (const part of toolEvents) {
+    assert.ok(part.callID);
+    const output = JSON.parse(part.state.output);
+    if (part.tool === "orchestrator_operator") {
+      assert.ok(exactArguments.includes(part.state.input.value) || part.state.input.value === session.id);
+      assert.equal(output.marker, "bundle-marker");
+    } else {
+      assert.equal(part.state.input.value, "route fixture");
+      assert.equal(output.marker, "bundle-marker-request-route");
+    }
+  }
+  rows.push({ id: "tools.schema_and_events", status: "pass", evidence: {
+    schemas: {
+      orchestrator_operator: operatorTool.parameters,
+      request_route: requestRouteTool.parameters,
+    },
+    completed_calls: toolParts.length,
+    event_types: [...new Set(eventTypes)],
+    completed_event_tools: sorted(new Set(toolEvents.map(({ tool }) => tool))),
   } });
 
   await stop(runtime);
   source("global", globalRoot, "global-marker");
   json(join(globalRoot, "opencode.json"), {
+    $schema: "https://opencode.ai/config.json",
     instructions: [join(globalRoot, "collision.md"), join(globalRoot, "global-only-instruction.md")],
     plugin: [
       `file://${join(globalRoot, "plugins", "collision.js")}`,
@@ -383,12 +480,40 @@ try {
   assert.equal(collisionAgent.description, "bundle-marker");
   assert.ok(["global-marker", "target-marker"].includes(collisionSkill.description));
   assert.ok(["bundle-marker", "global-marker", "target-marker"].includes(collisionTool.description));
-  assert.ok(collisionConfig.instructions.includes(join(bundle, "collision.md")));
+  assert.deepEqual(sorted(collisionCommands.map(({ name }) => name)), sorted([
+    "init", "review", "customize-opencode", "orchestrate", "orchestrate-status",
+    "orchestrate-resume", "orchestrate-cancel", "m4-skill", "global-only", "target-only",
+  ]));
+  assert.deepEqual(sorted(collisionAgents.map(({ name }) => name)), sorted([
+    "orchestrator", "build", "plan", "general", "explore", "compaction", "summary", "title",
+    "request-route-probe", "global-only", "target-only",
+  ]));
+  assert.deepEqual(sorted(collisionTools.map(({ id }) => id)), sorted([
+    "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
+    "webfetch", "todowrite", "skill", "orchestrator_operator", "orchestrator_operator",
+    "orchestrator_operator", "request_route", "request_route", "request_route",
+    "global_only", "target_only",
+  ]));
+  assert.deepEqual(sorted(collisionSkills.map(({ name }) => name)), sorted([
+    "customize-opencode", "m4-skill", "global-only", "target-only",
+  ]));
   assert.ok(collisionConfig.instructions.includes(join(globalRoot, "global-only-instruction.md")));
   assert.ok(collisionConfig.instructions.includes(join(collisionTarget, ".opencode", "target-only-instruction.md")));
   assert.ok(collisionConfig.plugin.includes(`file://${join(globalRoot, "plugins", "global-only.js")}`));
   assert.ok(collisionConfig.plugin.includes(`file://${join(collisionTarget, ".opencode", "plugins", "target-only.js")}`));
-  assert.deepEqual(Object.keys(collisionConfig.mcp).sort(), ["bundle_marker", "collision", "global_marker", "target_marker"]);
+  assert.deepEqual(Object.keys(collisionConfig.mcp).sort(), ["collision", "global_marker", "target_marker"]);
+  assert.equal(collisionConfig.mcp.collision.command.at(-1), "target");
+  assert.deepEqual(sorted(collisionConfig.instructions), sorted([
+    join(globalRoot, "collision.md"), join(globalRoot, "global-only-instruction.md"),
+    join(collisionTarget, ".opencode", "collision.md"),
+    join(collisionTarget, ".opencode", "target-only-instruction.md"),
+  ]));
+  assert.deepEqual(sorted(new Set(collisionConfig.plugin.map((url) => realpathSync(fileURLToPath(url))))), sorted([
+    realpathSync(join(globalRoot, "plugins", "collision.js")),
+    realpathSync(join(globalRoot, "plugins", "global-only.js")),
+    realpathSync(join(collisionTarget, ".opencode", "plugins", "collision.js")),
+    realpathSync(join(collisionTarget, ".opencode", "plugins", "target-only.js")),
+  ]));
   const collisionSources = Object.fromEntries(["global", "target", "bundle"].map((scope) => {
     const root = scope === "global" ? globalRoot
       : scope === "target" ? join(collisionTarget, ".opencode") : bundle;
@@ -396,9 +521,11 @@ try {
       command: join(root, "commands", "orchestrate.md"),
       agent: join(root, "agents", "orchestrator.md"),
       tool: join(root, "tools", "orchestrator_operator.ts"),
-      plugin: join(root, "plugins", "collision.js"),
-      instruction: join(root, "collision.md"),
-      ...(scope === "bundle" ? {} : { skill: join(root, "skills", "m4-skill", "SKILL.md") }),
+      ...(scope === "bundle" ? {} : {
+        plugin: join(root, "plugins", "collision.js"),
+        instruction: join(root, "collision.md"),
+        skill: join(root, "skills", "m4-skill", "SKILL.md"),
+      }),
     }];
   }));
   for (const paths of Object.values(collisionSources)) {
@@ -436,7 +563,16 @@ try {
     status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: target, encoding: "utf8" }),
   };
   assert.deepEqual(after, baseline);
-  rows.push({ id: "target.unchanged", status: "pass", evidence: after });
+  const collisionAfter = {
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: collisionTarget, encoding: "utf8" }).trim(),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: collisionTarget, encoding: "utf8" }),
+    diff: execFileSync("git", ["diff", "--no-ext-diff"], { cwd: collisionTarget, encoding: "utf8" }),
+  };
+  assert.deepEqual(collisionAfter, { ...collisionBaseline, diff: "" });
+  rows.push({ id: "target.unchanged", status: "pass", evidence: {
+    clean_target: after,
+    collision_target: collisionAfter,
+  } });
 } finally {
   await stop(runtime);
   provider?.server.close();
