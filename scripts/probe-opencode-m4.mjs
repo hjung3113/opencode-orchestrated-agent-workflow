@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
-  mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
+  symlinkSync, writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -225,11 +226,6 @@ try {
       },
     },
   });
-  execFileSync("git", ["config", "user.email", "m4@example.invalid"], { cwd: collisionTarget });
-  execFileSync("git", ["config", "user.name", "M4 Probe"], { cwd: collisionTarget });
-  execFileSync("git", ["add", "."], { cwd: collisionTarget });
-  execFileSync("git", ["commit", "-qm", "collision fixture"], { cwd: collisionTarget });
-
   const env = {
     ...process.env,
     HOME: join(scratch, "home"),
@@ -247,11 +243,7 @@ try {
   mkdirSync(env.HOME, { recursive: true });
   const baseline = {
     head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8" }).trim(),
-    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: target, encoding: "utf8" }),
-  };
-  const collisionBaseline = {
-    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: collisionTarget, encoding: "utf8" }).trim(),
-    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: collisionTarget, encoding: "utf8" }),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all", "--ignored"], { cwd: target, encoding: "utf8" }),
   };
   let port = await freePort();
   runtime = spawn(executable, ["serve", "--pure", "--hostname", "127.0.0.1", "--port", String(port)], {
@@ -437,6 +429,27 @@ try {
   } });
 
   await stop(runtime);
+  const collisionConfigRoot = join(collisionTarget, ".opencode");
+  write(join(collisionConfigRoot, ".gitignore"), "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n");
+  for (const name of ["package.json", "package-lock.json", "bun.lock"]) {
+    if (existsSync(join(bundle, name))) copyFileSync(join(bundle, name), join(collisionConfigRoot, name));
+  }
+  symlinkSync(join(bundle, "node_modules"), join(collisionConfigRoot, "node_modules"), "dir");
+  for (const [root, marker] of [
+    [join(env.HOME, ".agents", "skills"), "home-agents-marker"],
+    [join(env.HOME, ".claude", "skills"), "home-claude-marker"],
+  ]) {
+    skill(join(root, "m4-skill", "SKILL.md"), marker);
+    skill(join(root, `${marker}-only`, "SKILL.md"), `${marker}-only`);
+  }
+  execFileSync("git", ["config", "user.email", "m4@example.invalid"], { cwd: collisionTarget });
+  execFileSync("git", ["config", "user.name", "M4 Probe"], { cwd: collisionTarget });
+  execFileSync("git", ["add", "-f", "."], { cwd: collisionTarget });
+  execFileSync("git", ["commit", "-qm", "collision fixture"], { cwd: collisionTarget });
+  const collisionBaseline = {
+    head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: collisionTarget, encoding: "utf8" }).trim(),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all", "--ignored"], { cwd: collisionTarget, encoding: "utf8" }),
+  };
   source("global", globalRoot, "global-marker");
   json(join(globalRoot, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
@@ -466,7 +479,7 @@ try {
   const collisionCommand = collisionCommands.find(({ name }) => name === "orchestrate");
   const collisionAgent = collisionAgents.find(({ name }) => name === "orchestrator");
   const collisionSkill = collisionSkills.find(({ name }) => name === "m4-skill");
-  const collisionTool = collisionTools.find(({ id }) => id === "orchestrator_operator");
+  const collisionOperatorTools = collisionTools.filter(({ id }) => id === "orchestrator_operator");
   assert.ok(collisionCommands.some(({ name }) => name === "init"));
   assert.ok(collisionCommands.some(({ name, description }) => name === "global-only" && description === "global-only-marker"));
   assert.ok(collisionCommands.some(({ name, description }) => name === "target-only" && description === "target-only-marker"));
@@ -478,11 +491,20 @@ try {
   assert.ok(collisionTools.some(({ id, description }) => id === "target_only" && description === "target-only-marker"));
   assert.equal(collisionCommand.description, "bundle-marker");
   assert.equal(collisionAgent.description, "bundle-marker");
-  assert.ok(["global-marker", "target-marker"].includes(collisionSkill.description));
-  assert.ok(["bundle-marker", "global-marker", "target-marker"].includes(collisionTool.description));
+  const selectedSkillLocation = realpathSync(collisionSkill.location);
+  assert.ok([
+    realpathSync(join(globalRoot, "skills", "m4-skill", "SKILL.md")),
+    realpathSync(join(collisionTarget, ".opencode", "skills", "m4-skill", "SKILL.md")),
+    realpathSync(join(env.HOME, ".agents", "skills", "m4-skill", "SKILL.md")),
+  ].includes(selectedSkillLocation));
+  assert.ok(readFileSync(selectedSkillLocation, "utf8").includes(`description: ${collisionSkill.description}`));
+  assert.deepEqual(sorted(collisionOperatorTools.map(({ description }) => description)), [
+    "bundle-marker", "global-marker", "target-marker",
+  ]);
   assert.deepEqual(sorted(collisionCommands.map(({ name }) => name)), sorted([
     "init", "review", "customize-opencode", "orchestrate", "orchestrate-status",
     "orchestrate-resume", "orchestrate-cancel", "m4-skill", "global-only", "target-only",
+    "home-agents-marker-only",
   ]));
   assert.deepEqual(sorted(collisionAgents.map(({ name }) => name)), sorted([
     "orchestrator", "build", "plan", "general", "explore", "compaction", "summary", "title",
@@ -495,8 +517,9 @@ try {
     "global_only", "target_only",
   ]));
   assert.deepEqual(sorted(collisionSkills.map(({ name }) => name)), sorted([
-    "customize-opencode", "m4-skill", "global-only", "target-only",
+    "customize-opencode", "m4-skill", "global-only", "target-only", "home-agents-marker-only",
   ]));
+  assert.ok(!collisionSkills.some(({ description }) => description.startsWith("home-claude-marker")));
   assert.ok(collisionConfig.instructions.includes(join(globalRoot, "global-only-instruction.md")));
   assert.ok(collisionConfig.instructions.includes(join(collisionTarget, ".opencode", "target-only-instruction.md")));
   assert.ok(collisionConfig.plugin.includes(`file://${join(globalRoot, "plugins", "global-only.js")}`));
@@ -528,22 +551,27 @@ try {
       }),
     }];
   }));
+  collisionSources.home_agents = {
+    skill: join(env.HOME, ".agents", "skills", "m4-skill", "SKILL.md"),
+  };
+  collisionSources.home_claude_disabled = {
+    skill: join(env.HOME, ".claude", "skills", "m4-skill", "SKILL.md"),
+  };
   for (const paths of Object.values(collisionSources)) {
     for (const path of Object.values(paths)) assert.ok(readFileSync(path, "utf8").includes("marker"));
   }
   rows.push({ id: "collisions.observable_inputs", status: "pass", evidence: {
-    observed_winners: {
+    effective_catalog: {
       command: collisionCommand.description,
       agent: collisionAgent.description,
-      tool: collisionTool.description,
-      skill: collisionSkill.description,
+      skill: { description: collisionSkill.description, location: selectedSkillLocation },
       mcp: collisionConfig.mcp.collision.command.at(-1),
     },
     same_name: {
       command: collisionCommand.description,
       agent: collisionAgent.description,
-      tool: collisionTool.description,
-      skill: collisionSkill.description,
+      tools: collisionOperatorTools.map(({ description }) => description),
+      skill: { description: collisionSkill.description, location: selectedSkillLocation },
     },
     sources: collisionSources,
     residual_builtins: collisionCommands.filter(({ name }) => ["init", "review"].includes(name)).map(({ name }) => name),
@@ -560,12 +588,12 @@ try {
 
   const after = {
     head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8" }).trim(),
-    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: target, encoding: "utf8" }),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all", "--ignored"], { cwd: target, encoding: "utf8" }),
   };
   assert.deepEqual(after, baseline);
   const collisionAfter = {
     head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: collisionTarget, encoding: "utf8" }).trim(),
-    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all"], { cwd: collisionTarget, encoding: "utf8" }),
+    status: execFileSync("git", ["status", "--porcelain=v2", "--untracked-files=all", "--ignored"], { cwd: collisionTarget, encoding: "utf8" }),
     diff: execFileSync("git", ["diff", "--no-ext-diff"], { cwd: collisionTarget, encoding: "utf8" }),
   };
   assert.deepEqual(collisionAfter, { ...collisionBaseline, diff: "" });
