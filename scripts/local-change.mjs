@@ -40,10 +40,10 @@ const environmentPolicyId = "local-change-sandbox-v1";
 const skillSource = ".opencode/skills/m1-local-change/SKILL.md";
 const budget = {
   max_concurrency: 1,
-  max_execution_attempts: 2,
-  max_planner_attempts: 3,
-  max_graph_revisions: 2,
-  max_repairs_per_finding: 0,
+  max_execution_attempts: 4,
+  max_planner_attempts: 5,
+  max_graph_revisions: 4,
+  max_repairs_per_finding: 1,
 };
 const m1AttemptDeadlineSeconds = 300;
 
@@ -1235,6 +1235,8 @@ function implementationPlan(parsed, {
 function verificationPlan(parsed, {
   targetFile,
   requestText,
+  taskId = "verification-1",
+  requiredTaskId = "implementation-1",
   attemptDeadlineSeconds = m1AttemptDeadlineSeconds,
 }) {
   const plan = parsed.verifier_task ?? parsed.task;
@@ -1242,9 +1244,9 @@ function verificationPlan(parsed, {
   if (!plan || !packet) throw new Error("planner graph revision 2 omitted the verifier Packet");
   return {
     task: {
-      task_id: "verification-1",
+      task_id: taskId,
       workflow_definition: "verification",
-      requires: ["implementation-1"],
+      requires: [requiredTaskId],
       read_resources: [targetFile],
       write_resources: [],
     },
@@ -1265,7 +1267,45 @@ function verificationPlan(parsed, {
   };
 }
 
-function makePacket({ runId, graphRevision, taskId, packet, runtimeRef, artifactId, targetTaskRef, targetSnapshot, actorId }) {
+function repairPlan(parsed, {
+  targetFile,
+  requestText,
+  skill,
+  command,
+  attemptDeadlineSeconds = m1AttemptDeadlineSeconds,
+}) {
+  const task = parsed.repair_task ?? parsed.task;
+  const packet = parsed.repair_packet ?? parsed.packet;
+  if (!task || !packet || task.workflow_definition !== "repair") {
+    throw new Error("planner graph revision 3 omitted the Repair Packet");
+  }
+  return {
+    task: {
+      task_id: "repair-1",
+      workflow_definition: "repair",
+      requires: ["verification-1"],
+      read_resources: [targetFile],
+      write_resources: [targetFile],
+    },
+    packet: {
+      objective: typeof packet.objective === "string" && packet.objective.length > 0
+        ? packet.objective : `Repair the admitted finding for ${requestText}`,
+      acceptance_criteria: validStringArray(packet.acceptance_criteria ?? ["the finding is resolved"], "Repair acceptance_criteria"),
+      allowed_resources: [targetFile],
+      forbidden_resources: Array.isArray(packet.forbidden_resources) ? packet.forbidden_resources : [".git"],
+      skills: [skill],
+      capabilities: ["repository_read", "local_write", "command_execute"],
+      admitted_commands: [command],
+      deadline_seconds: Math.min(attemptDeadlineSeconds, Number.isSafeInteger(packet.deadline_seconds)
+        && packet.deadline_seconds > 0 ? packet.deadline_seconds : attemptDeadlineSeconds),
+      escalation_condition: typeof packet.escalation_condition === "string" && packet.escalation_condition.length > 0
+        ? packet.escalation_condition : "block if the same finding recurs",
+    },
+  };
+}
+
+function makePacket({ runId, graphRevision, taskId, workflowDefinition, packet, runtimeRef, artifactId, targetTaskRef, targetSnapshot, findingRef, findingId, actorId }) {
+  const workflow = workflowDefinition ?? (taskId.startsWith("verification") ? "verification" : "implementation");
   return envelope({
     kind: "packet",
     artifactId,
@@ -1276,11 +1316,13 @@ function makePacket({ runId, graphRevision, taskId, packet, runtimeRef, artifact
     runtime_ref: runtimeRef,
     inputRefs: [],
     createdAt: now(),
-    role: taskId.startsWith("verification") ? "verifier" : "worker",
-    workflow_definition: taskId.startsWith("verification") ? "verification" : "implementation",
+    role: workflow === "verification" ? "verifier" : "worker",
+    workflow_definition: workflow,
     ...packet,
     ...(targetTaskRef ? { target_task_ref: targetTaskRef } : {}),
     ...(targetSnapshot ? { target_snapshot: targetSnapshot } : {}),
+    ...(findingRef ? { finding_ref: findingRef } : {}),
+    ...(findingId ? { finding_id: findingId } : {}),
   });
 }
 
@@ -1301,12 +1343,15 @@ function makeGraph({ runId, graphRevision, runtimeRef, requestRef, triggerRef, p
 }
 
 function parseReview(parsed) {
-  if (parsed.verdict !== "pass" || !Array.isArray(parsed.findings) || parsed.findings.length > 0) {
-    throw new Error("verifier did not propose an independent pass with no findings");
+  if (!Array.isArray(parsed.findings)
+    || (parsed.verdict === "pass" && parsed.findings.length !== 0)
+    || (parsed.verdict === "finding" && parsed.findings.length !== 1)
+    || !["pass", "finding"].includes(parsed.verdict)) {
+    throw new Error("verifier did not propose a pass or one focused finding");
   }
   return {
-    verdict: "pass",
-    findings: [],
+    verdict: parsed.verdict,
+    findings: parsed.findings,
     evidence: validEvidenceArray(parsed.evidence ?? [{
       claim: "the declared change is present and the snapshot is unchanged",
       source: "verification",
@@ -1909,6 +1954,61 @@ function nextOutcomePath(runDir) {
   return { number, path: `artifacts/outcomes/${String(number).padStart(4, "0")}.json` };
 }
 
+function artifactReferences(runDir) {
+  const refs = [];
+  const visit = (directory) => {
+    if (!existsSync(directory)) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = join(directory, entry.name);
+      if (entry.isDirectory()) visit(fullPath);
+      else if (entry.name.endsWith(".json")) {
+        const artifact = JSON.parse(readFileSync(fullPath, "utf8"));
+        refs.push(reference(artifact.artifact_id, fullPath.slice(`${runDir}/`.length), artifact));
+      }
+    }
+  };
+  visit(join(runDir, "artifacts"));
+  return refs;
+}
+
+function blockRepairFinding(ctx, state, { findingReviewRef, repairResultRef, reviewRef }) {
+  const findingReview = resolveArtifactReference(ctx, findingReviewRef);
+  const review = resolveArtifactReference(ctx, reviewRef);
+  const recurrent = review.findings.some(({ fingerprint }) =>
+    findingReview.findings.some((finding) => finding.fingerprint === fingerprint));
+  const blockType = recurrent ? "repair_budget_exhausted" : "verification_finding";
+  const existing = outcomeEntries(ctx.runDir).find(({ outcome }) =>
+    outcome.outcome_kind === "block"
+      && outcome.block_type === blockType
+      && outcome.artifact_refs.some((ref) => sameArtifactReference(ref, reviewRef)));
+  let outcomeRef;
+  if (existing) {
+    outcomeRef = reference(existing.outcome.artifact_id, `artifacts/outcomes/${existing.file}`, existing.outcome);
+  } else {
+    const outcomePath = nextOutcomePath(ctx.runDir);
+    const outcome = envelope({
+      kind: "outcome",
+      artifactId: `outcome-${String(outcomePath.number).padStart(4, "0")}`,
+      runId: ctx.runId,
+      producer: kernelProducer(),
+      inputRefs: [findingReviewRef, reviewRef],
+      createdAt: now(),
+      preset: "local-change@1",
+      effective_policy: state.effective_policy,
+      outcome_kind: "block",
+      summary: recurrent ? "The same finding recurred after its one admitted repair." : "The repaired snapshot has a new verifier finding.",
+      artifact_refs: [findingReviewRef, reviewRef, repairResultRef],
+      limitations: ["No second Repair, Promotion, or Receipt was admitted."],
+      block_type: blockType,
+      resume_condition: "Start a new bounded Run after resolving the blocking finding.",
+    });
+    outcomeRef = writeArtifact(ctx, outcomePath.path, outcome);
+  }
+  const next = state.lifecycle_state === "blocked"
+    ? state : applyTransition(ctx, state, "run_blocked", { lifecycle_state: "blocked" }, [outcomeRef, reviewRef]);
+  return { checkpoint: blockType, state: next };
+}
+
 function receiptFor(ctx, state, {
   requestRef,
   graphRef,
@@ -1937,6 +2037,7 @@ function receiptFor(ctx, state, {
     promotionRef,
     ...(state.decision_refs ?? []),
     ...ctx.admittedRefs,
+    ...artifactReferences(ctx.runDir),
   ].filter(Boolean);
   const uniqueRefs = [...new Map(refs.map((ref) => [ref.path, ref])).values()];
   const outcomePath = nextOutcomePath(ctx.runDir);
@@ -2121,6 +2222,16 @@ function reconcilePreparedTaskArtifacts(ctx, state) {
       path: "artifacts/tasks/verification-1/attempts/1/review.json",
       eventKind: "review_admitted",
     },
+    {
+      taskId: "repair-1",
+      path: "artifacts/tasks/repair-1/attempts/1/result.json",
+      eventKind: "repair_result_admitted",
+    },
+    {
+      taskId: "verification-2",
+      path: "artifacts/tasks/verification-2/attempts/1/review.json",
+      eventKind: "review_admitted",
+    },
   ];
   for (const { taskId, path, eventKind } of prepared) {
     if (!existsSync(join(ctx.runDir, path))) continue;
@@ -2272,14 +2383,43 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     event_kind === "receipt_admitted"
       && record_refs.some((recordRef) => sameArtifactReference(recordRef, receiptRef)));
   if (!receiptTransition) throw new Error("completed Run Receipt is not admitted by Run State");
-  const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
-  const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  const repaired = Boolean(state.tasks?.["repair-1"]?.artifact_ref);
+  const resultArtifactRef = state.tasks?.[repaired ? "repair-1" : "implementation-1"]?.artifact_ref;
+  const reviewArtifactRef = state.tasks?.[repaired ? "verification-2" : "verification-1"]?.artifact_ref;
   if (!resultArtifactRef || !reviewArtifactRef) {
     throw new Error("completed Run requires admitted Result and Review artifact references");
   }
   const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
   const review = resolveArtifactReference(ctx, reviewArtifactRef);
-  validatePlannerProvenance(ctx, state, { requestArtifactRef: state.request_ref, resultArtifactRef });
+  if (!repaired) {
+    validatePlannerProvenance(ctx, state, { requestArtifactRef: state.request_ref, resultArtifactRef });
+  } else {
+    const graphFour = resolveArtifactReference(ctx, state.active_graph_ref);
+    const graphThree = resolveArtifactReference(ctx, graphFour.parent_revision_ref);
+    const graphTwo = resolveArtifactReference(ctx, graphThree.parent_revision_ref);
+    const findingReviewRef = state.tasks["verification-1"].artifact_ref;
+    const repairPacket = resolveArtifactReference(
+      ctx,
+      graphThree.nodes.find(({ task_id }) => task_id === "repair-1")?.packet_ref,
+    );
+    const verificationPacket = resolveArtifactReference(
+      ctx,
+      graphFour.nodes.find(({ task_id }) => task_id === "verification-2")?.packet_ref,
+    );
+    const findingReview = resolveArtifactReference(ctx, findingReviewRef);
+    if (graphFour.graph_revision !== 4
+      || graphThree.graph_revision !== 3
+      || graphTwo.graph_revision !== 2
+      || !sameArtifactReference(graphThree.trigger_ref, findingReviewRef)
+      || !sameArtifactReference(graphFour.trigger_ref, resultArtifactRef)
+      || !sameArtifactReference(repairPacket.finding_ref, findingReviewRef)
+      || !findingReview.findings.some(({ finding_id }) => finding_id === repairPacket.finding_id)
+      || repairPacket.target_snapshot !== findingReview.target_snapshot
+      || !sameArtifactReference(verificationPacket.target_task_ref, resultArtifactRef)
+      || verificationPacket.target_snapshot !== resultArtifact.output_snapshot) {
+      throw new Error("completed M3 Run does not preserve finding-bound repair provenance");
+    }
+  }
   if (review.verdict !== "pass" || review.findings.length !== 0) {
     throw new Error("completed Run requires an independent pass Review with no findings");
   }
@@ -2331,6 +2471,14 @@ function validateCompletedRun(ctx, state, outcomeEntry) {
     !receipt.artifact_refs.some((receiptRefValue) => sameArtifactReference(receiptRefValue, recordRef)))) {
     throw new Error("completed Run Receipt is missing an admitted artifact reference");
   }
+  if (repaired) {
+    const allM3Refs = artifactReferences(ctx.runDir)
+      .filter(({ artifact_id }) => artifact_id !== receipt.artifact_id);
+    if (allM3Refs.some((recordRef) =>
+      !receipt.artifact_refs.some((receiptRefValue) => sameArtifactReference(receiptRefValue, recordRef)))) {
+      throw new Error("completed M3 Run Receipt is missing repair lineage or runtime evidence");
+    }
+  }
   const resultRepo = join(ctx.runDir, "result-repository.git");
   if (!existsSync(resultRepo)) throw new Error("completed Run Promotion repository is missing");
   const promotedRefOid = maybeResultRefOid(resultRepo, promotion.result_ref);
@@ -2377,7 +2525,8 @@ export function inspectRun(runDir) {
       ? "completed" : state.lifecycle_state,
     runtime_bindings: state.runtime_bindings,
     active_runtime_bindings: state.runtime_bindings.filter(({ binding_state }) => binding_state === "active"),
-    result_artifact_ref: state.tasks?.["implementation-1"]?.artifact_ref ?? null,
+    result_artifact_ref: state.tasks?.["repair-1"]?.artifact_ref
+      ?? state.tasks?.["implementation-1"]?.artifact_ref ?? null,
     result_ref: resultRef,
     receipt: outcome?.outcome_kind === "receipt" ? {
       artifact_id: outcome.artifact_id,
@@ -2546,8 +2695,43 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   }
   const promotionPath = "artifacts/promotions/promotion-1.json";
   const resultRepoPath = join(runDir, "result-repository.git");
-  const resultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
-  const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  const initialResultArtifactRef = state.tasks?.["implementation-1"]?.artifact_ref;
+  const initialReviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  const initialReview = initialReviewArtifactRef
+    ? resolveArtifactReference(reconciliationCtx, initialReviewArtifactRef) : null;
+  if (initialReview?.verdict === "finding" && !state.tasks?.["verification-2"]?.artifact_ref) {
+    if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "Finding continuation requires the target workspace");
+    try {
+      const runRoot = dirname(dirname(resolve(runDir)));
+      const resumed = await runLocalChange({
+        workspace,
+        runRoot,
+        existingRunDir: runDir,
+        runtimeFactory: runtime ? async (options) => {
+          Object.assign(runtime, options);
+          return runtime;
+        } : undefined,
+        hooks,
+      });
+      return { ...resumed.inspect, next_action: null, ...resumed };
+    } catch (error) {
+      if (!error.code) throw error;
+      if (error.code !== "simulated_crash") recordFailure(reconciliationCtx, state, error);
+      return { ...inspectRun(runDir), next_action: null, checkpoint: error.code };
+    }
+  }
+  const resultArtifactRef = state.tasks?.["repair-1"]?.artifact_ref ?? initialResultArtifactRef;
+  const reviewArtifactRef = state.tasks?.["verification-2"]?.artifact_ref ?? initialReviewArtifactRef;
+  const currentReview = reviewArtifactRef
+    ? resolveArtifactReference(reconciliationCtx, reviewArtifactRef) : null;
+  if (state.tasks?.["repair-1"]?.artifact_ref && currentReview?.verdict === "finding") {
+    const blocked = blockRepairFinding(reconciliationCtx, state, {
+      findingReviewRef: initialReviewArtifactRef,
+      repairResultRef: resultArtifactRef,
+      reviewRef: reviewArtifactRef,
+    });
+    return { ...inspectRun(runDir), next_action: null, checkpoint: blocked.checkpoint };
+  }
   if (existsSync(resultRepoPath) && resultArtifactRef && !reviewArtifactRef) {
     if (!workspace) throw new AttemptFailure("workspace_required_for_resume", "Result continuation requires the target workspace");
     try {
@@ -2659,6 +2843,462 @@ function ensureOutside(workspace, runRoot) {
   }
 }
 
+function recoveredGraphTask(ctx, state, graph, {
+  revision,
+  parentRef,
+  triggerRef,
+  parentNodes,
+  taskId,
+  workflowDefinition,
+  requires,
+  readResources,
+  writeResources,
+  attemptId,
+}) {
+  const node = graph.nodes.at(-1);
+  const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === attemptId);
+  const runtime = resolveArtifactReference(ctx, graph.runtime_ref);
+  const packet = node?.packet_ref ? resolveArtifactReference(ctx, node.packet_ref) : null;
+  if (graph.graph_revision !== revision
+    || graph.run_id !== state.run_id
+    || !sameArtifactReference(graph.parent_revision_ref, parentRef)
+    || !sameArtifactReference(graph.trigger_ref, triggerRef)
+    || graph.nodes.length !== parentNodes.length + 1
+    || canonicalJson(graph.nodes.slice(0, -1)) !== canonicalJson(parentNodes)
+    || node?.task_id !== taskId
+    || node.workflow_definition !== workflowDefinition
+    || canonicalJson(node.requires) !== canonicalJson(requires)
+    || canonicalJson(node.read_resources) !== canonicalJson(readResources)
+    || canonicalJson(node.write_resources) !== canonicalJson(writeResources)
+    || !node.packet_ref
+    || !binding
+    || runtime.attempt_id !== attemptId
+    || runtime.run_id !== state.run_id
+    || runtime.role !== "planner"
+    || runtime.session_id !== binding.session_id
+    || runtime.agent_identity !== binding.agent_identity
+    || runtime.configuration_digest !== binding.configuration_digest
+    || binding.role !== "planner"
+    || graph.producer.actor_id !== runtime.agent_identity
+    || packet?.run_id !== state.run_id
+    || packet.graph_revision !== revision
+    || packet.task_id !== taskId
+    || packet.workflow_definition !== workflowDefinition
+    || !sameArtifactReference(packet.runtime_ref, graph.runtime_ref)
+    || packet.producer.actor_id !== graph.producer.actor_id) {
+    throw new AttemptFailure("prepared_graph_conflict", `prepared graph revision ${revision} conflicts with admitted state`);
+  }
+  return { binding, packetRef: node.packet_ref, packet };
+}
+
+async function continueFindingRepair({
+  ctx,
+  state,
+  adapter,
+  taskWorkspace,
+  taskBaseline,
+  targetFile,
+  expectedContent,
+  requestText,
+  skill,
+  attemptDeadlineSeconds,
+}) {
+  const requestRef = state.request_ref;
+  const graphTwoRef = state.transitions
+    .find(({ event_kind }) => event_kind === "graph_revision_2_admitted")
+    ?.record_refs.find(({ path }) => path === "artifacts/graphs/0002.json");
+  const graphTwo = resolveArtifactReference(ctx, graphTwoRef);
+  const originalResultRef = state.tasks["implementation-1"].artifact_ref;
+  const findingReviewRef = state.tasks["verification-1"].artifact_ref;
+  const findingReview = resolveArtifactReference(ctx, findingReviewRef);
+  const finding = findingReview.findings[0];
+  const originalResult = resolveArtifactReference(ctx, originalResultRef);
+  const command = resolveArtifactReference(
+    ctx,
+    graphTwo.nodes.find(({ task_id }) => task_id === "implementation-1").packet_ref,
+  ).admitted_commands.find(({ command_id }) => command_id === commandSpec(targetFile, expectedContent).command_id)
+    ?? commandSpec(targetFile, expectedContent);
+
+  if (!state.tasks["repair-1"]) {
+    const graphPath = "artifacts/graphs/0003.json";
+    if (existsSync(join(ctx.runDir, graphPath))) {
+      const graph = JSON.parse(readFileSync(join(ctx.runDir, graphPath), "utf8"));
+      validateProtocol(graph, "graph revision 3");
+      const graphRef = reference(graph.artifact_id, graphPath, graph);
+      const { binding, packetRef, packet } = recoveredGraphTask(ctx, state, graph, {
+        revision: 3,
+        parentRef: graphTwoRef,
+        triggerRef: findingReviewRef,
+        parentNodes: graphTwo.nodes,
+        taskId: "repair-1",
+        workflowDefinition: "repair",
+        requires: ["verification-1"],
+        readResources: [targetFile],
+        writeResources: [targetFile],
+        attemptId: "planner-graph-3",
+      });
+      if (packet.graph_revision !== 3
+        || packet.task_id !== "repair-1"
+        || packet.workflow_definition !== "repair"
+        || !sameArtifactReference(packet.finding_ref, findingReviewRef)
+        || packet.finding_id !== finding.finding_id
+        || packet.target_snapshot !== findingReview.target_snapshot) {
+        throw new AttemptFailure("prepared_graph_conflict", "prepared graph revision 3 Repair Packet conflicts with the Finding");
+      }
+      state = applyTransition(ctx, state, "graph_revision_3_admitted", {
+        active_graph_ref: graphRef,
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, { ...binding, binding_state: "idle" }),
+        tasks: { ...state.tasks, "repair-1": { task_state: "planned", attempts: 0 } },
+      }, [graph.runtime_ref, packetRef, graphRef, findingReviewRef]);
+      state = applyTransition(ctx, state, "repair_admitted", {}, [packetRef, findingReviewRef]);
+      clearPreparedExecution(ctx, "planner-graph-3");
+      return { checkpoint: "repair_admitted", state };
+    }
+    admitBudget(state, "planner_attempt");
+    admitBudget(state, "graph_revision");
+    admitBudget(state, "repair");
+    const prepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+      role: "planner",
+      attemptId: "planner-graph-3",
+      attempt: 4,
+    });
+    state = prepared.state;
+    const executionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+      role: "planner",
+      attemptId: "planner-graph-3",
+      attempt: 4,
+      prompt: [
+        "Return exactly one JSON object and no Markdown for graph revision 3.",
+        `Add exactly one worker-role Repair Task for finding ${finding.finding_id} (${finding.fingerprint}) against snapshot ${findingReview.target_snapshot}.`,
+        "Carry every existing task forward unchanged. Do not propose retry, concurrency, Application, or another repair.",
+        "Use this shape: {\"repair_task\":{\"task_id\":\"repair-1\",\"workflow_definition\":\"repair\",\"requires\":[\"verification-1\"],\"read_resources\":[\"target\"],\"write_resources\":[\"target\"]},\"repair_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\",\"local_write\",\"command_execute\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
+      ].join("\n"),
+      beforeSnapshot: taskBaseline,
+      deadlineSeconds: attemptDeadlineSeconds,
+      label: "graph revision 3 planner Attempt",
+    });
+    const execution = executionResult.execution;
+    admitRuntimeAttempt(ctx, state, execution, { attemptId: "planner-graph-3", label: "graph revision 3 planner Attempt" });
+    const runtimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-3.json", execution.observation);
+    const repair = repairPlan(responseObject(execution.text, "revision 3 planner"), {
+      targetFile,
+      requestText,
+      skill,
+      command,
+      attemptDeadlineSeconds,
+    });
+    const packet = makePacket({
+      runId: ctx.runId,
+      graphRevision: 3,
+      taskId: "repair-1",
+      workflowDefinition: "repair",
+      packet: repair.packet,
+      runtimeRef,
+      artifactId: "packet-repair-1",
+      findingRef: findingReviewRef,
+      findingId: finding.finding_id,
+      targetSnapshot: findingReview.target_snapshot,
+      actorId: execution.binding.agent_identity,
+    });
+    const packetRef = writeArtifact(ctx, "artifacts/tasks/repair-1/attempts/1/packet.json", packet);
+    const graph = makeGraph({
+      runId: ctx.runId,
+      graphRevision: 3,
+      runtimeRef,
+      requestRef,
+      triggerRef: findingReviewRef,
+      parentRef: graphTwoRef,
+      inputRefs: [requestRef, graphTwoRef, originalResultRef, findingReviewRef],
+      nodes: [...graphTwo.nodes, { ...repair.task, packet_ref: packetRef }],
+      actorId: execution.binding.agent_identity,
+    });
+    const graphRef = writeArtifact(ctx, "artifacts/graphs/0003.json", graph);
+    crashAt(ctx, "after_graph_three_publication");
+    state = applyTransition(ctx, state, "graph_revision_3_admitted", {
+      active_graph_ref: graphRef,
+      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, execution.binding),
+      tasks: { ...state.tasks, "repair-1": { task_state: "planned", attempts: 0 } },
+    }, [runtimeRef, packetRef, graphRef, findingReviewRef]);
+    state = applyTransition(ctx, state, "repair_admitted", {}, [packetRef, findingReviewRef]);
+    clearPreparedExecution(ctx, "planner-graph-3");
+    return { checkpoint: "repair_admitted", state };
+  }
+
+  const graphThreeRef = state.transitions
+    .find(({ event_kind }) => event_kind === "graph_revision_3_admitted")
+    ?.record_refs.find(({ path }) => path === "artifacts/graphs/0003.json");
+  const graphThree = resolveArtifactReference(ctx, graphThreeRef);
+  const repairPacketRef = graphThree.nodes.find(({ task_id }) => task_id === "repair-1").packet_ref;
+  const repairPacket = resolveArtifactReference(ctx, repairPacketRef);
+
+  if (!state.tasks["repair-1"].artifact_ref) {
+    admitBudget(state, "execution_attempt");
+    const prepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+      role: "worker",
+      attemptId: "worker-repair-1",
+      taskId: "repair-1",
+      attempt: 1,
+    });
+    state = prepared.state;
+    state = applyTransition(ctx, state, "repair_dispatched", {
+      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, prepared.binding),
+      tasks: { ...state.tasks, "repair-1": { task_state: "active", attempts: 1 } },
+    }, [repairPacketRef]);
+    const editResult = await executeRuntimeAttempt(ctx, state, adapter, {
+      role: "worker",
+      attemptId: "worker-repair-1",
+      taskId: "repair-1",
+      attempt: 1,
+      prompt: [
+        `Repair only ${targetFile} for finding ${finding.finding_id}: ${finding.criterion}.`,
+        `The required UTF-8 content is ${JSON.stringify(expectedContent)}.`,
+        "Use edit/write only; do not use shell, network, delegation, or any undeclared path. Report only that the edit is complete.",
+      ].join("\n"),
+      beforeSnapshot: taskBaseline,
+      deadlineSeconds: repairPacket.deadline_seconds,
+      label: "repair worker Attempt",
+    });
+    admitRuntimeAttempt(ctx, state, editResult.execution, { attemptId: "worker-repair-1", label: "repair worker Attempt" });
+    const editObservation = { ...editResult.execution.observation, artifact_id: "runtime-worker-repair-1-edit" };
+    const editRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-repair-1-edit.json", editObservation);
+    const commandExecution = runCommand(taskWorkspace, repairPacket.admitted_commands[0]);
+    const preCommitSnapshot = workspaceSnapshot(taskWorkspace);
+    const changes = diffEntries(taskBaseline, preCommitSnapshot);
+    if (changes.length === 0 || changes.some(({ path }) => path !== targetFile)) {
+      throw new Error(`repair diff violates Packet resources: ${JSON.stringify(changes)}`);
+    }
+    git(taskWorkspace, ["add", "-A"]);
+    git(taskWorkspace, ["commit", "-qm", "M3 finding-bound Repair"]);
+    const resultCommit = git(taskWorkspace, ["rev-parse", "HEAD"]).trim();
+    const repairedSnapshot = workspaceSnapshot(taskWorkspace);
+    const proposalResult = await executeRuntimeAttempt(ctx, state, adapter, {
+      role: "worker",
+      attemptId: "worker-repair-1",
+      taskId: "repair-1",
+      attempt: 1,
+      prompt: [
+        `The Kernel observed the repaired Output Snapshot ${repairedSnapshot.digest}.`,
+        `Return exactly one JSON object: {\"claims\":[\"the finding was repaired\"],\"evidence\":[{\"claim\":\"the target was repaired\",\"source\":\"worker-report\",\"observation\":\"the named target now satisfies the finding criterion\"}],\"changed_resources\":[\"${targetFile}\"],\"output_snapshot\":\"${repairedSnapshot.digest}\"}`,
+      ].join("\n"),
+      beforeSnapshot: repairedSnapshot,
+      deadlineSeconds: repairPacket.deadline_seconds,
+      label: "repair Result proposal Attempt",
+    });
+    admitRuntimeAttempt(ctx, state, proposalResult.execution, { attemptId: "worker-repair-1", label: "repair Result proposal Attempt" });
+    const proposal = parseResultProposal(responseObject(proposalResult.execution.text, "repair Result proposal"));
+    if (proposal.output_snapshot !== repairedSnapshot.digest
+      || canonicalJson(proposal.changed_resources) !== canonicalJson([targetFile])) {
+      throw new Error("repair Result proposal does not match the observed repaired snapshot");
+    }
+    const runtime = {
+      ...proposalResult.execution.observation,
+      observed_changes: changes,
+      observed_output_snapshot: repairedSnapshot.digest,
+      command_executions: [commandExecution],
+    };
+    const runtimeRef = writeArtifact(ctx, "artifacts/runtime/worker-repair-1.json", runtime);
+    const result = envelope({
+      kind: "result",
+      artifactId: "result-repair-1",
+      runId: ctx.runId,
+      graph_revision: 3,
+      task_id: "repair-1",
+      attempt: 1,
+      producer: workerProducer(prepared.binding.agent_identity),
+      runtime_ref: runtimeRef,
+      inputRefs: [repairPacketRef, findingReviewRef, editRuntimeRef],
+      createdAt: now(),
+      claims: proposal.claims,
+      evidence: proposal.evidence,
+      changed_resources: proposal.changed_resources,
+      output_snapshot: proposal.output_snapshot,
+      result_commit: resultCommit,
+    });
+    const resultRef = writeArtifact(ctx, "artifacts/tasks/repair-1/attempts/1/result.json", result);
+    const resultRepo = join(ctx.runDir, "result-repository.git");
+    git(resultRepo, ["fetch", "-q", taskWorkspace, resultCommit]);
+    crashAt(ctx, "after_repair_result_publication");
+    state = applyTransition(ctx, state, "repair_result_admitted", {
+      runtime_bindings: state.runtime_bindings.map((binding) =>
+        binding.attempt_id === "worker-repair-1" ? proposalResult.execution.binding : binding),
+      tasks: { ...state.tasks, "repair-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultRef } },
+    }, [editRuntimeRef, runtimeRef, resultRef, findingReviewRef]);
+    return { checkpoint: "repair_result_admitted", state };
+  }
+
+  const repairResultRef = state.tasks["repair-1"].artifact_ref;
+  const repairResult = resolveArtifactReference(ctx, repairResultRef);
+  if (!state.tasks["verification-2"]) {
+    const graphPath = "artifacts/graphs/0004.json";
+    if (existsSync(join(ctx.runDir, graphPath))) {
+      const graph = JSON.parse(readFileSync(join(ctx.runDir, graphPath), "utf8"));
+      validateProtocol(graph, "graph revision 4");
+      const graphRef = reference(graph.artifact_id, graphPath, graph);
+      const { binding, packetRef, packet } = recoveredGraphTask(ctx, state, graph, {
+        revision: 4,
+        parentRef: graphThreeRef,
+        triggerRef: repairResultRef,
+        parentNodes: graphThree.nodes,
+        taskId: "verification-2",
+        workflowDefinition: "verification",
+        requires: ["repair-1"],
+        readResources: [targetFile],
+        writeResources: [],
+        attemptId: "planner-graph-4",
+      });
+      if (packet.graph_revision !== 4
+        || packet.task_id !== "verification-2"
+        || packet.workflow_definition !== "verification"
+        || !sameArtifactReference(packet.target_task_ref, repairResultRef)
+        || packet.target_snapshot !== repairResult.output_snapshot) {
+        throw new AttemptFailure("prepared_graph_conflict", "prepared graph revision 4 Verification Packet conflicts with the Repair Result");
+      }
+      state = applyTransition(ctx, state, "graph_revision_4_admitted", {
+        active_graph_ref: graphRef,
+        runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, { ...binding, binding_state: "idle" }),
+        tasks: { ...state.tasks, "verification-2": { task_state: "planned", attempts: 0 } },
+      }, [graph.runtime_ref, packetRef, graphRef, repairResultRef]);
+      clearPreparedExecution(ctx, "planner-graph-4");
+      return { checkpoint: "graph_revision_4_admitted", state };
+    }
+    admitBudget(state, "planner_attempt");
+    admitBudget(state, "graph_revision");
+    const prepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+      role: "planner",
+      attemptId: "planner-graph-4",
+      attempt: 5,
+    });
+    state = prepared.state;
+    const executionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+      role: "planner",
+      attemptId: "planner-graph-4",
+      attempt: 5,
+      prompt: [
+        "Return exactly one JSON object and no Markdown for graph revision 4.",
+        `Carry all work forward and add one fresh verifier for repair Result ${repairResultRef.path} at snapshot ${repairResult.output_snapshot}.`,
+        "Use this shape: {\"verifier_task\":{\"task_id\":\"verification-2\",\"workflow_definition\":\"verification\",\"requires\":[\"repair-1\"],\"read_resources\":[\"target\"],\"write_resources\":[]},\"verifier_packet\":{\"objective\":\"...\",\"acceptance_criteria\":[\"...\"],\"forbidden_resources\":[\".git\"],\"capabilities\":[\"repository_read\"],\"admitted_commands\":[],\"deadline_seconds\":300,\"escalation_condition\":\"...\"}}",
+      ].join("\n"),
+      beforeSnapshot: taskBaseline,
+      deadlineSeconds: attemptDeadlineSeconds,
+      label: "graph revision 4 planner Attempt",
+    });
+    const execution = executionResult.execution;
+    admitRuntimeAttempt(ctx, state, execution, { attemptId: "planner-graph-4", label: "graph revision 4 planner Attempt" });
+    const runtimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-4.json", execution.observation);
+    const verification = verificationPlan(responseObject(execution.text, "revision 4 planner"), {
+      targetFile,
+      requestText,
+      taskId: "verification-2",
+      requiredTaskId: "repair-1",
+      attemptDeadlineSeconds,
+    });
+    const packet = makePacket({
+      runId: ctx.runId,
+      graphRevision: 4,
+      taskId: "verification-2",
+      workflowDefinition: "verification",
+      packet: verification.packet,
+      runtimeRef,
+      artifactId: "packet-verification-2",
+      targetTaskRef: repairResultRef,
+      targetSnapshot: repairResult.output_snapshot,
+      actorId: execution.binding.agent_identity,
+    });
+    const packetRef = writeArtifact(ctx, "artifacts/tasks/verification-2/attempts/1/packet.json", packet);
+    const graph = makeGraph({
+      runId: ctx.runId,
+      graphRevision: 4,
+      runtimeRef,
+      requestRef,
+      triggerRef: repairResultRef,
+      parentRef: graphThreeRef,
+      inputRefs: [requestRef, graphThreeRef, repairResultRef],
+      nodes: [...graphThree.nodes, { ...verification.task, packet_ref: packetRef }],
+      actorId: execution.binding.agent_identity,
+    });
+    const graphRef = writeArtifact(ctx, "artifacts/graphs/0004.json", graph);
+    crashAt(ctx, "after_graph_four_publication");
+    state = applyTransition(ctx, state, "graph_revision_4_admitted", {
+      active_graph_ref: graphRef,
+      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, execution.binding),
+      tasks: { ...state.tasks, "verification-2": { task_state: "planned", attempts: 0 } },
+    }, [runtimeRef, packetRef, graphRef, repairResultRef]);
+    clearPreparedExecution(ctx, "planner-graph-4");
+    return { checkpoint: "graph_revision_4_admitted", state };
+  }
+
+  if (!state.tasks["verification-2"].artifact_ref) {
+    const graphFour = resolveArtifactReference(ctx, state.active_graph_ref);
+    const packetRef = graphFour.nodes.find(({ task_id }) => task_id === "verification-2").packet_ref;
+    const packet = resolveArtifactReference(ctx, packetRef);
+    admitBudget(state, "execution_attempt");
+    const prepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+      role: "verifier",
+      attemptId: "verifier-2",
+      taskId: "verification-2",
+      attempt: 1,
+    });
+    state = prepared.state;
+    const repairBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "worker-repair-1");
+    if (prepared.binding.agent_identity === repairBinding?.agent_identity) throw new Error("verifier_not_independent");
+    state = applyTransition(ctx, state, "reverification_dispatched", {
+      runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, prepared.binding),
+      tasks: { ...state.tasks, "verification-2": { task_state: "active", attempts: 1 } },
+    }, [packetRef]);
+    const executionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+      role: "verifier",
+      attemptId: "verifier-2",
+      taskId: "verification-2",
+      attempt: 1,
+      prompt: [
+        `Read exactly ${targetFile} and independently verify repair Result ${repairResultRef.path} at snapshot ${repairResult.output_snapshot}.`,
+        `The original finding fingerprint is ${finding.fingerprint}.`,
+        "Return exactly one JSON object with verdict pass and no findings, or verdict finding with exactly one stable finding. Do not edit, use shell, network, or delegation.",
+      ].join("\n"),
+      beforeSnapshot: taskBaseline,
+      deadlineSeconds: packet.deadline_seconds,
+      label: "repair verifier Attempt",
+    });
+    const execution = executionResult.execution;
+    admitRuntimeAttempt(ctx, state, execution, { attemptId: "verifier-2", label: "repair verifier Attempt" });
+    const observed = workspaceSnapshot(taskWorkspace);
+    if (observed.digest !== repairResult.output_snapshot) throw new Error("Output Snapshot changed during repair verification");
+    const runtime = { ...execution.observation, observed_changes: [], observed_output_snapshot: observed.digest };
+    const runtimeRef = writeArtifact(ctx, "artifacts/runtime/verifier-2.json", runtime);
+    const proposal = parseReview(responseObject(execution.text, "repair verifier"));
+    const review = envelope({
+      kind: "review",
+      artifactId: "review-verification-2",
+      runId: ctx.runId,
+      graph_revision: 4,
+      task_id: "verification-2",
+      attempt: 1,
+      producer: verifierProducer(prepared.binding.agent_identity),
+      runtime_ref: runtimeRef,
+      inputRefs: [packetRef, repairResultRef, findingReviewRef],
+      createdAt: now(),
+      target_task_ref: repairResultRef,
+      target_snapshot: repairResult.output_snapshot,
+      verdict: proposal.verdict,
+      evidence: proposal.evidence,
+      findings: proposal.findings,
+    });
+    const reviewRef = writeArtifact(ctx, "artifacts/tasks/verification-2/attempts/1/review.json", review);
+    crashAt(ctx, "after_repair_review_publication");
+    state = applyTransition(ctx, state, "review_admitted", {
+      runtime_bindings: state.runtime_bindings.map((binding) =>
+        binding.attempt_id === "verifier-2" ? execution.binding : binding),
+      tasks: { ...state.tasks, "verification-2": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewRef } },
+    }, [runtimeRef, reviewRef, repairResultRef, findingReviewRef]);
+    if (review.verdict === "finding") {
+      return blockRepairFinding(ctx, state, { findingReviewRef, repairResultRef, reviewRef });
+    }
+    return { checkpoint: "review_admitted", state };
+  }
+
+  return { checkpoint: "review_admitted", state };
+}
+
 function skillRecord(workspace) {
   const path = join(workspace, skillSource);
   if (!existsSync(path)) throw new Error(`dependency_unavailable: ${skillSource}`);
@@ -2755,6 +3395,10 @@ export async function runLocalChange({
   const ctx = { runDir, runId, admittedRefs: [], hooks };
   const continuingResult = Boolean(existingState?.tasks?.["implementation-1"]?.artifact_ref
     && !existingState?.tasks?.["verification-1"]?.artifact_ref);
+  const findingReview = existingState?.tasks?.["verification-1"]?.artifact_ref
+    ? resolveArtifactReference(ctx, existingState.tasks["verification-1"].artifact_ref) : null;
+  const continuingRepair = findingReview?.verdict === "finding"
+    && !existingState?.tasks?.["verification-2"]?.artifact_ref;
   try {
     const recoveredBinding = existingState?.runtime_bindings.find(({ attempt_id, binding_state }) => {
       const preparedPath = preparedExecutionPath({ runDir }, attempt_id);
@@ -2778,8 +3422,9 @@ export async function runLocalChange({
         throw new AttemptFailure("runtime_reconciliation_required", "recovered Runtime workspace does not reproduce its Output Snapshot");
       }
       taskBaseline = recoveredPreparedExecution.before_snapshot;
-    } else if (continuingResult) {
-      const resultArtifactRef = existingState.tasks["implementation-1"].artifact_ref;
+    } else if (continuingResult || continuingRepair) {
+      const resultArtifactRef = existingState.tasks?.["repair-1"]?.artifact_ref
+        ?? existingState.tasks["implementation-1"].artifact_ref;
       const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
       const resultRepo = join(runDir, "result-repository.git");
       if (!existsSync(resultRepo) || !resultArtifact.result_commit) {
@@ -2823,6 +3468,26 @@ export async function runLocalChange({
         run_dir: runDir,
         inspect: inspectRun(runDir),
         checkpoint: "runtime_reconciled",
+      };
+    }
+    if (continuingRepair) {
+      const continuation = await continueFindingRepair({
+        ctx,
+        state,
+        adapter,
+        taskWorkspace,
+        taskBaseline,
+        targetFile,
+        expectedContent,
+        requestText,
+        skill,
+        attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
+      });
+      return {
+        run_id: runId,
+        run_dir: runDir,
+        checkpoint: continuation.checkpoint,
+        inspect: inspectRun(runDir),
       };
     }
 
@@ -3604,7 +4269,7 @@ export async function runLocalChange({
       },
     }, [verifierRuntimeRef, reviewArtifactRef]);
     clearPreparedExecution(ctx, "verifier-1");
-    if (continuingResult) {
+    if (review.verdict === "finding" || continuingResult) {
       return {
         run_id: runId,
         run_dir: runDir,

@@ -251,8 +251,8 @@ test("resume reconstructs a terminal Run idempotently and rejects invalid durabl
 
 test("Result artifact reconstruction keeps Result Ref vocabulary reserved for Git refs", () => {
   const source = readFileSync(new URL("../scripts/local-change.mjs", import.meta.url), "utf8");
-  assert.match(source, /const resultArtifactRef = existingState\.tasks\["implementation-1"\]\.artifact_ref/);
-  assert.doesNotMatch(source, /const resultRef = existingState\.tasks\["implementation-1"\]\.artifact_ref/);
+  assert.match(source, /const resultArtifactRef = existingState\.tasks\?\.\["repair-1"\]\?\.artifact_ref/);
+  assert.doesNotMatch(source, /const resultRef = existingState\.tasks\?\.\["repair-1"\]\?\.artifact_ref/);
 });
 
 test("public inspect rejects completed state without an immutable Receipt", async () => {

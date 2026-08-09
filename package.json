@@ -6,7 +6,8 @@
     "test:m0": "node --test test/m0-probe.test.mjs",
     "test:protocol": "node --test test/protocol-schema.test.mjs",
     "test:m1": "node --test test/m1-local-change.test.mjs",
-    "test:m2": "node --test test/m2-recovery.test.mjs"
+    "test:m2": "node --test test/m2-recovery.test.mjs",
+    "test:m3": "node --test --test-name-pattern='M3' test/m1-local-change.test.mjs"
   },
   "devDependencies": {
     "ajv": "^8.17.1"

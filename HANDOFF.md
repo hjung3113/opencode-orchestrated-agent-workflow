@@ -1,5 +1,83 @@
 # Handoff
 
+## Current handoff — 2026-08-06 M3 implementation
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow`.
+- Branch/upstream: `agent/executable-opencode-harness-design` at `2bb7f34`,
+  equal to `origin/agent/executable-opencode-harness-design`; the M3 diff is
+  uncommitted and nothing was pushed.
+- OpenCode `1.18.5`, Node `v22.22.2`, npm `10.9.7`, and the installed Ajv
+  dependency are available. `npm run test:protocol` passes 4/4 and
+  `git diff --check` passes.
+- GitHub Issue #30 remains open. Issues #26, #28, and #29 are closed contract
+  inputs. Do not mutate GitHub, push, or open a PR without fresh authorization.
+
+### Implemented
+
+M3 extends the existing `local-change@1` path with one finding-bound repair and
+fresh re-verification. The implementation was driven from a failing public-seam
+`runLocalChange`/`resumeRun` test.
+
+The implementation path is:
+
+1. Accept a schema-valid Review with exactly one stable `finding_id`,
+   fingerprint, criterion, and evidence. Preserve the current pass path.
+2. On `run` or `resume`, route a finding Review to graph revision 3, carrying
+   revisions 1 and 2 forward and adding one worker-role `repair` Task. Its
+   Packet must bind `finding_ref`, `finding_id`, and the failed snapshot.
+3. Run the Repair in a fresh worker session, publish a successor Result and
+   snapshot without changing the original Result, Review, or Finding, then add
+   graph revision 4 with a fresh verifier for that exact snapshot.
+4. A pass Review promotes only the repaired snapshot and emits a Receipt that
+   resolves every graph, Packet, Result, Review, Finding-bearing Review,
+   runtime binding, Repair, and Promotion reference. Recurrence of the same
+   fingerprint emits a Typed Block; it never dispatches a second repair.
+5. Preserve M2's one-action resume, prepared-artifact recovery, CAS, immutable
+   publication, and unchanged-user-worktree guarantees at every new boundary.
+
+### Evidence and remaining gate
+
+- Implementation is confined to `scripts/local-change.mjs`, the existing
+  public-seam fake-runtime coverage in `test/m1-local-change.test.mjs`, one
+  M2 vocabulary assertion, and the `test:m3` package script. No protocol schema
+  change or dependency was needed.
+- After M3, `local-change@1` admits `{execution: 4, planner: 5, revisions: 4,
+  repairs_per_finding: 1}` before dispatch so a later Finding never widens a
+  live Run. A no-finding trace still consumes only the M1 path's two execution
+  Attempts, three planner Attempts, two revisions, and zero repairs.
+- `npm run test:m3` passes 4/4: Finding admission without Promotion, successful
+  repair and re-verification, same-fingerprint budget block, and four new
+  publication-boundary crash/resume cases without duplicate artifacts.
+- `npm run test:protocol` passes 4/4; focused deterministic M1 checks pass
+  10/10; the kernel test passes 1/1; every script/test `.mjs` passes
+  `node --check`; and `git diff --check` passes.
+- The one full M2 run passed 33/34 in 260940.228167ms. Its sole failure was a
+  stale source-string assertion that assumed only `implementation-1` could be
+  the current Result; the corrected focused test passes 1/1. The full suite was
+  not retried.
+- The one full M1 run passed 15/16 in 87661.700083ms. Its real-provider case
+  reached the verifier but received no JSON (`verifier did not return a JSON
+  object`); all deterministic cases passed. No retry or timeout relaxation was
+  used. A real-provider M3 Finding trace therefore remains unobserved.
+- A diff-and-purpose-only Sol High adversarial review returned `REVISE`. All
+  retained findings were M3-local and reproducible, not speculative hardening:
+  recurrent Finding recovery could reach Promotion, recovered graph 3/4 files
+  lacked semantic binding checks, the repair command lookup ignored its id,
+  and the crash matrix did not assert its terminal state.
+- The bounded repair now idempotently restores the same Finding Block before
+  Promotion, compares the exact command id, rejects conflicting prepared M3
+  graphs against admitted parent/trigger/nodes/Packet/runtime bindings, and
+  asserts completed or blocked terminal recovery. `npm run test:m3` passes
+  4/4 including six publication cases; protocol 4/4, the focused deterministic
+  selection 11/11, kernel 1/1, the focused M2 vocabulary assertion 1/1, all
+  `.mjs` syntax checks, and `git diff --check` pass after this repair.
+- Do not add generic recovery, retry/fork machinery, concurrency, new presets,
+  `inspect@1`, llm-wiki, or Application. Do not start another whole-plan
+  review. A later review, if requested, is one bounded review of the finished
+  M3 diff and evidence.
+
 ## Current handoff — 2026-08-05
 
 ### Status
