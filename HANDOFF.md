@@ -1,52 +1,188 @@
 # Handoff
 
-## Current handoff — 2026-08-10 Issue #37 selective scope reduction
+## Current handoff — 2026-08-11 Issue #38 implementation accepted
 
-### Live state
+### Live state and next ticket
 
 - Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
-  `agent/m4-workflow-routes-skills`.
-- Issue #37 remains an uncommitted, unpushed current-worktree slice. Unrelated
-  existing changes, including the three AGENTS.md review-scope/test-economy
-  bullets, are preserved.
-- Reduction baseline: 53 focused M4 tests, 5282 lines in
-  `scripts/local-change.mjs`, and 2691 lines in
-  `test/m4-workflow-routes.test.mjs`.
+  `agent/m4-attempt-profiles-replan`, based on `7601ac0`.
+- PR #41 merged Issue #37 as `7601ac0`; Issue #37 is closed and its
+  implementation commit `5d02833` is contained in `origin/main`.
+- Issue #38, **Enforce M4 Attempt profiles and stage no-authority Replan
+  Requests**, is implemented and independently accepted on this branch. The
+  remaining serialized M4 chain is `#36 -> #39`; start #36 only from merged
+  `main` after this branch lands.
+- Preserve the unrelated local `AGENTS.md` and `opencode.json` changes; they are
+  intentionally excluded from Issue #38 delivery.
 
-### Current scope-reduction summary
+### Acceptance ceiling
 
-- Production publication now accepts explicit Kernel route input, checks the
-  computed route evidence and eligibility, compiles, and admits without
-  reconstructing durable Run, graph, Request, or current-task state.
-- Runtime Observation publication resolves only the admitted Packet and checks
-  ordered skill identity, adapter identity, invocation index, outcomes, and
-  evidence. Legacy M1-M3 execution remains on its existing admission path;
-  explicit M4 publication seams remain available.
-- The focused suite keeps one public-boundary assertion per named acceptance
-  behavior and removes the approved fixture permutations, duplicate
-  cross-run guards, standalone provider/compile cases, and embedded M1 run.
-- The workflow design points to the canonical manifest, removes the reserved
-  Receipt-walking text, and older unrelated handoffs remain below this section.
-- No source-provider polymorphism, adapter/global effect enforcement, workflow
-  data, route rules, schemas, or successor/executor integration was changed.
+Issue #38 does exactly two things:
 
-### Final gate record
+1. Generate non-user-selectable planner, worker, and verifier Attempt profiles
+   whose effective permissions are the intersection of the versioned role
+   ceiling, admitted Workflow Definition, Preset, Bootstrap Planner Envelope or
+   Packet, Packet capabilities, and Packet skill identities.
+2. Let only an eligible worker submit one closed `request_route` proposal that
+   the Kernel validates and publishes as a durable `replan_requested` Artifact
+   plus Runtime Observation, ending that Attempt without granting authority.
 
-- `npm run test:m4-workflow-routes`: 33/33 passed, 145.610916 ms. One
-  removal-only fixture correction restored the Packet artifact identity needed
-  for public route eligibility; no test was added.
-- `npm run test:protocol`: 6/6 passed, 174.121542 ms.
-- `npm run test:m0`: 16/16 passed.
-- `npm run test:m1`: 16/16 passed, 65335.911708 ms. The first run exposed a
-  removed legacy Packet lookup; restoring that existing lookup was the only
-  production correction, then M1 was rerun once.
-- `npm run test:m2`: 34/34 passed, 244084.442459 ms.
-- `npm run test:m3`: 4/4 passed, 12648.927916 ms.
-- `npm run test:m4-capabilities`: 1/1 passed, 5272.506208 ms.
-- `node --check scripts/local-change.mjs`: passed. `git diff --check`: passed.
-- Final counts: 33 focused tests, 5067 production lines, and 1143 focused-test
-  lines. Tracked diffstat: 9 files changed, 1012 insertions, 28 deletions.
-  Untracked Issue #37 files remain visible in `git status`; no commit or push.
+Do not add #36 launcher, command, primary operator, shared run/status/resume/
+cancel surface, or collision preflight. Do not add #39 real request-to-outcome
+exit coverage. Do not dispatch a successor Task/session, revise a graph, widen
+capabilities, publish Result/Promotion/Receipt, or implement M5/M6 behavior.
+
+### Design
+
+#### Attempt-profile module
+
+- Use one small Kernel-owned interface that accepts an already admitted
+  execution contract and returns the exact generated OpenCode agent profile
+  plus its configuration digest. Keep role bases as versioned product data in
+  `workflow-agents/{planner,worker,verifier}@1.json`; do not expose them in the
+  operator TUI or invent a profile registry.
+- The implementation computes an intersection, never a union. Planner exposes
+  no tools or skills. A worker gets `read` only for `repository_read`, adds
+  `edit` and `write` only for `local_write`, receives only Packet-admitted
+  Attempt skills, and gets `request_route` only when its admitted Workflow
+  Definition permits replanning. A verifier gets only `read` for
+  `repository_read`.
+- Shell, OpenCode Task, webfetch, MCP, plugins, undeclared skills,
+  `command_execute`, `local_commit`, and external mutation remain unavailable
+  to every model-facing profile. A requested permission outside the
+  intersection is a typed setup failure, not a prompt or fallback.
+- Tests and the runtime adapter cross the same profile-compiler seam. The
+  focused test loads each generated profile through the adapter and queries its
+  resolved agent and tool schemas; do not test private permission helpers or
+  invoke a provider model.
+
+#### Replan-publication module
+
+- The model-facing input remains exactly `{ recommended_workflow_definition,
+  reason, evidence_refs, required_capability }`. A thin `request_route` adapter
+  forwards that input and runtime call context to one exported Kernel entry
+  point; it does not accept Run, Task, Attempt, Packet, session, configuration,
+  state-version, or idempotency fields from the model.
+- The Kernel loads the active Runtime Binding and admitted Packet, derives all
+  source identities, verifies worker ownership/current state, rejects work
+  already within current authority, checks the recommended Workflow Definition
+  against the Issue #37 route/workflow contracts, and derives a deterministic
+  idempotency key from binding, canonical input, and state version.
+- Reuse the existing immutable Artifact, Runtime Observation, transition, and
+  `run.json` replacement machinery. Add only the smallest prepared-record
+  helper needed for this acyclic order:
+
+  ```text
+  validate active binding and closed input
+    -> prepare worker-authored replan_requested without runtime_ref
+    -> prepare runtime-authored observation referencing that request
+    -> publish both references in one replan_requested Run transition
+    -> mark the source binding non-active and return staged success
+  ```
+
+- The `run.json` compare-and-swap is the sole authority commit point. Files
+  prepared before it are non-authoritative. A staged result is returned only
+  after that transition; a rejection returns `no_mutation: true`.
+- Runtime Observation adds only the closed `tool_invocations` record required
+  by #34. Repeating the same call returns the same admitted reference. Recovery
+  at either named preparation boundary publishes the same pair once or removes
+  an unadmitted pair; it never creates a successor or a second mutable state
+  machine.
+
+### TDD implementation plan
+
+Implement one vertical slice at the public Kernel/profile seams. Record RED
+before GREEN for each step; do not add replacement tests beyond these distinct
+acceptance behaviors.
+
+1. **Protocol RED/GREEN** — extend the closed schema with
+   `replan_requested`, its sole worker-envelope `runtime_ref` exception, and
+   Runtime Observation `tool_invocations`. Keep one complete valid instance and
+   one table-driven rejection test covering the named missing/spoofed/wrong-role
+   fields.
+2. **Profile RED/GREEN** — add the three versioned base files and one
+   table-driven runtime-adapter test for planner, read-only worker, writing
+   worker, replan-eligible worker, and verifier. Load each generated profile
+   and query its resolved agent/tool schemas, exact effective tool/skill set,
+   and configuration digest without invoking a provider model; do not add
+   per-permission unit tests.
+3. **Publication RED/GREEN** — through one exported Kernel call, stage a valid
+   worker proposal and assert the Replan Request, Runtime Observation,
+   transition references, ended binding, deterministic repeat result, and
+   absence of Task/session/graph/capability/Result/Promotion/Receipt changes.
+4. **Rejection RED/GREEN** — use one public-Kernel table test for malformed,
+   stale, within-authority, incompatible-workflow, and state-conflict inputs.
+   The stale rows vary each active-binding source for Run, Task, Attempt,
+   Packet, session, configuration, and state version; caller-supplied
+   provenance/idempotency fields reject as malformed, while the repeated-call
+   row proves Kernel-derived idempotency. Compare the authoritative tree
+   before/after and require the closed rejection union; do not split each row
+   into separate fixture suites.
+5. **Recovery RED/GREEN** — one table test covers the two required preparation
+   crash hooks and resume. Assert the existing reconciliation contract either
+   publishes the same prepared pair once or discards the unadmitted records,
+   with no duplicate files or transition.
+6. **Exit once** — run the new focused #38 test, `test:protocol`, then the
+   unchanged M0, M1, M2, and M3 gates once each. Run `node --check` and
+   `git diff --check`. Do not embed real-provider suites inside the focused
+   test, rerun a passing slow gate, or rerun the unchanged #35 capability probe
+   merely to accumulate evidence.
+
+Expected implementation paths are limited to:
+
+- `workflow-agents/{planner,worker,verifier}@1.json`
+- the smallest `request_route` tool adapter/wiring required by the proven
+  OpenCode tool shape, without any other launcher or command assets
+- `docs/design/schemas/protocol-v1.schema.json`
+- `scripts/local-change.mjs`
+- `test/protocol-schema.test.mjs`
+- one new focused `test/m4-attempt-profiles-replan.test.mjs`
+- `package.json`
+- `HANDOFF.md`
+
+No dependency addition is expected. If the production tool adapter cannot be
+wired without implementing #36's shared operator/package surface, stop at the
+Kernel entry point and record that exact dependency instead of building #36
+inside #38.
+
+### Review and stop rules
+
+- After implementation and focused tests, any requested Sol review receives
+  only the Issue #38 objective and diff. A finding is repairable only when it
+  maps to a named #38 criterion and a reproduced failure on the changed public
+  seam. Reviewer suggestions are not automatic repair authority.
+- Do not add concurrency, cross-run matrices, arbitrary corruption/fuzz cases,
+  extra lifecycle gates, or defensive abstractions not required by the five
+  named rejection classes and two crash boundaries.
+- Stop Issue #38 when the exact profile matrix, durable request/observation
+  pair, no-authority proof, idempotent recovery, focused tests, and required
+  regression gates pass. Then #36 becomes the next ticket.
+
+### Issue #38 implementation seat update — 2026-08-11
+
+- The public Kernel seam exports `compileAttemptProfile` through
+  `OpenCodeAdapter.profileForAttempt` and `requestRoute`. Role bases live in
+  `workflow-agents/{planner,worker,verifier}@1.json`; the baseline no-contract
+  path retains the exact pre-#38 M1 configuration, while admitted contracts use
+  the generated profile seam.
+- Validation: focused Issue #38 6/6, protocol 8/8, M1 16/16, and M3 4/4 pass.
+  Full M2 passed 32/34 before two real-provider verifier responses were not
+  JSON; the same two cases passed 2/2 on a targeted current-branch run, and
+  also passed 2/2 on the unchanged main snapshot. This was treated as provider
+  response variance, not repair authority. M0 retained its unchanged deadline
+  probe incompatibility observed before this final repair. Syntax and
+  whitespace checks pass.
+- Sol medium Standards and Spec reviews both ended `ACCEPT`. Two initial
+  Standards proposals were withdrawn after checking the #36 dependency and
+  the required effective capability envelope; no further hardening was added.
+- Production worker `request_route` wiring remains a concrete #36 dependency:
+  the current M1 adapter has no shared Packet-bound custom-tool/package
+  surface, so #38 stops at the exported Kernel entry point and does not add
+  the #36 launcher/operator surface.
+- The installed agent-workflow toolkit exposed an admission inconsistency after
+  its integrated-fix singleton was consumed; it is tracked upstream as
+  `hjung3113/feedbackops-workflow#102` and was not worked around in product
+  code.
 
 ## Current handoff — 2026-08-09 M4 capability gate #35 accepted locally
 

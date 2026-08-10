@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "id": "planner@1",
+  "role": "planner",
+  "version": "1",
+  "selectable": false,
+  "mode": "primary",
+  "model": "opencode/big-pickle",
+  "tools": {
+    "read": false,
+    "edit": false,
+    "write": false,
+    "request_route": false,
+    "bash": false,
+    "task": false,
+    "webfetch": false,
+    "websearch": false,
+    "mcp": false,
+    "external_directory": false,
+    "question": false,
+    "glob": false,
+    "grep": false,
+    "list": false,
+    "lsp": false
+  },
+  "permission": { "*": "deny" },
+  "capabilities": [],
+  "skill_classes": []
+}

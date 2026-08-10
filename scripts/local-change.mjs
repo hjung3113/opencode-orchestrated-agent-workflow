@@ -82,6 +82,14 @@ const m4Roles = new Set(["planner", "worker", "verifier"]);
 const m4Capabilities = new Set([
   "repository_read", "local_write", "command_execute", "network", "local_commit", "external_mutation",
 ]);
+const m4PresetCapabilities = new Map([
+  ["local-change", ["repository_read", "local_write", "command_execute"]],
+  ["local-change@1", ["repository_read", "local_write", "command_execute"]],
+]);
+const attemptProfileTools = [
+  "read", "edit", "write", "request_route", "bash", "task", "webfetch", "websearch", "mcp",
+  "external_directory", "question", "glob", "grep", "list", "lsp",
+];
 const m4InputKinds = new Set(["human_request", "request", "packet", "result", "review", "finding"]);
 const m4RouteExpectations = [
   ["pre_intake", "route.pre-intake@1", ["intake@1"]],
@@ -124,7 +132,7 @@ function validateM4WorkflowDefinitions() {
     assertM4Object(definition, [
       "schema_version", "id", "version", "required_input_kinds", "required_roles", "allowed_presets",
       "required_capabilities", "forbidden_capabilities", "required_skill_classes", "required_skills",
-      "optional_skills", "terminal_outputs", "omitted_effects",
+      "optional_skills", "permits_replanning", "terminal_outputs", "omitted_effects",
     ], `workflow definition ${id}`);
     if (definition.schema_version !== "1.0" || definition.id !== id || definition.version !== "1") {
       invalidM4("workflow definitions", `${id} has an invalid identity`);
@@ -142,6 +150,9 @@ function validateM4WorkflowDefinitions() {
     assertM4StringArray(definition.optional_skills, `${id}.optional_skills`);
     if (definition.required_skills.some((skill) => definition.optional_skills.includes(skill))) {
       invalidM4("workflow definitions", `${id} repeats a required skill as optional`);
+    }
+    if (typeof definition.permits_replanning !== "boolean") {
+      invalidM4("workflow definitions", `${id}.permits_replanning must be boolean`);
     }
     assertM4StringArray(definition.terminal_outputs, `${id}.terminal_outputs`);
     assertM4StringArray(definition.omitted_effects, `${id}.omitted_effects`);
@@ -245,6 +256,116 @@ function validateM4Configuration() {
 }
 
 validateM4Configuration();
+
+function attemptProfileBase(role) {
+  const profile = JSON.parse(readFileSync(
+    new URL(`../workflow-agents/${role}@1.json`, import.meta.url),
+  ));
+  if (profile.role !== role || profile.id !== `${role}@1` || profile.selectable !== false) {
+    throw new DependencyUnavailable(`invalid ${role}@1 Attempt profile`);
+  }
+  return profile;
+}
+
+function contractWorkflow(contract) {
+  const value = contract.workflow_definition;
+  const id = typeof value === "object" ? value?.id : String(value ?? "").split("@")[0];
+  const version = typeof value === "object" ? value?.version : String(value ?? "").split("@")[1];
+  const definition = m4WorkflowDefinitions.get(id);
+  if (!id || !definition) throw new DependencyUnavailable("Attempt profile workflow definition");
+  if (version !== "1") throw new DependencyUnavailable("Attempt profile workflow definition version");
+  if (!m4Roles.has(contract.role) || !definition.required_roles.includes(contract.role)) {
+    throw new DependencyUnavailable("Attempt profile role/workflow mismatch");
+  }
+  return { id, definition };
+}
+
+function admittedCapabilities(contract, role, definition, packet, envelope) {
+  const presetValue = typeof contract.preset === "object" ? contract.preset?.id : contract.preset;
+  const preset = presetValue
+    ? (typeof contract.preset === "object" ? contract.preset.capabilities : m4PresetCapabilities.get(presetValue))
+    : [];
+  const roleCapabilities = attemptProfileBase(role).capabilities;
+  const workflowCapabilities = [...m4Capabilities].filter((capability) =>
+    !definition.forbidden_capabilities?.includes(capability));
+  const envelopeCapabilities = envelope?.capabilities;
+  const packetCapabilities = packet?.capabilities ?? (role === "planner" ? envelopeCapabilities : null);
+  if (![preset, roleCapabilities, workflowCapabilities, envelopeCapabilities, packetCapabilities]
+    .every((value) => Array.isArray(value))) {
+    throw new DependencyUnavailable("Attempt profile capability envelope");
+  }
+  const sources = [roleCapabilities, workflowCapabilities, preset, envelopeCapabilities, packetCapabilities]
+    .map((values) => new Set(values));
+  return [...m4Capabilities].filter((capability) => sources.every((source) => source.has(capability)));
+}
+
+function packetSkillIdentity(skill, allowedSkills) {
+  const identity = typeof skill === "string"
+    ? skill
+    : `${skill?.id ?? ""}@${skill?.version ?? ""}`;
+  const [id, version] = identity.split("@");
+  const manifest = M4_SKILL_MANIFEST.entries.find((entry) => entry.id === id && entry.version === version);
+  if (!manifest) throw new DependencyUnavailable(`Attempt profile skill ${identity}`);
+  if (!allowedSkills.has(id)) throw new DependencyUnavailable(`undeclared Attempt profile skill ${identity}`);
+  if (typeof skill === "object" && skill.source && (
+    skill.source !== M4_SKILL_MANIFEST.repository
+    || skill.source_revision !== M4_SKILL_MANIFEST.revision
+    || (skill.source_path && skill.source_path !== manifest.source_path)
+    || skill.digest !== manifest.digest
+  )) {
+    throw new DependencyUnavailable(`Attempt profile skill provenance ${identity}`);
+  }
+  return manifest.classification === "attempt_skill" ? `${id}@${version}` : null;
+}
+
+function workflowPermitsReplanning(definition) {
+  return definition.permits_replanning === true;
+}
+
+export function compileAttemptProfile(contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
+    throw new DependencyUnavailable("Attempt profile contract");
+  }
+  const role = contract.role;
+  const base = attemptProfileBase(role);
+  const { id: workflowId, definition } = contractWorkflow(contract);
+  const packet = contract.packet ?? (role === "planner" ? null : contract);
+  const envelope = contract.bootstrap_envelope ?? contract.envelope;
+  const capabilities = admittedCapabilities(contract, role, definition, packet, envelope);
+  const allowedSkills = new Set([...definition.required_skills, ...definition.optional_skills]);
+  const attemptSkills = (packet?.skills ?? []).map((skill) => packetSkillIdentity(skill, allowedSkills)).filter(Boolean);
+  const tools = Object.fromEntries(attemptProfileTools.map((tool) => [tool, base.tools?.[tool] === true]));
+  if (!capabilities.includes("repository_read")) tools.read = false;
+  if (!capabilities.includes("local_write")) {
+    tools.edit = false;
+    tools.write = false;
+  }
+  tools.request_route = tools.request_route
+    && role === "worker"
+    && workflowPermitsReplanning(definition);
+  const permission = Object.fromEntries([
+    ["*", "deny"],
+    ...attemptProfileTools.map((name) => [name, tools[name] === true ? base.permission?.[name] ?? "allow" : "deny"]),
+  ]);
+  const agent = {
+    mode: base.mode,
+    model: base.model,
+    tools,
+    permission,
+  };
+  const profile = {
+    schema_version: "1.0",
+    id: `${role}@1`,
+    role,
+    selectable: false,
+    workflow_definition: `${workflowId}@1`,
+    capabilities,
+    skills: attemptSkills,
+    agent,
+  };
+  profile.configuration_digest = digest(profile);
+  return profile;
+}
 
 function sourceKey(entry) {
   return `${entry.source ?? entry.repository}@${entry.source_revision ?? entry.revision}:${entry.source_path ?? entry.path}`;
@@ -1095,6 +1216,70 @@ function clearPreparedExecution(ctx, attemptId) {
   if (existsSync(path)) unlinkSync(path);
 }
 
+function preparedReplanPath(ctx, attemptId) {
+  return join(ctx.runDir, "staging", "recovery", `replan-${attemptId}.json`);
+}
+
+function clearPreparedReplan(ctx, attemptId) {
+  const path = preparedReplanPath(ctx, attemptId);
+  if (existsSync(path)) unlinkSync(path);
+}
+
+function preparedReplanTransition(state, requestId) {
+  return state.transitions.find(({ event_kind, record_refs }) =>
+    event_kind === "replan_requested" && record_refs?.[0]?.artifact_id === requestId);
+}
+
+function discardPreparedReplan(ctx, state, prepared, recoveryPath) {
+  for (const path of [prepared.request_path, prepared.observation_path]) {
+    if (typeof path !== "string" || !path.startsWith("artifacts/") || path.includes("..")) continue;
+    const retained = state.transitions.some(({ record_refs }) =>
+      (record_refs ?? []).some((ref) => ref.path === path));
+    if (!retained && existsSync(safeArtifactPath(ctx.runDir, path))) {
+      unlinkSync(safeArtifactPath(ctx.runDir, path));
+    }
+  }
+  if (existsSync(recoveryPath)) unlinkSync(recoveryPath);
+}
+
+function reconcilePreparedReplan(ctx, state) {
+  const recoveryDir = join(ctx.runDir, "staging", "recovery");
+  if (!existsSync(recoveryDir)) return { state, eventKind: null };
+  const paths = readdirSync(recoveryDir)
+    .filter((file) => file.startsWith("replan-") && file.endsWith(".json"))
+    .sort();
+  for (const path of paths) {
+    const recoveryPath = join(recoveryDir, path);
+    const prepared = JSON.parse(readFileSync(recoveryPath, "utf8"));
+    const requestId = prepared.request?.artifact_id;
+    const existingTransition = preparedReplanTransition(state, requestId);
+    if (existingTransition) {
+      discardPreparedReplan(ctx, state, prepared, recoveryPath);
+      continue;
+    }
+    const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === prepared.attempt_id);
+    if (!binding || binding.binding_state !== "active") {
+      discardPreparedReplan(ctx, state, prepared, recoveryPath);
+      continue;
+    }
+    if (!prepared.request || !prepared.observation || !prepared.attempt_id
+      || prepared.request.kind !== "replan_requested"
+      || prepared.observation.kind !== "runtime_observation") {
+      discardPreparedReplan(ctx, state, prepared, recoveryPath);
+      continue;
+    }
+    const requestRef = writeArtifact(ctx, prepared.request_path, prepared.request);
+    const observationRef = writeArtifact(ctx, prepared.observation_path, prepared.observation);
+    const next = applyTransition(ctx, state, "replan_requested", {
+      runtime_bindings: state.runtime_bindings.map((current) => current.attempt_id === binding.attempt_id
+        ? { ...current, binding_state: "idle" } : current),
+    }, [requestRef, observationRef]);
+    clearPreparedReplan(ctx, prepared.attempt_id);
+    return { state: next, eventKind: "replan_requested" };
+  }
+  return { state, eventKind: null };
+}
+
 function writeRunState(ctx, state) {
   validateProtocol(state, "run state");
   resolveArtifactReferences(ctx, state);
@@ -1146,6 +1331,307 @@ function applyTransition(ctx, state, eventKind, patch, recordRefs = []) {
   writeRunState(ctx, next);
   crashAt(ctx, `after_run_state_replacement:${eventKind}`);
   return next;
+}
+
+const replanInputKeys = [
+  "recommended_workflow_definition",
+  "reason",
+  "evidence_refs",
+  "required_capability",
+];
+
+function routeRejection(reasonCode) {
+  return { status: "rejected", reason_code: reasonCode, no_mutation: true };
+}
+
+function validateReplanInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || canonicalJson(Object.keys(input).sort()) !== canonicalJson([...replanInputKeys].sort())
+    || typeof input.recommended_workflow_definition !== "string"
+    || !/^[a-z][a-z0-9-]*(?:@1)?$/.test(input.recommended_workflow_definition)
+    || typeof input.reason !== "string" || input.reason.trim().length === 0
+    || !Array.isArray(input.evidence_refs) || input.evidence_refs.length === 0
+    || input.evidence_refs.some((ref) => !isArtifactReference(ref) || !referenceValidator(ref))
+    || !m4Capabilities.has(input.required_capability)) {
+    return false;
+  }
+  return true;
+}
+
+function replanIdentity(input) {
+  const identity = workflowIdentity(input.recommended_workflow_definition);
+  return {
+    id: identity.id,
+    version: identity.version ?? "1",
+    value: `${identity.id}@${identity.version ?? "1"}`,
+  };
+}
+
+function replanReferenceKey(ref) {
+  return ref?.reference_kind === "artifact"
+    ? `${ref.path}:${ref.digest}` : canonicalJson(ref);
+}
+
+function uniqueReferences(refs) {
+  return [...new Map(refs.map((ref) => [replanReferenceKey(ref), ref])).values()];
+}
+
+function replanTaskPacket(ctx, state, binding) {
+  const graph = state.active_graph_ref ? resolveArtifactReference(ctx, state.active_graph_ref) : null;
+  const node = graph?.nodes?.find(({ task_id }) => task_id === binding.task_id);
+  if (!node?.packet_ref) return null;
+  return {
+    graph,
+    packetRef: node.packet_ref,
+    packet: resolveArtifactReference(ctx, node.packet_ref),
+  };
+}
+
+function admittedStateReferences(state, packetRef) {
+  return [
+    state.bootstrap_ref,
+    state.request_ref,
+    state.active_graph_ref,
+    packetRef,
+    ...(state.decision_refs ?? []),
+    ...Object.values(state.tasks ?? {}).map(({ artifact_ref }) => artifact_ref),
+    ...state.transitions.flatMap(({ record_refs }) => record_refs ?? []),
+  ].filter(Boolean);
+}
+
+function sourceBindingContext(ctx, state, context) {
+  const binding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === context.attempt_id);
+  if (!binding || binding.role !== "worker" || !binding.task_id) return { reasonCode: "stale" };
+  const taskPacket = replanTaskPacket(ctx, state, binding);
+  if (!taskPacket || taskPacket.packet.role !== "worker") return { reasonCode: "stale" };
+  const comparisons = [
+    ["run_id", state.run_id],
+    ["task_id", binding.task_id],
+    ["attempt_id", binding.attempt_id],
+    ["attempt", binding.attempt],
+    ["packet_ref", taskPacket.packetRef],
+    ["session_id", binding.session_id],
+    ["agent_identity", binding.agent_identity],
+    ["configuration_digest", binding.configuration_digest],
+  ];
+  for (const [key, expected] of comparisons) {
+    if (Object.hasOwn(context, key) && canonicalJson(context[key]) !== canonicalJson(expected)) {
+      return { reasonCode: "stale" };
+    }
+  }
+  if (Object.hasOwn(context, "state_version") && context.state_version !== state.state_version) {
+    return { reasonCode: "state_conflict", binding, ...taskPacket };
+  }
+  if (state.lifecycle_state !== "active" || state.admission_state !== "admitted"
+    || binding.binding_state !== "active") {
+    return { reasonCode: "stale", binding, ...taskPacket };
+  }
+  return { binding, ...taskPacket };
+}
+
+function replanRouteInput(ctx, state, binding, packetRef, packet) {
+  const request = state.request_ref ? resolveArtifactReference(ctx, state.request_ref) : null;
+  const reviewEntry = Object.values(state.tasks ?? {})
+    .map(({ artifact_ref }) => artifact_ref)
+    .filter(Boolean)
+    .map((ref) => ({ ref, artifact: resolveArtifactReference(ctx, ref) }))
+    .find(({ artifact }) => artifact.kind === "review" && artifact.verdict === "finding");
+  const review = reviewEntry ? { artifact: reviewEntry.artifact, reference: reviewEntry.ref } : undefined;
+  const findingId = review?.artifact.findings?.length === 1
+    ? review.artifact.findings[0].finding_id : undefined;
+  return {
+    state,
+    ...(request ? { request: { artifact: request, reference: state.request_ref } } : {}),
+    packet: { artifact: packet, reference: packetRef },
+    ...(review ? { review } : {}),
+    ...(findingId ? { finding_id: findingId } : {}),
+    constraints: {
+      role: binding.role,
+      preset: "local-change@1",
+      capabilities: packet.capabilities,
+      skills: packet.skills,
+    },
+    replan_request: {
+      artifact: {
+        kind: "replan_requested",
+        compatible_workflow_definitions: [],
+      },
+      reference: null,
+    },
+  };
+}
+
+function replanProvenance(binding, packetRef, state, proposal) {
+  return {
+    run_id: state.run_id,
+    task_id: binding.task_id,
+    attempt_id: binding.attempt_id,
+    attempt: binding.attempt,
+    packet_ref: packetRef,
+    session_id: binding.session_id,
+    agent_identity: binding.agent_identity,
+    configuration_digest: binding.configuration_digest,
+    state_version: state.state_version,
+    proposal,
+  };
+}
+
+function admittedReplanResult(ctx, state, binding, proposal) {
+  const transition = state.transitions
+    .filter(({ event_kind }) => event_kind === "replan_requested")
+    .find(({ record_refs }) => {
+      const requestRef = record_refs?.[0];
+      if (!isArtifactReference(requestRef)) return false;
+      const request = resolveArtifactReference(ctx, requestRef);
+      return request.kind === "replan_requested"
+        && request.attempt_id === binding.attempt_id
+        && canonicalJson({
+          recommended_workflow_definition: request.recommended_workflow_definition,
+          reason: request.reason,
+          evidence_refs: request.evidence_refs,
+          required_capability: request.required_capability,
+        }) === canonicalJson(proposal);
+    });
+  if (!transition || transition.record_refs.length !== 2) return null;
+  return {
+    status: "accepted",
+    no_mutation: false,
+    replan_request_ref: transition.record_refs[0],
+    runtime_observation_ref: transition.record_refs[1],
+  };
+}
+
+export function requestRoute(context, proposal) {
+  if (!validateReplanInput(proposal)) return routeRejection("malformed");
+  if (!context || typeof context !== "object" || !context.runDir || !context.attempt_id) {
+    return routeRejection("stale");
+  }
+  const ctx = {
+    runDir: context.runDir,
+    runId: context.run_id,
+    admittedRefs: [],
+    hooks: context.hooks,
+  };
+  const state = JSON.parse(readFileSync(join(ctx.runDir, "run.json"), "utf8"));
+  validateProtocol(state, "run state");
+  resolveArtifactReferences(ctx, state);
+  const bindingContext = sourceBindingContext(ctx, state, context);
+  if (bindingContext.reasonCode) {
+    const repeated = bindingContext.binding
+      ? admittedReplanResult(ctx, state, bindingContext.binding, proposal) : null;
+    if (repeated) return repeated;
+    return routeRejection(bindingContext.reasonCode);
+  }
+  const { binding, packetRef, packet } = bindingContext;
+  const repeated = admittedReplanResult(ctx, state, binding, proposal);
+  if (repeated) return repeated;
+  if (state.state_version !== context.state_version) return routeRejection("state_conflict");
+  const sourceWorkflow = workflowRecord(packet.workflow_definition);
+  if (sourceWorkflow?.permits_replanning !== true) return routeRejection("incompatible_workflow");
+  const identity = replanIdentity(proposal);
+  const currentWorkflow = workflowIdentity(packet.workflow_definition);
+  if (identity.id === currentWorkflow.id
+    && identity.version === (currentWorkflow.version ?? "1")
+    && packet.capabilities.includes(proposal.required_capability)) {
+    return routeRejection("within_authority");
+  }
+  const evidenceRefs = uniqueReferences(proposal.evidence_refs);
+  const stateRefs = admittedStateReferences(state, packetRef);
+  if (evidenceRefs.some((evidenceRef) => !stateRefs.some((stateRef) => sameArtifactReference(stateRef, evidenceRef)))) {
+    return routeRejection("stale");
+  }
+  const routeInput = replanRouteInput(ctx, state, binding, packetRef, packet);
+  let route;
+  try {
+    route = selectWorkflowRoute(routeInput);
+  } catch {
+    return routeRejection("incompatible_workflow");
+  }
+  const compatible = route.eligible_workflow_definitions.map(({ id, version }) => `${id}@${version}`);
+  if (!m4WorkflowDefinitions.has(identity.id)
+    || !compatible.includes(identity.value)
+    || !workflowRecord(identity.value)
+    || !hasWorkflowConstraint(workflowRecord(identity.value), routeInput.constraints)) {
+    return routeRejection("incompatible_workflow");
+  }
+  const idempotencyKey = digest(replanProvenance(binding, packetRef, state, proposal));
+  const requestId = `replan-${idempotencyKey.slice("sha256:".length)}`;
+  const observationId = `runtime-replan-${idempotencyKey.slice("sha256:".length)}`;
+  const request = envelope({
+    kind: "replan_requested",
+    artifactId: requestId,
+    runId: state.run_id,
+    producer: workerProducer(binding.agent_identity),
+    inputRefs: uniqueReferences([packetRef, ...evidenceRefs]),
+    createdAt: now(),
+    task_id: binding.task_id,
+    attempt_id: binding.attempt_id,
+    attempt: binding.attempt,
+    ...proposal,
+    compatible_workflow_definitions: compatible,
+    source_packet_ref: packetRef,
+    session_id: binding.session_id,
+    agent_identity: binding.agent_identity,
+    configuration_digest: binding.configuration_digest,
+    state_version: state.state_version,
+    idempotency_key: idempotencyKey,
+  });
+  const observation = envelope({
+    kind: "runtime_observation",
+    artifactId: observationId,
+    runId: state.run_id,
+    producer: runtimeProducer(),
+    inputRefs: [reference(request.artifact_id, `artifacts/replans/${request.artifact_id}.json`, request)],
+    createdAt: now(),
+    task_id: binding.task_id,
+    attempt: binding.attempt,
+    attempt_id: binding.attempt_id,
+    role: binding.role,
+    opencode_version: "request_route@1",
+    configuration_digest: binding.configuration_digest,
+    server_id: "request-route",
+    session_id: binding.session_id,
+    agent_identity: binding.agent_identity,
+    message_ids: [],
+    agent: binding.agent,
+    model: binding.model ?? "",
+    runtime_permission_events: [],
+    command_executions: [],
+    observed_changes: [],
+    observed_output_snapshot: state.workspace_baseline.snapshot_digest,
+    external_reads: [],
+    tool_invocations: [{
+      tool_id: "request_route",
+      call_id: `call-${idempotencyKey.slice("sha256:".length)}`,
+      input: proposal,
+      outcome: "accepted",
+    }],
+    exit_reason: "idle",
+  });
+  const preparedPath = preparedReplanPath(ctx, binding.attempt_id);
+  writeJson(preparedPath, {
+    attempt_id: binding.attempt_id,
+    state_version: state.state_version,
+    request_path: `artifacts/replans/${request.artifact_id}.json`,
+    observation_path: `artifacts/runtime/${observation.artifact_id}.json`,
+    request,
+    observation,
+  });
+  const requestRef = writeArtifact(ctx, `artifacts/replans/${request.artifact_id}.json`, request);
+  crashAt(ctx, "after_replan_request_preparation");
+  const observationRef = writeArtifact(ctx, `artifacts/runtime/${observation.artifact_id}.json`, observation);
+  crashAt(ctx, "after_replan_observation_preparation");
+  applyTransition(ctx, state, "replan_requested", {
+    runtime_bindings: state.runtime_bindings.map((current) => current.attempt_id === binding.attempt_id
+      ? { ...current, binding_state: "idle" } : current),
+  }, [requestRef, observationRef]);
+  if (existsSync(preparedPath)) unlinkSync(preparedPath);
+  return {
+    status: "accepted",
+    no_mutation: false,
+    replan_request_ref: requestRef,
+    runtime_observation_ref: observationRef,
+  };
 }
 
 function envelope({ kind, artifactId, runId, producer, inputRefs = [], createdAt, ...rest }) {
@@ -1228,18 +1714,20 @@ function subscribeEvents({ port }) {
 }
 
 export class OpenCodeAdapter {
-  constructor({ workspace, runDir, baselineSnapshot, targetFile, attemptDeadlineSeconds = m1AttemptDeadlineSeconds }) {
+  constructor({ workspace, runDir, baselineSnapshot, targetFile, attemptDeadlineSeconds = m1AttemptDeadlineSeconds, attemptContracts = null }) {
     this.workspace = workspace;
     this.runDir = runDir;
     this.baselineSnapshot = baselineSnapshot;
     this.targetFile = targetFile;
     this.attemptDeadlineSeconds = attemptDeadlineSeconds;
+    this.attemptContracts = attemptContracts;
     this.server = null;
     this.serverExit = null;
     this.port = null;
     this.version = null;
     this.configurationDigest = null;
     this.agents = [];
+    this.resolvedAttemptAgents = {};
     this.environment = {
       ...process.env,
       XDG_CACHE_HOME: join(runDir, "runtime/cache"),
@@ -1253,41 +1741,75 @@ export class OpenCodeAdapter {
     };
   }
 
-  async start() {
-    const plannerPermission = { "*": "deny" };
-    const verifierPermission = { read: "allow", "*": "deny" };
-    const workerPermission = {
-      read: "allow", edit: "allow", write: "allow", bash: "deny", task: "deny",
-      webfetch: "deny", question: "deny",
+  profileForAttempt(contract) {
+    return compileAttemptProfile(contract);
+  }
+
+  resolvedAgentForAttempt(contract) {
+    const profile = this.profileForAttempt(contract);
+    return {
+      name: `m1-${profile.role}`,
+      ...profile.agent,
+      selectable: profile.selectable,
+      capabilities: profile.capabilities,
+      skills: profile.skills,
+      configuration_digest: profile.configuration_digest,
     };
-    const plannerTools = {
-      read: false, grep: false, glob: false, bash: false, edit: false, write: false,
-      task: false, webfetch: false,
-    };
-    const verifierTools = {
-      read: true, grep: false, glob: false, bash: false, edit: false, write: false,
-      task: false, webfetch: false,
-    };
-    const workerTools = {
-      read: true, grep: false, glob: false, bash: false, edit: true, write: true,
-      task: false, webfetch: false,
-    };
-    const agent = (role, permission) => ({
-      mode: "primary",
-      model: "opencode/big-pickle",
-      tools: role === "worker" ? workerTools : role === "verifier" ? verifierTools : plannerTools,
+  }
+
+  async start({ attemptContracts = this.attemptContracts } = {}) {
+    const roles = ["planner", "worker", "verifier"];
+    const resolved = Object.fromEntries(roles.map((role) => {
+      const contract = attemptContracts?.[role];
+      if (!contract) {
+        const plannerPermission = { "*": "deny" };
+        const verifierPermission = { read: "allow", "*": "deny" };
+        const workerPermission = {
+          read: "allow", edit: "allow", write: "allow", bash: "deny", task: "deny",
+          webfetch: "deny", question: "deny",
+        };
+        const plannerTools = {
+          read: false, grep: false, glob: false, bash: false, edit: false, write: false,
+          task: false, webfetch: false,
+        };
+        const verifierTools = {
+          read: true, grep: false, glob: false, bash: false, edit: false, write: false,
+          task: false, webfetch: false,
+        };
+        const workerTools = {
+          read: true, grep: false, glob: false, bash: false, edit: true, write: true,
+          task: false, webfetch: false,
+        };
+        return [role, {
+          mode: "primary",
+          model: "opencode/big-pickle",
+          tools: role === "worker" ? workerTools : role === "verifier" ? verifierTools : plannerTools,
+          permission: role === "worker" ? workerPermission : role === "verifier" ? verifierPermission : plannerPermission,
+        }];
+      }
+      const agent = this.resolvedAgentForAttempt(contract);
+      if (agent.tools.request_route) {
+        throw new DependencyUnavailable("Issue #36 Packet-bound request_route adapter");
+      }
+      return [role, agent];
+    }));
+    this.resolvedAttemptAgents = resolved;
+    const agent = (role) => ({
+      mode: resolved[role].mode,
+      model: resolved[role].model,
+      tools: resolved[role].tools,
+      permission: resolved[role].permission,
       prompt: role === "worker"
         ? "You are a bounded implementation worker. Use only read and edit/write tools. Never use shell, network, task delegation, or external paths."
         : role === "verifier"
           ? "You are a bounded independent verifier. Use only the explicitly named read target; never edit, write, shell, network, or delegate. Return the exact JSON shape requested by the prompt and no Markdown."
           : `You are a bounded ${role}. Use no tools except repository read when explicitly requested. Return the exact JSON shape requested by the prompt and no Markdown.`,
-      permission,
     });
     writeJson(join(this.environment.OPENCODE_CONFIG_DIR, "opencode.json"), {
       agent: {
-        "m1-planner": agent("planner", plannerPermission),
-        "m1-worker": agent("worker", workerPermission),
-        "m1-verifier": agent("verifier", verifierPermission),
+        "m1-planner": agent("planner"),
+        "m1-worker": agent("worker"),
+        "m1-verifier": agent("verifier"),
       },
     });
     this.version = execFileSync("opencode", ["--version"], {
@@ -1340,9 +1862,15 @@ export class OpenCodeAdapter {
       throw new Error("OpenCode server health did not match its CLI version");
     }
     this.agents = (await this.api("/agent", { timeout: 5_000 })).body;
-    for (const role of ["planner", "worker", "verifier"]) {
-      if (!this.agents.find(({ name }) => name === `m1-${role}`)) {
+    for (const role of roles) {
+      const actual = this.agents.find(({ name }) => name === `m1-${role}`);
+      if (!actual) {
         throw new Error(`OpenCode did not resolve m1-${role}`);
+      }
+      for (const [tool, enabled] of Object.entries(resolved[role].tools)) {
+        if (actual.tools && actual.tools[tool] !== enabled) {
+          throw new Error(`OpenCode resolved m1-${role} with an unexpected ${tool} surface`);
+        }
       }
     }
     return health;
@@ -3287,6 +3815,18 @@ export async function resumeRun(runDir, { workspace, decision, decisionDispositi
   }
   const reconciliationCtx = { runDir, runId: state.run_id, admittedRefs: [], hooks };
   try {
+    const replanReconciliation = reconcilePreparedReplan(reconciliationCtx, state);
+    state = replanReconciliation.state;
+    if (replanReconciliation.eventKind) {
+      return {
+        ...inspectRun(runDir),
+        next_action: null,
+        checkpoint: replanReconciliation.eventKind,
+      };
+    }
+    if (state.transitions.some(({ event_kind }) => event_kind === "replan_requested")) {
+      return { ...inspectRun(runDir), next_action: null, checkpoint: "replan_requested" };
+    }
     const reconciliation = reconcilePreparedTaskArtifacts(reconciliationCtx, state);
     state = reconciliation.state;
     if (reconciliation.eventKind) {
