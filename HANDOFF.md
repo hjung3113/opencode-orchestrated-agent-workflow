@@ -4,15 +4,15 @@
 
 ### Live state and next ticket
 
-- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
-  `agent/m4-attempt-profiles-replan`, based on `7601ac0`.
+- Merged baseline: `origin/main` at `bbd7391` after PR #42.
 - PR #41 merged Issue #37 as `7601ac0`; Issue #37 is closed and its
   implementation commit `5d02833` is contained in `origin/main`.
 - Issue #38, **Enforce M4 Attempt profiles and stage no-authority Replan
-  Requests**, is implemented and independently accepted on this branch. The
-  remaining serialized M4 chain is `#36 -> #39`; start #36 only from merged
-  `main` after this branch lands.
-- Commit `b8d5cd5` is pushed in PR #42, which closes Issue #38 when merged.
+  Requests**, is merged and closed after independent acceptance. The remaining
+  serialized M4 chain is `#36 -> #39`; Issue #36 is now dependency-ready and
+  must start from `origin/main` at or after `bbd7391`.
+- Implementation commit `b8d5cd5` and handoff commit `ba3b717` landed through
+  PR #42; merge commit `bbd7391` closed Issue #38.
 - Preserve the unrelated local `AGENTS.md` and `opencode.json` changes; they are
   intentionally excluded from Issue #38 delivery.
 
