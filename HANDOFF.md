@@ -12,6 +12,7 @@
   Requests**, is implemented and independently accepted on this branch. The
   remaining serialized M4 chain is `#36 -> #39`; start #36 only from merged
   `main` after this branch lands.
+- Commit `b8d5cd5` is pushed in PR #42, which closes Issue #38 when merged.
 - Preserve the unrelated local `AGENTS.md` and `opencode.json` changes; they are
   intentionally excluded from Issue #38 delivery.
 
