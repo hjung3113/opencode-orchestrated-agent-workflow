@@ -25,6 +25,11 @@ import { createServer } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import * as implementationAdapter from "../skills/adapters/implement@1.mjs";
+import * as tddAdapter from "../skills/adapters/tdd@1.mjs";
+import * as advisoryAdapter from "../skills/adapters/ask-matt-advisory@1.mjs";
+import * as reviewAdapter from "../skills/adapters/code-review@1.mjs";
+import * as diagnosisAdapter from "../skills/adapters/diagnosing-bugs@1.mjs";
 
 const schema = JSON.parse(readFileSync(
   new URL("../docs/design/schemas/protocol-v1.schema.json", import.meta.url),
@@ -46,6 +51,593 @@ const budget = {
   max_repairs_per_finding: 1,
 };
 const m1AttemptDeadlineSeconds = 300;
+
+const m4WorkflowDefinitions = new Map([
+  ["intake", JSON.parse(readFileSync(new URL("../workflows/intake@1.json", import.meta.url)))],
+  ["implementation", JSON.parse(readFileSync(new URL("../workflows/implementation@1.json", import.meta.url)))],
+  ["verification", JSON.parse(readFileSync(new URL("../workflows/verification@1.json", import.meta.url)))],
+  ["repair", JSON.parse(readFileSync(new URL("../workflows/repair@1.json", import.meta.url)))],
+]);
+const m4RouteRules = JSON.parse(readFileSync(new URL("../route-rules/m4@1.json", import.meta.url)));
+export const M4_SKILL_MANIFEST = JSON.parse(readFileSync(new URL("../skills/manifest.v1.json", import.meta.url)));
+
+export class DependencyUnavailable extends Error {
+  constructor(message) {
+    super(`dependency_unavailable: ${message}`);
+    this.name = "DependencyUnavailable";
+    this.code = "dependency_unavailable";
+  }
+}
+
+const m4Adapters = new Map([
+  ["ask-matt-advisory", advisoryAdapter],
+  ["implement", implementationAdapter],
+  ["tdd", tddAdapter],
+  ["code-review", reviewAdapter],
+  ["diagnosing-bugs", diagnosisAdapter],
+]);
+const m4SkillClasses = new Set(["vocabulary", "workflow_recipe", "attempt_skill"]);
+const m4WorkflowIds = new Set(["intake", "implementation", "verification", "repair"]);
+const m4Roles = new Set(["planner", "worker", "verifier"]);
+const m4Capabilities = new Set([
+  "repository_read", "local_write", "command_execute", "network", "local_commit", "external_mutation",
+]);
+const m4InputKinds = new Set(["human_request", "request", "packet", "result", "review", "finding"]);
+const m4RouteExpectations = [
+  ["pre_intake", "route.pre-intake@1", ["intake@1"]],
+  ["material_decision_required", "route.material-decision-required@1", []],
+  ["finding_to_repair", "route.finding-to-repair@1", ["repair@1"]],
+  ["result_to_verification", "route.result-to-verification@1", ["verification@1"]],
+  ["replan_request", "route.replan-request@1", "compatible"],
+  ["ready_task", "route.ready-task@1", "ready_task"],
+  ["compatible_candidates", "route.compatible-candidates@1", "compatible"],
+];
+
+function invalidM4(label, detail) {
+  throw new Error(`invalid M4 ${label}: ${detail}`);
+}
+
+function assertM4Object(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalidM4(label, "must be an object");
+  const unknown = Object.keys(value).filter((key) => !keys.includes(key));
+  if (unknown.length > 0) invalidM4(label, `undeclared fields ${unknown.join(",")}`);
+}
+
+function assertM4String(value, label) {
+  if (typeof value !== "string" || value.length === 0) invalidM4(label, "must be a non-empty string");
+}
+
+function assertM4StringArray(value, label, allowed) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+    invalidM4(label, "must be a string array");
+  }
+  if (new Set(value).size !== value.length) invalidM4(label, "contains duplicates");
+  if (allowed && value.some((item) => !allowed.has(item))) invalidM4(label, "contains an undeclared value");
+}
+
+function validateM4WorkflowDefinitions() {
+  if (m4WorkflowDefinitions.size !== m4WorkflowIds.size
+    || [...m4WorkflowDefinitions.keys()].some((id) => !m4WorkflowIds.has(id))) {
+    invalidM4("workflow definitions", "the closed workflow set does not match");
+  }
+  for (const [id, definition] of m4WorkflowDefinitions) {
+    assertM4Object(definition, [
+      "schema_version", "id", "version", "required_input_kinds", "required_roles", "allowed_presets",
+      "required_capabilities", "forbidden_capabilities", "required_skill_classes", "required_skills",
+      "optional_skills", "terminal_outputs", "omitted_effects",
+    ], `workflow definition ${id}`);
+    if (definition.schema_version !== "1.0" || definition.id !== id || definition.version !== "1") {
+      invalidM4("workflow definitions", `${id} has an invalid identity`);
+    }
+    assertM4StringArray(definition.required_input_kinds, `${id}.required_input_kinds`, m4InputKinds);
+    assertM4StringArray(definition.required_roles, `${id}.required_roles`, m4Roles);
+    assertM4StringArray(definition.allowed_presets, `${id}.allowed_presets`);
+    assertM4StringArray(definition.required_capabilities, `${id}.required_capabilities`, m4Capabilities);
+    assertM4StringArray(definition.forbidden_capabilities, `${id}.forbidden_capabilities`, m4Capabilities);
+    if (definition.required_capabilities.some((capability) => definition.forbidden_capabilities.includes(capability))) {
+      invalidM4("workflow definitions", `${id} requires and forbids the same capability`);
+    }
+    assertM4StringArray(definition.required_skill_classes, `${id}.required_skill_classes`, m4SkillClasses);
+    assertM4StringArray(definition.required_skills, `${id}.required_skills`);
+    assertM4StringArray(definition.optional_skills, `${id}.optional_skills`);
+    if (definition.required_skills.some((skill) => definition.optional_skills.includes(skill))) {
+      invalidM4("workflow definitions", `${id} repeats a required skill as optional`);
+    }
+    assertM4StringArray(definition.terminal_outputs, `${id}.terminal_outputs`);
+    assertM4StringArray(definition.omitted_effects, `${id}.omitted_effects`);
+  }
+}
+
+function validateM4RouteRules() {
+  assertM4Object(m4RouteRules, ["schema_version", "id", "version", "rules"], "route rules");
+  if (m4RouteRules.schema_version !== "1.0" || m4RouteRules.id !== "m4" || m4RouteRules.version !== "1") {
+    invalidM4("route rules", "invalid identity");
+  }
+  if (!Array.isArray(m4RouteRules.rules) || m4RouteRules.rules.length !== m4RouteExpectations.length) {
+    invalidM4("route rules", "the closed rule set has an invalid size");
+  }
+  const seenIds = new Set();
+  const seenTriggers = new Set();
+  m4RouteRules.rules.forEach((rule, index) => {
+    assertM4Object(rule, ["id", "trigger", "eligible"], `route rule ${index + 1}`);
+    const expected = m4RouteExpectations[index];
+    if (rule.id !== expected[1] || rule.trigger !== expected[0]) {
+      invalidM4("route rules", `rule ${index + 1} is duplicate, conflicting, or out of order`);
+    }
+    if (seenIds.has(rule.id) || seenTriggers.has(rule.trigger)) {
+      invalidM4("route rules", `duplicate rule ${rule.id}`);
+    }
+    seenIds.add(rule.id);
+    seenTriggers.add(rule.trigger);
+    if (Array.isArray(rule.eligible)) {
+      assertM4StringArray(rule.eligible, `${rule.id}.eligible`);
+      rule.eligible.forEach((workflow) => {
+        const [workflowId, version] = workflow.split("@");
+        if (!m4WorkflowDefinitions.has(workflowId) || version !== "1") {
+          invalidM4("route rules", `${rule.id} names an undeclared Workflow Definition`);
+        }
+      });
+    } else if (rule.eligible !== "compatible" && rule.eligible !== "ready_task") {
+      invalidM4("route rules", `${rule.id}.eligible is malformed`);
+    }
+    if (JSON.stringify(rule.eligible) !== JSON.stringify(expected[2])) {
+      invalidM4("route rules", `${rule.id} conflicts with its declared trigger`);
+    }
+  });
+}
+
+function validateM4SkillManifest() {
+  assertM4Object(M4_SKILL_MANIFEST, ["schema_version", "repository", "revision", "entries"], "skill manifest");
+  if (M4_SKILL_MANIFEST.schema_version !== "1.0") invalidM4("skill manifest", "invalid schema version");
+  assertM4String(M4_SKILL_MANIFEST.repository, "skill manifest.repository");
+  assertM4String(M4_SKILL_MANIFEST.revision, "skill manifest.revision");
+  if (!Array.isArray(M4_SKILL_MANIFEST.entries) || M4_SKILL_MANIFEST.entries.length !== 5) {
+    invalidM4("skill manifest", "the closed entry set has an invalid size");
+  }
+  const seen = new Set();
+  const seenPaths = new Set();
+  for (const entry of M4_SKILL_MANIFEST.entries) {
+    assertM4Object(entry, ["id", "version", "source_path", "digest", "classification", "adapter_id", "adapter_version"], "skill manifest entry");
+    for (const field of ["id", "version", "source_path", "digest", "classification", "adapter_id", "adapter_version"]) {
+      assertM4String(entry[field], `skill manifest ${field}`);
+    }
+    const identity = `${entry.id}@${entry.version}`;
+    if (seen.has(identity) || seenPaths.has(entry.source_path)) invalidM4("skill manifest", `duplicate ${identity}`);
+    seen.add(identity);
+    seenPaths.add(entry.source_path);
+    if (!m4SkillClasses.has(entry.classification) || !/^sha256:[0-9a-f]{64}$/.test(entry.digest)) {
+      invalidM4("skill manifest", `malformed ${identity}`);
+    }
+    const adapter = m4Adapters.get(entry.adapter_id);
+    if (!adapter || adapter.id !== entry.adapter_id || adapter.version !== entry.adapter_version
+      || adapter.classification !== entry.classification) {
+      invalidM4("skill manifest", `class/adapter mismatch for ${identity}`);
+    }
+  }
+  const declaredIds = new Set(M4_SKILL_MANIFEST.entries.map(({ id }) => id));
+  if (declaredIds.size !== M4_SKILL_MANIFEST.entries.length
+    || [...declaredIds].some((id) => !m4Adapters.values().some((adapter) => adapter.id === id || adapter.id === `${id}-advisory`))) {
+    invalidM4("skill manifest", "an entry is undeclared");
+  }
+  for (const definition of m4WorkflowDefinitions.values()) {
+    for (const skill of [...definition.required_skills, ...definition.optional_skills]) {
+      const entry = M4_SKILL_MANIFEST.entries.find(({ id }) => id === skill);
+      if (!entry) invalidM4("workflow definitions", `${definition.id} names an undeclared skill`);
+    }
+    for (const skillClass of definition.required_skill_classes) {
+      if (!M4_SKILL_MANIFEST.entries.some(({ classification }) => classification === skillClass)) {
+        invalidM4("workflow definitions", `${definition.id} requires an undeclared skill class`);
+      }
+    }
+    for (const skill of definition.required_skills) {
+      const entry = M4_SKILL_MANIFEST.entries.find(({ id }) => id === skill);
+      if (!definition.required_skill_classes.includes(entry.classification)) {
+        invalidM4("workflow definitions", `${definition.id} has a required skill/class mismatch`);
+      }
+    }
+  }
+}
+
+function validateM4Configuration() {
+  validateM4WorkflowDefinitions();
+  validateM4RouteRules();
+  validateM4SkillManifest();
+}
+
+validateM4Configuration();
+
+function sourceKey(entry) {
+  return `${entry.source ?? entry.repository}@${entry.source_revision ?? entry.revision}:${entry.source_path ?? entry.path}`;
+}
+
+function cacheCandidate(provider, entry) {
+  if (!provider) return null;
+  const key = sourceKey(entry);
+  if (provider instanceof Map) return provider.get(key) ?? null;
+  if (typeof provider === "function") return provider(entry);
+  return provider[key] ?? provider[entry.source_path] ?? null;
+}
+
+export function resolvePinnedSkill(entry, { upstream, cache } = {}) {
+  const pinned = M4_SKILL_MANIFEST.entries.find(({ id, version }) =>
+    id === entry.id && version === entry.version);
+  if (!pinned || (
+    (entry.source ?? entry.repository) !== M4_SKILL_MANIFEST.repository ||
+    (entry.source_revision ?? entry.revision) !== M4_SKILL_MANIFEST.revision ||
+    (entry.source_path ?? entry.path) !== pinned.source_path ||
+    entry.digest !== pinned.digest
+  )) {
+    throw new DependencyUnavailable(`manifest identity for ${entry.id}@${entry.version}`);
+  }
+  const expected = {
+    repository: entry.source ?? entry.repository,
+    revision: entry.source_revision ?? entry.revision,
+    path: entry.source_path ?? entry.path,
+    digest: entry.digest,
+  };
+  for (const [sourceKind, provider] of [["upstream", upstream], ["cache", cache]]) {
+    let candidate;
+    try {
+      candidate = cacheCandidate(provider, entry);
+    } catch {
+      continue;
+    }
+    if (!candidate) continue;
+    if (candidate.repository !== expected.repository
+      || candidate.revision !== expected.revision
+      || candidate.path !== expected.path) continue;
+    const content = Buffer.isBuffer(candidate.content)
+      ? candidate.content
+      : typeof candidate.content === "string" ? Buffer.from(candidate.content) : null;
+    if (!content || digest(content) !== expected.digest) continue;
+    return { ...expected, source_kind: sourceKind };
+  }
+  throw new DependencyUnavailable(`${expected.repository}@${expected.revision}:${expected.path}`);
+}
+
+function workflowIdentity(value) {
+  const [id, version] = String(value).split("@");
+  return { id, version };
+}
+
+function workflowRecord(value) {
+  const identity = typeof value === "string" ? workflowIdentity(value) : value ?? {};
+  const definition = m4WorkflowDefinitions.get(identity.id);
+  return definition && (!identity.version || identity.version === definition.version)
+    ? definition
+    : null;
+}
+
+function hasWorkflowConstraint(definition, constraints = {}) {
+  if (!constraints.role || !definition.required_roles.includes(constraints.role)) return false;
+  if (definition.allowed_presets.length === 0
+    ? Object.hasOwn(constraints, "preset")
+    : (!constraints.preset || !definition.allowed_presets.includes(constraints.preset))) return false;
+  const capabilities = new Set(constraints.capabilities ?? []);
+  if (definition.required_capabilities.some((capability) => !capabilities.has(capability))) return false;
+  if (definition.forbidden_capabilities.some((capability) => capabilities.has(capability))) return false;
+  if (Array.isArray(constraints.skills)) {
+    const skills = new Set(constraints.skills.map((skill) =>
+      typeof skill === "string" ? skill : `${skill.id}@${skill.version}`));
+    if (definition.required_skills.some((skill) => !skills.has(skill) && !skills.has(`${skill}@1`))) return false;
+    const classifications = new Set([...skills].map((skill) => {
+      const [id, version] = skill.split("@");
+      return M4_SKILL_MANIFEST.entries.find((entry) => entry.id === id && entry.version === (version ?? "1"))?.classification;
+    }).filter(Boolean));
+    if (definition.required_skill_classes.some((skillClass) => !classifications.has(skillClass))) return false;
+  }
+  return true;
+}
+
+function referencedInputArtifact(input, key, expectedKind = key) {
+  const candidate = input?.[key];
+  const artifact = candidate?.artifact;
+  const ref = candidate?.reference;
+  if (!artifact
+    || artifact.kind !== expectedKind
+    || typeof artifact.artifact_id !== "string"
+    || !isArtifactReference(ref)
+    || ref.artifact_id !== artifact.artifact_id
+    || ref.digest !== digest(artifact)) {
+    return null;
+  }
+  return artifact;
+}
+
+function admittedHumanRequest(input) {
+  const direct = referencedInputArtifact(input, "human_request");
+  if (direct) return direct;
+  const bootstrap = referencedInputArtifact(input, "human_request", "bootstrap_envelope");
+  return bootstrap
+    && input.state?.lifecycle_state === "pre_intake"
+    && input.state?.admission_state === "pre_intake"
+    && sameArtifactReference(input.state.bootstrap_ref, input.human_request.reference)
+    ? bootstrap : null;
+}
+
+function admittedReview(input) {
+  const review = referencedInputArtifact(input, "review");
+  if (!review) return null;
+  const admitted = Object.values(input?.state?.tasks ?? {}).some((task) =>
+    task?.task_state === "artifacts_published"
+      && sameArtifactReference(task.artifact_ref, input.review.reference));
+  return review?.kind === "review"
+    && admitted ? review : null;
+}
+
+function admittedFinding(input) {
+  const review = admittedReview(input);
+  if (review?.kind !== "review" || review.verdict !== "finding" || !Array.isArray(review.findings)) return null;
+  const finding = input.finding_id
+    ? review.findings.find(({ finding_id }) => finding_id === input.finding_id)
+    : review.findings.length === 1 ? review.findings[0] : null;
+  return finding?.finding_id && finding?.fingerprint && finding?.criterion ? finding : null;
+}
+
+function stateAdmitsReference(input, referenceValue, eventKind) {
+  return input?.state?.admission_state === "admitted"
+    && input.state.transitions?.some(({ event_kind: currentEvent, record_refs: refs }) =>
+      currentEvent === eventKind
+      && refs?.some((recordRef) => sameArtifactReference(recordRef, referenceValue)));
+}
+
+function admittedMaterialDecision(input) {
+  const decision = referencedInputArtifact(input, "material_decision", "outcome");
+  return decision?.outcome_kind === "material_decision_request"
+    && input.state?.lifecycle_state === "material_decision_required"
+    && stateAdmitsReference(input, input.material_decision.reference, "material_decision_requested")
+    ? decision : null;
+}
+
+function admittedReplanRequest(input) {
+  const request = referencedInputArtifact(input, "replan_request", "replan_requested");
+  return Array.isArray(request?.compatible_workflow_definitions)
+    && stateAdmitsReference(input, input.replan_request.reference, "replan_requested")
+    ? request : null;
+}
+
+function unverifiedResult(input) {
+  const result = referencedInputArtifact(input, "result");
+  if (!result) return null;
+  const review = admittedReview(input);
+  if (review?.target_task_ref && sameArtifactReference(review.target_task_ref, input.result.reference)) return null;
+  const bound = Object.values(input?.state?.tasks ?? {}).some((task) =>
+    task?.task_state === "artifacts_published"
+      && sameArtifactReference(task.artifact_ref, input.result.reference));
+  return bound ? result : null;
+}
+
+function admittedReadyTask(input) {
+  const ready = input?.ready_task;
+  const graph = ready?.graph;
+  const graphArtifact = graph?.artifact;
+  const graphReference = graph?.reference;
+  if (!graphArtifact
+    || graphArtifact.kind !== "graph"
+    || !isArtifactReference(graphReference)
+    || graphReference.artifact_id !== graphArtifact.artifact_id
+    || graphReference.digest !== digest(graphArtifact)
+    || !sameArtifactReference(input?.state?.active_graph_ref, graphReference)) {
+    return null;
+  }
+  const node = graphArtifact.nodes?.find(({ task_id }) => task_id === ready.task_id);
+  const task = input.state?.tasks?.[ready.task_id];
+  if (!node
+    || node.workflow_definition !== ready.workflow_definition
+    || task?.task_state !== "planned"
+    || task.artifact_ref
+    || !sameArtifactReference(node.packet_ref, input.packet?.reference)) {
+    return null;
+  }
+  return node;
+}
+
+function hasAdmittedFinding(input) {
+  return Boolean(admittedFinding(input));
+}
+
+function repairState(input) {
+  const findingReviewRef = input?.review?.reference;
+  const reviewFindings = input?.review?.artifact?.findings ?? [];
+  const findingId = input?.finding_id
+    ?? (reviewFindings.length === 1 ? reviewFindings[0].finding_id : null);
+  const repairPacketForFinding = (refs) => input?.admitted_repair_packets?.some(({ artifact, reference: packetRef }) =>
+    artifact?.kind === "packet"
+      && artifact.workflow_definition === "repair"
+      && artifact.finding_id === findingId
+      && sameArtifactReference(artifact.finding_ref, findingReviewRef)
+      && refs?.some((recordRef) => sameArtifactReference(recordRef, packetRef)));
+  const transitionAdmitsRepair = (eventKind) => Boolean(findingReviewRef
+    && findingId
+    && input?.state?.transitions?.some(({ event_kind: currentEvent, record_refs: refs }) =>
+      currentEvent === eventKind
+      && refs?.some((recordRef) => sameArtifactReference(recordRef, findingReviewRef))
+      && (reviewFindings.length === 1 || repairPacketForFinding(refs))));
+  return {
+    repair_task_admitted: transitionAdmitsRepair("repair_admitted"),
+    repair_result_bound: transitionAdmitsRepair("repair_result_admitted"),
+  };
+}
+
+function hasRequiredInputKinds(definition, input) {
+  const kinds = new Set();
+  for (const kind of definition.required_input_kinds) {
+    const present = kind === "human_request"
+      ? admittedHumanRequest(input)
+      : kind === "finding"
+      ? hasAdmittedFinding(input)
+      : kind === "result"
+        ? unverifiedResult(input)
+        : referencedInputArtifact(input, kind, kind);
+    if (present) kinds.add(kind);
+  }
+  return definition.required_input_kinds.every((kind) => kinds.has(kind));
+}
+
+function narrowWorkflowCandidates(candidates, hints = {}) {
+  const only = hints.only ?? hints.workflow_definitions;
+  const excluded = new Set(hints.exclude ?? hints.exclude_workflow_definitions ?? []);
+  let narrowed = candidates;
+  if (Array.isArray(only)) narrowed = narrowed.filter(({ id }) => only.includes(`${id}@1`) || only.includes(id));
+  return narrowed.filter(({ id }) => !excluded.has(id) && !excluded.has(`${id}@1`));
+}
+
+function validateSkillProvenance(skill) {
+  const expected = M4_SKILL_MANIFEST.entries.find((entry) =>
+    entry.id === skill.id && entry.version === skill.version);
+  if (!expected
+    || skill.source !== M4_SKILL_MANIFEST.repository
+    || skill.source_revision !== M4_SKILL_MANIFEST.revision
+    || skill.source_path !== expected.source_path
+    || skill.digest !== expected.digest
+    || skill.adapter_id !== expected.adapter_id
+    || skill.adapter_version !== expected.adapter_version
+    || Object.hasOwn(skill, "classification")
+    || Object.hasOwn(skill, "step")) {
+    throw new DependencyUnavailable(`invalid provenance for ${skill.id ?? "unknown"}`);
+  }
+  return expected;
+}
+
+function validateSkillComposition(definition, skills) {
+  const ids = skills.map(({ id }) => id);
+  if (new Set(ids).size !== ids.length) {
+    throw new DependencyUnavailable("skill_composition: duplicate skill");
+  }
+  const allowed = new Set([...definition.required_skills, ...definition.optional_skills]);
+  if (ids.some((id) => !allowed.has(id))) {
+    throw new DependencyUnavailable("skill_composition: undeclared skill");
+  }
+  const order = definition.id === "repair"
+    ? [...definition.optional_skills, ...definition.required_skills]
+    : [...definition.required_skills, ...definition.optional_skills];
+  if (canonicalJson(ids) !== canonicalJson(order.filter((id) => ids.includes(id)))) {
+    throw new DependencyUnavailable("skill_composition: invalid order");
+  }
+}
+
+function matchingRouteRules(input) {
+  const direct = m4RouteRules.rules.filter(({ trigger }) => {
+    if (trigger === "pre_intake") return !Object.hasOwn(input, "request");
+    if (trigger === "material_decision_required") return Boolean(admittedMaterialDecision(input));
+    if (trigger === "finding_to_repair") {
+      const status = repairState(input);
+      return hasAdmittedFinding(input)
+        && !status.repair_task_admitted
+        && !status.repair_result_bound;
+    }
+    if (trigger === "result_to_verification") {
+      return Boolean(unverifiedResult(input));
+    }
+    if (trigger === "replan_request") return Boolean(admittedReplanRequest(input));
+    if (trigger === "ready_task") return Boolean(admittedReadyTask(input));
+    return false;
+  });
+  if (direct.length > 0) return direct;
+  return m4RouteRules.rules.filter(({ trigger }) => trigger === "compatible_candidates");
+}
+
+export function selectWorkflowRoute(input) {
+  const matchingRules = matchingRouteRules(input);
+  const rule = matchingRules[0];
+  if (!rule) throw new Error("unknown M4 route trigger");
+  let candidates;
+  if (rule.eligible === "ready_task") {
+    const readyTask = admittedReadyTask(input);
+    const definition = workflowRecord(readyTask?.workflow_definition);
+    candidates = definition && hasRequiredInputKinds(definition, input)
+      && hasWorkflowConstraint(definition, input.constraints)
+      ? [{ id: definition.id, version: definition.version }]
+      : [];
+  } else if (rule.eligible === "compatible") {
+    const requested = admittedReplanRequest(input)?.compatible_workflow_definitions;
+    candidates = [...m4WorkflowDefinitions.values()]
+      .filter((definition) => !Array.isArray(requested) || requested.includes(`${definition.id}@${definition.version}`))
+      .filter((definition) => hasRequiredInputKinds(definition, input))
+      .filter((definition) => hasWorkflowConstraint(definition, input.constraints))
+      .map(({ id, version }) => ({ id, version }));
+  } else {
+    candidates = rule.eligible.map(workflowIdentity)
+      .filter(({ id }) => workflowRecord(id))
+      .filter(({ id }) => hasRequiredInputKinds(workflowRecord(id), input))
+      .filter(({ id }) => hasWorkflowConstraint(workflowRecord(id), input.constraints));
+  }
+  const status = repairState(input);
+  if (hasAdmittedFinding(input)
+    && (status.repair_task_admitted || status.repair_result_bound)
+    && !unverifiedResult(input)) {
+    candidates = [];
+  }
+  if (["compatible_candidates", "replan_request"].includes(rule.trigger)) {
+    candidates = narrowWorkflowCandidates(candidates, input.planner_hints);
+  }
+  const selected = candidates[0] ?? null;
+  return {
+    eligible_workflow_definitions: candidates,
+    route_evidence: {
+      evaluated_rule_ids: matchingRules.map(({ id }) => id),
+      winning_rule_id: rule.id,
+      ...(selected ? { workflow_definition_version: selected.version } : {}),
+    },
+  };
+}
+
+export function compileWorkflowPacket(packet, sourceProviders) {
+  const definition = workflowRecord(packet.workflow_definition);
+  if (!definition || packet.role !== definition.required_roles[0]) {
+    throw new DependencyUnavailable("incompatible_workflow_definition");
+  }
+  if (!packet.route_evidence) {
+    throw new DependencyUnavailable("route_evidence");
+  }
+  if (!hasWorkflowConstraint(definition, { ...packet, skills: undefined })) {
+    throw new DependencyUnavailable("capability_widening");
+  }
+  if ((packet.recipe_effects ?? []).some((effect) => definition.omitted_effects.includes(effect))) {
+    throw new DependencyUnavailable("forbidden_effect");
+  }
+  validateSkillComposition(definition, packet.skills ?? []);
+  const compiled = [];
+  const skillClasses = new Set();
+  for (const skill of packet.skills ?? []) {
+    if (sourceProviders !== undefined) resolvePinnedSkill(skill, sourceProviders);
+    const expected = validateSkillProvenance(skill);
+    const load = m4Adapters.get(expected.adapter_id);
+    if (!load) throw new DependencyUnavailable(`adapter for ${skill.id}`);
+    if (load.id !== expected.adapter_id || load.version !== expected.adapter_version
+      || load.classification !== expected.classification) {
+      throw new DependencyUnavailable(`classification for ${skill.id}`);
+    }
+    skillClasses.add(expected.classification);
+    try {
+      compiled.push(load.compile({ packet }));
+    } catch (error) {
+      if (error?.code === "dependency_unavailable") throw error;
+      throw new DependencyUnavailable(error?.message ?? `adapter for ${skill.id}`);
+    }
+  }
+  for (const required of definition.required_skills) {
+    if (!(packet.skills ?? []).some(({ id }) => id === required)) {
+      throw new DependencyUnavailable("incompatible_workflow_definition");
+    }
+  }
+  if (definition.required_skill_classes.some((skillClass) => !skillClasses.has(skillClass))) {
+    throw new DependencyUnavailable("incompatible_skill_class");
+  }
+  const specialAttempt = compiled.find(({ attempts }) => Array.isArray(attempts))?.attempts?.[0] ?? {};
+  return {
+    workflow_definition: `${definition.id}@${definition.version}`,
+    skill_order: (packet.skills ?? []).map(({ id, version }) => `${id}@${version}`),
+    attempts: [{
+      role: packet.role,
+      workflow_definition: `${definition.id}@${definition.version}`,
+      skills: (packet.skills ?? []).map(({ id, version }) => `${id}@${version}`),
+      effects: [],
+      ...specialAttempt,
+    }],
+    omitted_effects: definition.omitted_effects,
+  };
+}
 
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -355,6 +947,104 @@ export function admitArtifact(ctx, path, artifact, producerActorId = artifact?.p
   const artifactReference = reference(artifact.artifact_id, storedPath, artifact);
   ctx.admittedRefs?.push(artifactReference);
   return artifactReference;
+}
+
+function validateSkillInvocationOrder(observation, packet) {
+  const expected = packet?.skills ?? [];
+  const actual = observation.skill_invocations ?? [];
+  if (actual.length > expected.length
+    || (actual.length !== expected.length && observation.exit_reason === "idle")) {
+    throw new Error("invocation_order: skill count does not match Packet");
+  }
+  actual.forEach((invocation, index) => {
+    const skill = expected[index];
+    if (invocation.invocation_index !== index + 1
+      || invocation.skill_ref?.id !== skill.id
+      || invocation.skill_ref?.version !== skill.version
+      || invocation.adapter_id !== skill.adapter_id
+      || invocation.adapter_version !== skill.adapter_version
+      || !Array.isArray(invocation.evidence_refs)
+      || invocation.evidence_refs.length === 0) {
+      throw new Error(`invocation_order: skill invocation ${index + 1} does not match Packet order`);
+    }
+  });
+}
+
+function authoritativePacket(ctx) {
+  if (!ctx?.authoritative_packet_ref) {
+    throw new Error("invocation_order: an admitted Packet reference is required");
+  }
+  const packet = resolveArtifactReference(ctx, ctx.authoritative_packet_ref);
+  if (!packet || packet.kind !== "packet") {
+    throw new Error("invocation_order: an admitted Packet is required");
+  }
+  return packet;
+}
+
+export function publishRuntimeObservation(ctx, path, observation) {
+  validateSkillInvocationOrder(observation, authoritativePacket(ctx));
+  return admitArtifact(ctx, path, observation);
+}
+
+export function publishKernelArtifact(ctx, path, artifact, { routeInput, sourceProviders } = {}) {
+  if (artifact.kind === "packet") {
+    return publishWorkflowPacket(ctx, path, artifact, routeInput, sourceProviders);
+  }
+  if (artifact.kind === "runtime_observation") {
+    return publishRuntimeObservation(ctx, path, artifact);
+  }
+  return admitArtifact(ctx, path, artifact);
+}
+
+function storedArtifactPath(path) {
+  return path.startsWith("artifacts/") ? path : artifactPath(path);
+}
+
+function assertRouteInputBinding(packet, path, routeInput) {
+  const expectedPacket = reference(packet.artifact_id, storedArtifactPath(path), packet);
+  if (!routeInput?.packet
+    || canonicalJson(routeInput.packet.artifact) !== canonicalJson(packet)
+    || !sameArtifactReference(routeInput.packet.reference, expectedPacket)) {
+    throw new Error("route_evidence: route context is not bound to the Packet being published");
+  }
+  const expectedConstraints = {
+    role: packet.role,
+    ...(packet.workflow_definition === "intake" ? {} : { preset: "local-change@1" }),
+    capabilities: packet.capabilities,
+  };
+  for (const [key, value] of Object.entries(expectedConstraints)) {
+    if (canonicalJson(routeInput.constraints?.[key]) !== canonicalJson(value)) {
+      throw new Error(`route_evidence: route context constraint ${key} is not admitted`);
+    }
+  }
+  if (routeInput.ready_task
+    && routeInput.ready_task.workflow_definition !== packet.workflow_definition) {
+    throw new Error("route_evidence: ready Task does not match the Packet");
+  }
+  if (packet.workflow_definition === "verification"
+    && (!routeInput.result || !sameArtifactReference(routeInput.result.reference, packet.target_task_ref))) {
+    throw new Error("route_evidence: Result is not bound to the verification Packet");
+  }
+  if (routeInput.material_decision?.unresolved || routeInput.replan_request?.admitted) {
+    throw new Error("route_evidence: direct route context requires admitted state");
+  }
+}
+
+export function publishWorkflowPacket(ctx, path, packet, routeInput, sourceProviders) {
+  assertRouteInputBinding(packet, path, routeInput);
+  const route = selectWorkflowRoute(routeInput);
+  if (
+    canonicalJson(packet.route_evidence) !== canonicalJson(route.route_evidence) ||
+    !route.eligible_workflow_definitions.some(
+      ({ id, version }) =>
+        id === packet.workflow_definition &&
+        version === packet.route_evidence?.workflow_definition_version,
+    )
+  ) {
+    throw new Error("route_evidence: Packet does not match Kernel selection");
+  }
+  compileWorkflowPacket(packet, sourceProviders ?? {});
+  return admitArtifact(ctx, path, packet);
 }
 
 function writeArtifact(ctx, path, artifact) {
@@ -3619,7 +4309,7 @@ export async function runLocalChange({
     let resultCommit;
     let workerSnapshot;
     let workerIdentity;
-    if (!continuingResult) {
+  if (!continuingResult) {
     if (state.active_graph_ref?.path !== "artifacts/graphs/0001.json") {
     admitBudget(state, "planner_attempt");
     admitBudget(state, "graph_revision");
@@ -3661,6 +4351,7 @@ export async function runLocalChange({
       attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
     });
     const implementationPacket = makePacket({
+      ctx,
       runId,
       graphRevision: 1,
       taskId: "implementation-1",
@@ -3990,6 +4681,7 @@ export async function runLocalChange({
           attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
         });
         const verificationPacket = makePacket({
+          ctx,
           runId,
           graphRevision: 2,
           taskId: "verification-1",
@@ -4056,6 +4748,7 @@ export async function runLocalChange({
           attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
         });
         const verificationPacket = makePacket({
+          ctx,
           runId,
           graphRevision: 2,
           taskId: "verification-1",

@@ -136,10 +136,11 @@ Kernel-admitted route records the matched rule ids. OpenCode commands, agents,
 callers, and literal keywords cannot bypass that step.
 
 Each selected skill is recorded with its id, version, original source,
-revision, path, content digest, adapter, and ordered workflow step. The adapter
-may compile a multi-step recipe, constrain invocation, and normalize artifacts
-but may not rewrite the skill body or widen the Packet. These are explicit
-Packet inputs, not implicit developer-tool state.
+revision, path, content digest, and adapter; Packet array order records the
+ordered composition. The adapter may compile a multi-step recipe, constrain
+invocation, and normalize artifacts but may not rewrite the skill body or widen
+the Packet. These are explicit Packet inputs, not implicit developer-tool
+state.
 
 ### Graph compiler and executor
 

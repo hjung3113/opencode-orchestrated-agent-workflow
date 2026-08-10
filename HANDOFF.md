@@ -1,5 +1,53 @@
 # Handoff
 
+## Current handoff — 2026-08-10 Issue #37 selective scope reduction
+
+### Live state
+
+- Checkout: `/Users/hyojung/orca/opencode-orchestrated-agent-workflow` on
+  `agent/m4-workflow-routes-skills`.
+- Issue #37 remains an uncommitted, unpushed current-worktree slice. Unrelated
+  existing changes, including the three AGENTS.md review-scope/test-economy
+  bullets, are preserved.
+- Reduction baseline: 53 focused M4 tests, 5282 lines in
+  `scripts/local-change.mjs`, and 2691 lines in
+  `test/m4-workflow-routes.test.mjs`.
+
+### Current scope-reduction summary
+
+- Production publication now accepts explicit Kernel route input, checks the
+  computed route evidence and eligibility, compiles, and admits without
+  reconstructing durable Run, graph, Request, or current-task state.
+- Runtime Observation publication resolves only the admitted Packet and checks
+  ordered skill identity, adapter identity, invocation index, outcomes, and
+  evidence. Legacy M1-M3 execution remains on its existing admission path;
+  explicit M4 publication seams remain available.
+- The focused suite keeps one public-boundary assertion per named acceptance
+  behavior and removes the approved fixture permutations, duplicate
+  cross-run guards, standalone provider/compile cases, and embedded M1 run.
+- The workflow design points to the canonical manifest, removes the reserved
+  Receipt-walking text, and older unrelated handoffs remain below this section.
+- No source-provider polymorphism, adapter/global effect enforcement, workflow
+  data, route rules, schemas, or successor/executor integration was changed.
+
+### Final gate record
+
+- `npm run test:m4-workflow-routes`: 33/33 passed, 145.610916 ms. One
+  removal-only fixture correction restored the Packet artifact identity needed
+  for public route eligibility; no test was added.
+- `npm run test:protocol`: 6/6 passed, 174.121542 ms.
+- `npm run test:m0`: 16/16 passed.
+- `npm run test:m1`: 16/16 passed, 65335.911708 ms. The first run exposed a
+  removed legacy Packet lookup; restoring that existing lookup was the only
+  production correction, then M1 was rerun once.
+- `npm run test:m2`: 34/34 passed, 244084.442459 ms.
+- `npm run test:m3`: 4/4 passed, 12648.927916 ms.
+- `npm run test:m4-capabilities`: 1/1 passed, 5272.506208 ms.
+- `node --check scripts/local-change.mjs`: passed. `git diff --check`: passed.
+- Final counts: 33 focused tests, 5067 production lines, and 1143 focused-test
+  lines. Tracked diffstat: 9 files changed, 1012 insertions, 28 deletions.
+  Untracked Issue #37 files remain visible in `git status`; no commit or push.
+
 ## Current handoff — 2026-08-09 M4 capability gate #35 accepted locally
 
 ### Live state

@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "id": "m4",
+  "version": "1",
+  "rules": [
+    { "id": "route.pre-intake@1", "trigger": "pre_intake", "eligible": ["intake@1"] },
+    { "id": "route.material-decision-required@1", "trigger": "material_decision_required", "eligible": [] },
+    { "id": "route.finding-to-repair@1", "trigger": "finding_to_repair", "eligible": ["repair@1"] },
+    { "id": "route.result-to-verification@1", "trigger": "result_to_verification", "eligible": ["verification@1"] },
+    { "id": "route.replan-request@1", "trigger": "replan_request", "eligible": "compatible" },
+    { "id": "route.ready-task@1", "trigger": "ready_task", "eligible": "ready_task" },
+    { "id": "route.compatible-candidates@1", "trigger": "compatible_candidates", "eligible": "compatible" }
+  ]
+}

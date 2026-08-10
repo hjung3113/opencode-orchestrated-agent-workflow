@@ -421,6 +421,12 @@
             "target_snapshot": { "$ref": "#/$defs/digest" },
             "finding_ref": { "$ref": "#/$defs/reference" },
             "finding_id": { "$ref": "#/$defs/id" },
+            "diagnosis_evidence": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "route_evidence": { "$ref": "#/$defs/routeEvidence" },
             "external_read_targets": {
               "type": "array",
               "minItems": 1,
@@ -660,8 +666,55 @@
         "id": { "$ref": "#/$defs/id" },
         "version": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
-        "digest": { "$ref": "#/$defs/digest" }
+        "digest": { "$ref": "#/$defs/digest" },
+        "source_revision": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "source_path": { "$ref": "#/$defs/relativePath" },
+        "adapter_id": { "$ref": "#/$defs/id" },
+        "adapter_version": { "type": "string", "minLength": 1 }
       }
+    },
+    "routeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluated_rule_ids", "winning_rule_id", "workflow_definition_version"],
+      "properties": {
+        "evaluated_rule_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,127}$" }
+        },
+        "winning_rule_id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,127}$" },
+        "workflow_definition_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "skillRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "skillInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill_ref", "adapter_id", "adapter_version", "invocation_index", "outcome", "evidence_refs"],
+      "properties": {
+        "skill_ref": { "$ref": "#/$defs/skillRef" },
+        "adapter_id": { "$ref": "#/$defs/id" },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "invocation_index": { "type": "integer", "minimum": 1 },
+        "outcome": { "enum": ["completed", "failed"] },
+        "evidence_refs": { "type": "array", "items": { "$ref": "#/$defs/reference" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "enum": ["completed", "failed"] } }, "required": ["outcome"] },
+          "then": { "properties": { "evidence_refs": { "minItems": 1 } } }
+        }
+      ]
     },
     "capability": {
       "description": "The network value permits credential-free webfetch of exact External Read Targets in an inspect@1 Research packet.",
@@ -1042,6 +1095,10 @@
             "external_reads": {
               "type": "array",
               "items": { "$ref": "#/$defs/externalReadObservation" }
+            },
+            "skill_invocations": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/skillInvocation" }
             },
             "exit_reason": { "enum": ["idle", "runtime_error", "runtime_unreachable", "cancelled", "cancel_unconfirmed", "deadline_exceeded"] }
           },

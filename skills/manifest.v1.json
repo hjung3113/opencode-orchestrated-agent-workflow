@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "repository": "https://github.com/mattpocock/skills.git",
+  "revision": "84fdeffd12f2ee307994d1eb6feb48173b6e0502",
+  "entries": [
+    {
+      "id": "ask-matt",
+      "version": "1",
+      "source_path": "skills/engineering/ask-matt/SKILL.md",
+      "digest": "sha256:3d38910535f5f01e15bc5fd7f6ca8880d628cd248741f08e6780dd7c1828e832",
+      "classification": "vocabulary",
+      "adapter_id": "ask-matt-advisory",
+      "adapter_version": "1"
+    },
+    {
+      "id": "implement",
+      "version": "1",
+      "source_path": "skills/engineering/implement/SKILL.md",
+      "digest": "sha256:6d3fd9e83b8f36e5213854779db49b256a457a7ebb4a503e53fa7dcff696adc3",
+      "classification": "workflow_recipe",
+      "adapter_id": "implement",
+      "adapter_version": "1"
+    },
+    {
+      "id": "tdd",
+      "version": "1",
+      "source_path": "skills/engineering/tdd/SKILL.md",
+      "digest": "sha256:5e6b9c16b547113e90afbb946489d1c1384be5c2128f0159bd0bee57251ecf08",
+      "classification": "attempt_skill",
+      "adapter_id": "tdd",
+      "adapter_version": "1"
+    },
+    {
+      "id": "code-review",
+      "version": "1",
+      "source_path": "skills/engineering/code-review/SKILL.md",
+      "digest": "sha256:9cf46653dd9c710ea1e6c22423caf31a794c88773bc94bdaa23140277f470442",
+      "classification": "workflow_recipe",
+      "adapter_id": "code-review",
+      "adapter_version": "1"
+    },
+    {
+      "id": "diagnosing-bugs",
+      "version": "1",
+      "source_path": "skills/engineering/diagnosing-bugs/SKILL.md",
+      "digest": "sha256:b9339b09ee3980808d8c5a35c7251b891b8b1e0036ec4ca37812b976ebddf6b6",
+      "classification": "attempt_skill",
+      "adapter_id": "diagnosing-bugs",
+      "adapter_version": "1"
+    }
+  ]
+}
