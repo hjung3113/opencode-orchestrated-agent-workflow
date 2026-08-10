@@ -99,7 +99,13 @@ test("schema validates pre-admission terminal runs and rejects admitted runs wit
 });
 
 test("skills and command evidence are digest-bound protocol fields", () => {
-  assert.deepEqual(definition("skill").required.sort(), ["digest", "id", "source", "version"]);
+  assert.deepEqual(definition("skill").required.sort(), [
+    "digest",
+    "id",
+    "source",
+    "version",
+  ]);
+  assert.ok(!body("packet").required.includes("route_evidence"));
 
   const observation = body("runtimeObservation");
   assert.ok(observation.required.includes("command_executions"));
@@ -152,4 +158,86 @@ test("preset selection and effective policy have durable schema linkage", () => 
   const receiptRule = outcome.allOf.find(({ if: condition }) =>
     condition?.properties?.outcome_kind?.const === "receipt");
   assert.ok(receiptRule.then.required.includes("effective_policy"));
+});
+
+test("M0-M3 Packet artifacts remain schema-compatible without M4 route and adapter provenance", () => {
+  const validate = protocolValidator();
+  const legacyPacket = {
+    schema_version: "1.0",
+    kind: "packet",
+    artifact_id: "packet-m1-legacy-1",
+    run_id: "run-m1-legacy-1",
+    producer: { role: "planner", actor_id: "planner-1" },
+    input_refs: [],
+    runtime_ref: {
+      reference_kind: "repository",
+      repository_snapshot: zeroDigest,
+      path: "runtime.json",
+      digest: zeroDigest,
+    },
+    created_at: "2026-08-10T00:00:00Z",
+    graph_revision: 1,
+    task_id: "implementation-1",
+    role: "worker",
+    workflow_definition: "implementation",
+    objective: "make the bounded change",
+    acceptance_criteria: ["the behavior is tested"],
+    allowed_resources: ["target.txt"],
+    forbidden_resources: [".git"],
+    skills: [{
+      id: "m1-local-change",
+      version: "1",
+      source: ".opencode/skills/m1-local-change/SKILL.md",
+      digest: zeroDigest,
+    }],
+    capabilities: ["repository_read", "local_write", "command_execute"],
+    admitted_commands: [],
+    deadline_seconds: 30,
+    escalation_condition: "stop on an undeclared change",
+  };
+
+  assert.equal(validate(legacyPacket), true, JSON.stringify(validate.errors));
+});
+
+test("Repair Packets may carry diagnosis evidence required by the diagnosing adapter", () => {
+  const validate = protocolValidator();
+  const repairPacket = {
+    schema_version: "1.0",
+    kind: "packet",
+    artifact_id: "packet-repair-diagnosis-1",
+    run_id: "run-repair-diagnosis-1",
+    producer: { role: "planner", actor_id: "planner-1" },
+    input_refs: [],
+    runtime_ref: {
+      reference_kind: "repository",
+      repository_snapshot: zeroDigest,
+      path: "runtime.json",
+      digest: zeroDigest,
+    },
+    created_at: "2026-08-10T00:00:00Z",
+    graph_revision: 3,
+    task_id: "repair-1",
+    role: "worker",
+    workflow_definition: "repair",
+    objective: "repair the admitted finding",
+    acceptance_criteria: ["the finding is resolved"],
+    allowed_resources: ["target.txt"],
+    forbidden_resources: [".git"],
+    skills: [{
+      id: "diagnosing-bugs",
+      version: "1",
+      source: "https://github.com/openai/skills.git",
+      digest: zeroDigest,
+    }],
+    capabilities: ["repository_read", "local_write", "command_execute"],
+    admitted_commands: [],
+    deadline_seconds: 30,
+    escalation_condition: "stop on an undeclared change",
+    finding_ref: bootstrapRef,
+    finding_id: "finding-1",
+    target_snapshot: zeroDigest,
+    diagnosis_evidence: ["finding-evidence-1"],
+  };
+
+  assert.equal(validate(repairPacket), true, JSON.stringify(validate.errors));
 });

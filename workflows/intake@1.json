@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "id": "intake",
+  "version": "1",
+  "required_input_kinds": ["human_request"],
+  "required_roles": ["planner"],
+  "allowed_presets": [],
+  "required_capabilities": [],
+  "forbidden_capabilities": ["repository_read", "local_write", "command_execute", "local_commit", "network", "external_mutation"],
+  "required_skill_classes": [],
+  "required_skills": [],
+  "optional_skills": ["ask-matt"],
+  "terminal_outputs": ["request", "material_decision_request"],
+  "omitted_effects": ["publication", "issue_mutation", "child_agent"]
+}

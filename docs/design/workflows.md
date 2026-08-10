@@ -11,22 +11,30 @@ building blocks. The product does not copy their instructions into commands,
 agent prompts, or product-owned replacement skills. A source manifest pins each
 approved original by repository, revision, path, and digest and classifies it:
 
-- `workflow_recipe`: coordinates multiple agents, checkpoints, or external
-  effects. The orchestrator compiles its compatible steps into admitted Tasks;
-  the recipe is not loaded wholesale into one Attempt.
+- `workflow_recipe`: may coordinate multiple agents, checkpoints, or external
+  effects. The orchestrator compiles only its compatible steps into one or more
+  admitted Tasks; the recipe is not loaded wholesale into an Attempt.
 - `attempt_skill`: can execute inside one Packet and is loaded unchanged after
   its capability requirements are admitted.
 - `vocabulary`: shared design or review language included as bounded context;
   it does not create a workflow step by itself.
 
-An adapter binds the original's inputs and outputs to declared Artifacts. When
-an original recipe asks for a child agent, checkpoint, issue publication,
-commit, or another external effect, the adapter represents that as a separate
-Task, Material Decision Request, or deferred Application proposal. It never
-pretends the forbidden step ran. An incompatible or unavailable original fails
-as `dependency_unavailable`. Updating an original revision requires an explicit
-manifest change and adapter compatibility verification, never an
-in-repository fork.
+An adapter binds the original's inputs and outputs to declared Artifacts. It
+compiles compatible work into admitted Tasks and either omits a forbidden
+execution mechanism or represents an authorized checkpoint or external effect
+as a separate Task, Material Decision Request, or deferred Application
+proposal. It never pretends an omitted child agent, publication, commit, or
+external effect ran. An incompatible or unavailable original fails as
+`dependency_unavailable`. Updating an original revision requires an explicit
+manifest change and adapter compatibility verification, never an in-repository
+fork.
+
+The canonical five-entry pin is [skills/manifest.v1.json](../../skills/manifest.v1.json).
+The manifest owns classification. Packet skill records retain `id`, `version`,
+`source`, and `digest` and add only source revision, source path, and adapter
+identity. Packet array order is the ordered composition. An identity-matching
+cache may satisfy a source; a missing, changed, or adapter-incompatible source
+fails as `dependency_unavailable`.
 
 The design distinguishes four concepts. A Task is the accepted graph node that
 schedules a Workflow Instance; its Packet is the immutable execution contract,
@@ -53,7 +61,7 @@ Run Policy and may narrow it further, never widen it.
 | Specification | Determined direction | Testable contract and acceptance criteria | Compile `to-spec` → file-backed Specification gate; tracker publication remains a separate authorized effect |
 | Ticketing | Contract and context | Small dependency-aware graph | Compile `to-tickets` → graph-and-Packet proposal → Kernel graph admission; no direct issue publication |
 | Implementation | One admitted task packet | Scoped changes, Result, evidence | Compile `implement`; for bug tasks, `diagnosing-bugs` precedes `tdd`; for feature tasks, `tdd` is conditional on the acceptance contract → Result gate → separate Verification Task; commit is excluded from v1 |
-| Verification | Contract, changes, Evidence | Verdict: pass, finding, or block | Compile `code-review` into independent Standards and Spec verifier work when the graph/budget admits it, then one Review gate; never run it inside the producing worker |
+| Verification | Contract, changes, Evidence | Verdict: pass, finding, or block | Compile `code-review` into one fresh verifier Attempt that evaluates Standards and Spec, then one Review gate; never run it inside the producing worker |
 | Repair | Verification Finding | Narrow correction and new Evidence | `diagnosing-bugs` → conditional `tdd` → bounded `implement` → Result gate → separate re-verification |
 | Maintenance | Evidence of drift or debt | Bounded candidate or repair task | Compile `triage` or `improve-codebase-architecture` → candidate gate; any change re-enters Intake and Verification |
 
@@ -65,6 +73,10 @@ Every compiled step declares its pinned skill, precondition, expected Artifact,
 allowed capabilities, and output gate. Runtime Observation records which
 admitted skills were actually loaded and invoked and in what order; a Receipt
 does not claim a composition that was merely listed in a Packet.
+
+Each Runtime Observation `skill_invocations` entry records `skill_ref`, adapter
+id and version, a unique positive `invocation_index`, outcome, and evidence
+references. Completed and failed invocations require evidence.
 
 ## Workflow route contract
 
@@ -78,14 +90,44 @@ Each versioned Workflow Definition declares:
 - task-kind and keyword hints that may narrow candidates but never grant
   authority or decide intent alone.
 
-The Kernel applies structural rules before model judgment. An unresolved
-material choice yields a Material Decision Request; an admitted Finding permits
-Repair; an unverified changed Output Snapshot requires Verification; a
-Packet-bound `replan_requested` Artifact permits only compatible successor
-workflows; and an admitted ready Task runs its recorded Workflow Definition. A
-planner ranks the remaining eligible definitions and explains its choice. The
-admitted Packet and Receipt record the matched route-rule ids and any hints used
-as Evidence.
+The initial OpenCode-native contract applies this ordered, first-matching table
+before model judgment:
+
+1. `route.pre-intake@1` admits only `intake@1` when no Request exists.
+2. `route.material-decision-required@1` admits no execution while a Material
+   Decision remains unresolved.
+3. `route.finding-to-repair@1` admits only `repair@1` for a current admitted
+   Finding with no admitted Repair Task or bound Repair Result.
+4. `route.result-to-verification@1` admits only `verification@1` for the
+   current unverified Result, including every Repair Result.
+5. `route.replan-request@1` admits only definitions compatible with the
+   admitted Replan Request.
+6. `route.ready-task@1` admits only the ready Task's recorded definition.
+7. `route.compatible-candidates@1` computes candidates from Artifact, role,
+   Preset, Capability, and skill constraints.
+
+The Packet records every evaluated matching rule id, the winner, and the
+Workflow Definition version. A planner may rank only the winner's eligible set.
+Hints may remove candidates but cannot add one, grant Capability, determine
+materiality, or override a direct trigger. No candidate yields a Typed Block;
+an unresolved material choice yields a Material Decision Request.
+
+The initial OpenCode-native compatibility set is closed:
+
+| Definition | Role and policy | Composition | Terminal output |
+| --- | --- | --- | --- |
+| `intake@1` | `planner@1`; no Preset or Capability | optional `ask-matt-advisory@1` vocabulary | Request or Material Decision Request |
+| `implementation@1` | `worker@1`; `local-change@1`; `repository_read`, `local_write`, Kernel-owned `command_execute` | `implement@1`, optional `tdd@1` | Result or Typed Block |
+| `verification@1` | fresh `verifier@1`; `local-change@1`; `repository_read` | `code-review@1` compiles the compatible Standards and Spec steps into one verifier Attempt | Review |
+| `repair@1` | fresh `worker@1`; `local-change@1`; implementation capability ceiling | `implement@1`, optional `diagnosing-bugs@1` and `tdd@1` | Result requiring fresh Verification |
+
+Adapter output is validated before graph or Packet Publication. The advisory
+adapter has no effects; implementation omits commit, Publication, issue/PR
+mutation, child agents, and embedded review; TDD requires a behaviour acceptance
+criterion and cannot commit; code review cannot edit, commit, or delegate; and
+diagnosis requires evidence-linked hypotheses and cannot widen scope. The
+original recipe is not loaded wholesale or reported as executed. No other
+Workflow Definition or adapter is compatible with the initial native contract.
 
 An Attempt that discovers necessary work outside its Workflow Definition calls
 the Packet-bound `request_route` tool. The tool stages a `replan_requested`

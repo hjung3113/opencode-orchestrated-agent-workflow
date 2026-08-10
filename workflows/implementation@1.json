@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "id": "implementation",
+  "version": "1",
+  "required_input_kinds": ["request", "packet"],
+  "required_roles": ["worker"],
+  "allowed_presets": ["local-change@1"],
+  "required_capabilities": ["repository_read", "local_write", "command_execute"],
+  "forbidden_capabilities": ["network", "local_commit", "external_mutation"],
+  "required_skill_classes": ["workflow_recipe"],
+  "required_skills": ["implement"],
+  "optional_skills": ["tdd"],
+  "terminal_outputs": ["result", "typed_block"],
+  "omitted_effects": ["commit", "publication", "issue_mutation", "child_agent", "embedded_review"]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "id": "verification",
+  "version": "1",
+  "required_input_kinds": ["result", "packet"],
+  "required_roles": ["verifier"],
+  "allowed_presets": ["local-change@1"],
+  "required_capabilities": ["repository_read"],
+  "forbidden_capabilities": ["local_write", "command_execute", "network", "local_commit", "external_mutation"],
+  "required_skill_classes": ["workflow_recipe"],
+  "required_skills": ["code-review"],
+  "optional_skills": [],
+  "terminal_outputs": ["review"],
+  "omitted_effects": ["edit", "commit", "publication", "child_agent", "delegation"]
+}

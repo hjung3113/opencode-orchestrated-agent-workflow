@@ -457,6 +457,48 @@ ids as the public CLI.
   already carried by runtime evidence; fail with a typed setup error when the
   supported bundle is missing, shadowed, or incompatible.
 
+### First implementation slice: Issue #37
+
+Implement only the deterministic product data and validation seam required by
+the four closed M4 Workflow Definitions:
+
+1. Add the four versioned Workflow Definition records, the ordered
+   `route-rules/m4@1.json` table, and the five-entry pinned source manifest.
+2. Extend the existing protocol skill, Packet route evidence, and Runtime
+   Observation shapes with only the provenance, evaluated/winning rule ids,
+   Workflow Definition version, and ordered invocation fields accepted by
+   Issue #34. Do not add classification or step fields to Packet skill records.
+3. Resolve each original by exact repository, revision, path, and SHA-256 bytes
+   from upstream or an identity-matching cache. Missing, changed, wrong-path,
+   wrong-revision, or adapter-incompatible input returns
+   `dependency_unavailable`.
+4. Add the five closed adapters as validators/compilers over the existing
+   Packet and Kernel boundary. They must reject incompatible class, effects,
+   and capability widening before graph or Packet Publication.
+5. Add one Kernel route-selection function beside the existing admission path:
+   first matching rule wins, the Kernel computes eligibility, and planner hints
+   can only narrow the winning set. Every Repair Result routes to fresh
+   Verification and one Finding admits at most one Repair.
+6. Validate observed invocation order at the Kernel's Runtime Observation
+   Publication seam against Packet order; adapter compilation does not claim
+   that an invocation occurred.
+7. Test the public Kernel seam with complete fixtures plus evaluated/winning
+   route evidence, exact-cache resolution, missing entries, changed bytes,
+   wrong revision/path, incompatible adapters and recipes, undeclared classes,
+   conflicting routes, and false invocation order. Rejections must leave run
+   artifacts unchanged. Then run the M0-M3 protocol and Kernel regression
+   gates.
+
+The implementation allowlist is `docs/design/schemas/protocol-v1.schema.json`,
+`scripts/local-change.mjs`, `workflows/{intake,implementation,verification,repair}@1.json`,
+`route-rules/m4@1.json`, `skills/manifest.v1.json`,
+`skills/adapters/{ask-matt-advisory,implement,tdd,code-review,diagnosing-bugs}@1.mjs`,
+`test/protocol-schema.test.mjs`, `test/m4-workflow-routes.test.mjs`,
+`package.json`, and the root `HANDOFF.md` for evidence. No dependency addition
+is expected. Workflow-agent profiles, OpenCode commands/tools/launcher,
+Replan Request, successor dispatch, collision preflight, Receipt integration,
+and M5/M6 work remain outside #37.
+
 ### Exit evidence
 
 - A clean target loads the expected command, agent, tool, and completed-preset

@@ -61,6 +61,18 @@ smaller than a general-purpose workflow platform.
   implementation work. Failure becomes focused research, bounded repair, or a
   concise material decision request, never an endless retry or informal manual
   loop.
+- Treat review findings as proposals, not repair authority. Before dispatching
+  a repair, map the finding to an exact acceptance criterion, the changed
+  surface, and an observed normal-flow failure; otherwise defer it rather than
+  expanding the current issue.
+- The named issue's acceptance criteria are the implementation ceiling. Broad
+  terms such as deterministic, malformed, stale, or secure do not authorize
+  exhaustive cross-run, concurrency, recovery, or adversarial hardening unless
+  the issue names it or current evidence shows it blocks the required outcome.
+- Keep test evidence minimal: retain one observable public-boundary test per
+  distinct acceptance behavior, and remove lower-level or fixture-permutation
+  tests fully covered by it. Run the narrowest affected gate once; do not repeat
+  unchanged slow suites merely to accumulate evidence.
 - Versioned repository knowledge and mutable run state stay separate. Keep
   packets relevant, graphs no larger than the current work requires, and add
   artifacts, gates, schemas, or control-plane machinery only after a
