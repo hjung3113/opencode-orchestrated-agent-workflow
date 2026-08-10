@@ -241,3 +241,125 @@ test("Repair Packets may carry diagnosis evidence required by the diagnosing ada
 
   assert.equal(validate(repairPacket), true, JSON.stringify(validate.errors));
 });
+
+test("AC-38-7 schema admits an acyclic Replan Request and typed request_route observation", () => {
+  const validate = protocolValidator();
+  const proposal = {
+    recommended_workflow_definition: "research@1",
+    reason: "the admitted worker needs one bounded external read",
+    evidence_refs: [bootstrapRef],
+    required_capability: "network",
+  };
+  const request = {
+    schema_version: "1.0",
+    kind: "replan_requested",
+    artifact_id: "replan-request-1",
+    run_id: "run-1",
+    producer: { role: "worker", actor_id: "worker-1" },
+    input_refs: [bootstrapRef],
+    created_at: "2026-08-10T00:00:00Z",
+    task_id: "task-1",
+    attempt: 1,
+    ...proposal,
+  };
+  assert.equal(validate(request), true, JSON.stringify(validate.errors));
+
+  const observation = {
+    schema_version: "1.0",
+    kind: "runtime_observation",
+    artifact_id: "runtime-request-route-1",
+    run_id: "run-1",
+    producer: { role: "runtime", actor_id: "runtime-1" },
+    input_refs: [bootstrapRef],
+    created_at: "2026-08-10T00:00:00Z",
+    attempt_id: "worker-1",
+    task_id: "task-1",
+    attempt: 1,
+    role: "worker",
+    opencode_version: "1.18.5",
+    configuration_digest: zeroDigest,
+    session_id: "session-1",
+    agent_identity: "worker-1",
+    message_ids: [],
+    agent: "worker@1",
+    runtime_permission_events: [],
+    command_executions: [],
+    observed_changes: [],
+    observed_output_snapshot: zeroDigest,
+    external_reads: [],
+    tool_invocations: [{
+      tool_id: "request_route",
+      call_id: "call-1",
+      input: proposal,
+      outcome: "accepted",
+    }],
+    exit_reason: "idle",
+  };
+  assert.equal(validate(observation), true, JSON.stringify(validate.errors));
+});
+
+test("AC-38-7 schema rejects malformed or spoofed Replan Request and tool provenance", () => {
+  const validate = protocolValidator();
+  const valid = {
+    schema_version: "1.0",
+    kind: "replan_requested",
+    artifact_id: "replan-request-invalid-1",
+    run_id: "run-1",
+    producer: { role: "worker", actor_id: "worker-1" },
+    input_refs: [bootstrapRef],
+    created_at: "2026-08-10T00:00:00Z",
+    task_id: "task-1",
+    attempt: 1,
+    recommended_workflow_definition: "research@1",
+    reason: "the admitted worker needs one bounded external read",
+    evidence_refs: [bootstrapRef],
+    required_capability: "network",
+  };
+  const rows = [
+    ["missing recommended workflow", { recommended_workflow_definition: undefined }],
+    ["spoofed runtime provenance", { runtime_ref: bootstrapRef }],
+    ["wrong producer role", { producer: { role: "planner", actor_id: "planner-1" } }],
+  ];
+  for (const [label, override] of rows) {
+    const candidate = structuredClone(valid);
+    for (const [key, value] of Object.entries(override)) {
+      if (value === undefined) delete candidate[key];
+      else candidate[key] = value;
+    }
+    assert.equal(validate(candidate), false, label);
+  }
+
+  const observation = {
+    schema_version: "1.0",
+    kind: "runtime_observation",
+    artifact_id: "runtime-request-route-invalid-1",
+    run_id: "run-1",
+    producer: { role: "runtime", actor_id: "runtime-1" },
+    input_refs: [bootstrapRef],
+    created_at: "2026-08-10T00:00:00Z",
+    attempt_id: "worker-1",
+    task_id: "task-1",
+    attempt: 1,
+    role: "worker",
+    opencode_version: "1.18.5",
+    configuration_digest: zeroDigest,
+    session_id: "session-1",
+    agent_identity: "worker-1",
+    message_ids: [],
+    agent: "worker@1",
+    runtime_permission_events: [],
+    command_executions: [],
+    observed_changes: [],
+    observed_output_snapshot: zeroDigest,
+    external_reads: [],
+    tool_invocations: [{
+      tool_id: "request_route",
+      call_id: "call-1",
+      input: valid,
+      outcome: "accepted",
+      unexpected: true,
+    }],
+    exit_reason: "idle",
+  };
+  assert.equal(validate(observation), false);
+});

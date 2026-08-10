@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "repair",
   "version": "1",
+  "permits_replanning": true,
   "required_input_kinds": ["finding", "review", "packet"],
   "required_roles": ["worker"],
   "allowed_presets": ["local-change@1"],

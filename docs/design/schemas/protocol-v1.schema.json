@@ -9,6 +9,7 @@
     { "$ref": "#/$defs/decision" },
     { "$ref": "#/$defs/graph" },
     { "$ref": "#/$defs/packet" },
+    { "$ref": "#/$defs/replanRequested" },
     { "$ref": "#/$defs/runtimeObservation" },
     { "$ref": "#/$defs/result" },
     { "$ref": "#/$defs/review" },
@@ -201,7 +202,9 @@
       "allOf": [
         {
           "if": {
+            "required": ["kind", "producer"],
             "properties": {
+              "kind": { "not": { "const": "replan_requested" } },
               "producer": {
                 "properties": {
                   "role": { "enum": ["planner", "worker", "verifier"] }
@@ -480,6 +483,67 @@
               }
             }
           ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "replanInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recommended_workflow_definition", "reason", "evidence_refs", "required_capability"],
+      "properties": {
+        "recommended_workflow_definition": {
+          "enum": [
+            "intake", "research", "design", "specification", "ticketing", "implementation", "verification", "repair", "maintenance",
+            "intake@1", "research@1", "design@1", "specification@1", "ticketing@1", "implementation@1", "verification@1", "repair@1", "maintenance@1"
+          ]
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/reference" }
+        },
+        "required_capability": { "$ref": "#/$defs/capability" }
+      }
+    },
+    "replanRequested": {
+      "allOf": [
+        { "$ref": "#/$defs/envelope" },
+        {
+          "type": "object",
+          "required": [
+            "kind", "producer", "task_id", "attempt", "recommended_workflow_definition", "reason", "evidence_refs", "required_capability"
+          ],
+          "properties": {
+            "kind": { "const": "replan_requested" },
+            "producer": { "$ref": "#/$defs/workerProducer" },
+            "task_id": { "$ref": "#/$defs/id" },
+            "attempt": { "type": "integer", "minimum": 1 },
+            "recommended_workflow_definition": {
+              "$ref": "#/$defs/replanInput/properties/recommended_workflow_definition"
+            },
+            "reason": { "type": "string", "minLength": 1 },
+            "evidence_refs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/reference" }
+            },
+            "required_capability": { "$ref": "#/$defs/capability" },
+            "attempt_id": { "$ref": "#/$defs/id" },
+            "compatible_workflow_definitions": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*@1$" }
+            },
+            "source_packet_ref": { "$ref": "#/$defs/reference" },
+            "session_id": { "type": "string", "minLength": 1 },
+            "agent_identity": { "$ref": "#/$defs/id" },
+            "configuration_digest": { "$ref": "#/$defs/digest" },
+            "state_version": { "type": "integer", "minimum": 1 },
+            "idempotency_key": { "$ref": "#/$defs/id" }
+          },
+          "not": { "required": ["runtime_ref"] }
         }
       ],
       "unevaluatedProperties": false
@@ -1100,6 +1164,10 @@
               "type": "array",
               "items": { "$ref": "#/$defs/skillInvocation" }
             },
+            "tool_invocations": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/toolInvocation" }
+            },
             "exit_reason": { "enum": ["idle", "runtime_error", "runtime_unreachable", "cancelled", "cancel_unconfirmed", "deadline_exceeded"] }
           },
           "if": { "properties": { "role": { "enum": ["worker", "verifier"] } } },
@@ -1119,6 +1187,28 @@
         "content_digest": { "$ref": "#/$defs/digest" },
         "previous_path": { "$ref": "#/$defs/resourcePath" }
       }
+    },
+    "toolInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_id", "call_id", "input", "outcome"],
+      "properties": {
+        "tool_id": { "$ref": "#/$defs/id" },
+        "call_id": { "$ref": "#/$defs/id" },
+        "input": { "$ref": "#/$defs/replanInput" },
+        "outcome": { "enum": ["accepted", "rejected"] },
+        "error_code": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "rejected" } }, "required": ["outcome"] },
+          "then": { "required": ["error_code"] }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "accepted" } }, "required": ["outcome"] },
+          "then": { "not": { "required": ["error_code"] } }
+        }
+      ]
     }
   }
 }

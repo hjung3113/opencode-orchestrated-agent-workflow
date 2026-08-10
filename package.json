@@ -9,7 +9,8 @@
     "test:m2": "node --test test/m2-recovery.test.mjs",
     "test:m3": "node --test --test-name-pattern='M3' test/m1-local-change.test.mjs",
     "test:m4-capabilities": "node --test test/m4-opencode-capabilities.test.mjs",
-    "test:m4-workflow-routes": "node --test test/m4-workflow-routes.test.mjs"
+    "test:m4-workflow-routes": "node --test test/m4-workflow-routes.test.mjs",
+    "test:m4-attempt-profiles-replan": "node --test test/m4-attempt-profiles-replan.test.mjs"
   },
   "devDependencies": {
     "ajv": "^8.17.1"

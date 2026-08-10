@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "id": "worker@1",
+  "role": "worker",
+  "version": "1",
+  "selectable": false,
+  "mode": "primary",
+  "model": "opencode/big-pickle",
+  "tools": {
+    "read": true,
+    "edit": true,
+    "write": true,
+    "request_route": true,
+    "bash": false,
+    "task": false,
+    "webfetch": false,
+    "websearch": false,
+    "mcp": false,
+    "external_directory": false,
+    "question": false,
+    "glob": false,
+    "grep": false,
+    "list": false,
+    "lsp": false
+  },
+  "permission": {
+    "*": "deny",
+    "read": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "request_route": "allow",
+    "external_directory": "deny"
+  },
+  "capabilities": ["repository_read", "local_write", "command_execute"],
+  "skill_classes": ["attempt_skill"]
+}

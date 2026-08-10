@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "intake",
   "version": "1",
+  "permits_replanning": false,
   "required_input_kinds": ["human_request"],
   "required_roles": ["planner"],
   "allowed_presets": [],

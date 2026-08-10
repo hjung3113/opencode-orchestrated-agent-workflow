@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "verification",
   "version": "1",
+  "permits_replanning": false,
   "required_input_kinds": ["result", "packet"],
   "required_roles": ["verifier"],
   "allowed_presets": ["local-change@1"],
