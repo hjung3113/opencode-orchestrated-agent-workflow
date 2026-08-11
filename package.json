@@ -2,7 +2,11 @@
   "name": "opencode-orchestrated-agent-workflow",
   "private": true,
   "type": "module",
+  "exports": {
+    "./operator": "./bin/opencode-orchestrator.mjs"
+  },
   "scripts": {
+    "opencode": "node bin/opencode-orchestrator.mjs",
     "test:m0": "node --test test/m0-probe.test.mjs",
     "test:protocol": "node --test test/protocol-schema.test.mjs",
     "test:m1": "node --test test/m1-local-change.test.mjs",
@@ -10,7 +14,8 @@
     "test:m3": "node --test --test-name-pattern='M3' test/m1-local-change.test.mjs",
     "test:m4-capabilities": "node --test test/m4-opencode-capabilities.test.mjs",
     "test:m4-workflow-routes": "node --test test/m4-workflow-routes.test.mjs",
-    "test:m4-attempt-profiles-replan": "node --test test/m4-attempt-profiles-replan.test.mjs"
+    "test:m4-attempt-profiles-replan": "node --test test/m4-attempt-profiles-replan.test.mjs",
+    "test:m4-operator": "node --test test/m4-operator.test.mjs"
   },
   "devDependencies": {
     "ajv": "^8.17.1"

@@ -5569,22 +5569,35 @@ async function main() {
   const workspace = parseOption(argv, "--workspace");
   const runRoot = parseOption(argv, "--run-root");
   if (!workspace || !runRoot) throw new Error("usage: local-change.mjs run --workspace <dir> --run-root <dir> --request <text>");
+  const { invokeOperator, operator } = await import("../bin/opencode-orchestrator.mjs");
   if (command === "inspect" || command === "resume" || command === "cancel") {
     const runId = parseOption(argv, "--run-id");
     const root = resolve(runRoot);
     const selected = runId ?? (await import("node:fs")).readdirSync(join(root, "runs")).sort().at(-1);
     if (!selected) throw new Error("no Run exists under the run root");
     if (!/^[A-Za-z0-9._-]+$/.test(selected)) throw new Error(`invalid Run id: ${selected}`);
-    const runDir = join(root, "runs", selected);
+    const action = command === "inspect" ? "status" : command;
+    const input = { action, run_id: selected };
+    if (command === "resume") {
+      const decision = parseOption(argv, "--decision");
+      const disposition = parseOption(argv, "--decision-disposition");
+      if (decision !== undefined || disposition !== undefined) {
+        input.decision = { disposition, text: decision };
+      }
+    }
     const result = command === "resume"
-      ? await resumeRun(runDir, {
-        workspace,
-        decision: parseOption(argv, "--decision"),
-        decisionDisposition: parseOption(argv, "--decision-disposition"),
+      ? await operator.resume({
+        ...input,
+        target: resolve(workspace),
+        runRoot: root,
+        legacy: true,
       })
-      : command === "cancel"
-        ? await cancelRun(runDir)
-        : inspectRun(runDir);
+      : await invokeOperator(input, {
+        target: resolve(workspace),
+        runRoot: root,
+        legacy: true,
+      });
+    if (result.error) throw new Error(`${result.error.type}: ${result.error.message}`);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -5595,7 +5608,12 @@ async function main() {
   if (typeof requestText !== "string" || requestText.trim().length === 0) {
     throw new Error("usage: local-change.mjs run --workspace <dir> --run-root <dir> --request <text>");
   }
-  const result = await runLocalChange({ workspace, runRoot, requestText });
+  const result = await invokeOperator({ action: "run", request: requestText }, {
+    target: resolve(workspace),
+    runRoot: resolve(runRoot),
+    legacy: true,
+  });
+  if (result.error) throw new Error(`${result.error.type}: ${result.error.message}`);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
