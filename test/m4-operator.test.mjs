@@ -234,7 +234,7 @@ function disposeFixture({ target, runRoot }) {
   rmSync(runRoot, { recursive: true, force: true });
 }
 
-test("AC-36-1 launcher enforces absolute paths, isolated env, pinned OpenCode, and one primary", async () => {
+test("AC-36-1 launcher enforces absolute paths, isolated env, observed OpenCode identity, and one primary", async () => {
   const paths = emptyPaths("issue36-launcher");
   try {
     await withCleanLauncherEnvironment(async () => {
@@ -243,7 +243,8 @@ test("AC-36-1 launcher enforces absolute paths, isolated env, pinned OpenCode, a
         (error) => error.type === "invalid_operator_input",
       );
       const result = preflight({ ...paths, checkConfiguration: true });
-      assert.equal(result.executable.version, "1.18.5");
+      assert.equal(typeof result.executable.version, "string");
+      assert.ok(result.executable.version.length > 0);
       assert.equal(result.environment.OPENCODE_CONFIG_DIR.endsWith("/opencode"), true);
       assert.equal(result.environment.XDG_CONFIG_HOME, join(paths.runRoot, "operator-runtime/config"));
       assert.equal(result.environment.HOME, join(paths.runRoot, "operator-runtime/home"));
@@ -262,7 +263,7 @@ test("AC-36-2 exact #34 bundle tree and manifest digest pass before Run creation
   try {
     await withCleanLauncherEnvironment(async () => {
       const result = preflight(paths);
-      assert.equal(result.digest, "sha256:e12e6ca683db3248401baad39d95ef8014ae245a054cc1f9d804c7181c1a8e22");
+      assert.equal(result.digest, "sha256:b9df2e52912db2991a093ddde5b47bd7d0872fb09a17844d41f25b1041088e3f");
       assert.equal(result.bundleRoot, join(repositoryPath, "opencode"));
       assert.equal(existsSync(join(paths.runRoot, "runs")), false);
     });
@@ -289,13 +290,13 @@ test("AC-36-3 commands emit only closed action inputs with exact request and Run
   });
 });
 
-test("AC-36-4 public CLI and native tool use one exported operator module", () => {
+test("AC-36-4 public CLI and native tool use one shared operator module through relative imports", () => {
   assert.deepEqual(Object.keys(operator).sort(), ["cancel", "inspect", "resume", "run"]);
   const packageJson = JSON.parse(readFileSync(join(repositoryPath, "package.json"), "utf8"));
-  assert.equal(packageJson.exports["./operator"], "./bin/opencode-orchestrator.mjs");
+  assert.equal(packageJson.exports, undefined, "the dead ./operator export was removed with the direct relative imports");
   assert.match(readFileSync(join(repositoryPath, "scripts/local-change.mjs"), "utf8"), /import\("\.\.\/bin\/opencode-orchestrator\.mjs"\)/);
   const tool = readFileSync(join(repositoryPath, "opencode/tools/orchestrator_operator.ts"), "utf8");
-  assert.match(tool, /from "opencode-orchestrated-agent-workflow\/operator"/);
+  assert.match(tool, /from "\.\.\/\.\.\/bin\/opencode-orchestrator\.mjs"/);
   assert.doesNotMatch(tool, /child_process|execFile|spawn|local-change\.mjs/);
 });
 

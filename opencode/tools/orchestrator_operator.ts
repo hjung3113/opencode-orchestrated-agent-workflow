@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
-import { invokeOperator } from "opencode-orchestrated-agent-workflow/operator";
+import { invokeOperator } from "../../bin/opencode-orchestrator.mjs";
 
 export default tool({
   description: "Run, inspect, resume, or cancel the file-backed orchestrator.",

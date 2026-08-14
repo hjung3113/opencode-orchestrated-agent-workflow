@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -25,7 +26,6 @@ import {
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bundleRoot = join(packageRoot, "opencode");
-const supportedOpenCodeVersion = "1.18.5";
 const operatorSchemaVersion = "1";
 const operatorActions = new Set(["run", "status", "resume", "cancel"]);
 const bundleAssets = [
@@ -54,8 +54,11 @@ const bundleAssets = [
 ];
 
 // Filled from the checked-in #34 asset tree; a changed byte or path fails closed.
-const bundleDigest = "sha256:e12e6ca683db3248401baad39d95ef8014ae245a054cc1f9d804c7181c1a8e22";
-const generatedConfigIgnore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
+// The generated opencode/node_modules dependency tree (installed for
+// @opencode-ai/plugin resolution and ignored by opencode/.gitignore) is the
+// only undeclared entry allowed inside the validated bundle root.
+const bundleDigest = "sha256:b9df2e52912db2991a093ddde5b47bd7d0872fb09a17844d41f25b1041088e3f";
+const generatedConfigIgnore = "node_modules\n.gitignore";
 
 const collisionNames = {
   commands: ["orchestrate", "orchestrate-status", "orchestrate-resume", "orchestrate-cancel"],
@@ -155,19 +158,23 @@ function validateBundle() {
     throw new DependencyUnavailable("#34 bundle manifest digest mismatch");
   }
   const expected = new Set(bundleAssets);
+  const gitignorePath = join(packageRoot, "opencode/.gitignore");
+  const gitignoreAccepted = existsSync(gitignorePath)
+    && readFileSync(gitignorePath, "utf8") === generatedConfigIgnore;
   for (const root of ["opencode", "workflow-agents", "workflows", "route-rules", "skills"]) {
     for (const file of walkFiles(join(packageRoot, root))) {
       const asset = `${root}/${file}`;
-      if (asset === "opencode/.gitignore" && readFileSync(join(packageRoot, asset), "utf8") === generatedConfigIgnore) continue;
+      if (asset === "opencode/.gitignore" && gitignoreAccepted) continue;
+      if (root === "opencode" && gitignoreAccepted && file.split("/")[0] === "node_modules") continue;
       if (!expected.has(asset)) throw new OperatorError("runtime_configuration_conflict", `undeclared bundle asset: ${asset}`);
     }
   }
   const operatorTool = readFileSync(join(bundleRoot, "tools/orchestrator_operator.ts"), "utf8");
   const routeTool = readFileSync(join(bundleRoot, "tools/request_route.ts"), "utf8");
-  if (!operatorTool.includes('from "opencode-orchestrated-agent-workflow/operator"')
+  if (!operatorTool.includes('from "../../bin/opencode-orchestrator.mjs"')
     || !operatorTool.includes("invokeOperator")
     || /child_process|execFile|spawn|local-change\.mjs/.test(operatorTool)
-    || !routeTool.includes('from "opencode-orchestrated-agent-workflow/operator"')
+    || !routeTool.includes('from "../../bin/opencode-orchestrator.mjs"')
     || !routeTool.includes("requestRoute")) {
     throw new OperatorError("unsupported_capability_enforcement", "#34 tool adapters do not use the shared operator export");
   }
@@ -234,7 +241,7 @@ function validateCollisions(target) {
   }
 }
 
-function launchEnvironment(runRoot) {
+function launchEnvironment(runRoot, target) {
   const runtimeRoot = join(runRoot, "operator-runtime");
   const values = {
     HOME: join(runtimeRoot, "home"),
@@ -247,6 +254,7 @@ function launchEnvironment(runRoot) {
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
     OPENCODE_DISABLE_MODELS_FETCH: "true",
     ORCHESTRATOR_RUN_ROOT: runRoot,
+    ORCHESTRATOR_TARGET: target,
   };
   for (const [name, value] of Object.entries(values)) {
     if (name !== "HOME" && process.env[name] !== undefined && process.env[name] !== value) {
@@ -258,10 +266,28 @@ function launchEnvironment(runRoot) {
       throw new OperatorError("runtime_configuration_conflict", `launcher environment conflict: ${name}`);
     }
   }
+  // ORCHESTRATOR_TARGET and ORCHESTRATOR_NODE_EXEC for the launcher child are
+  // validated once, in operatorChildEnvironment; nodeExecutable() in
+  // scripts/local-change.mjs validates ORCHESTRATOR_NODE_EXEC for the
+  // command-admission path.
   const environment = { ...process.env };
   delete environment.OPENCODE_CONFIG;
   delete environment.OPENCODE_CONFIG_CONTENT;
   return { ...environment, ...values };
+}
+
+// Minimum OpenCode release the closed bundle is known to resolve against;
+// older runtimes fail at the preflight gate instead of deep inside a Run.
+const minimumOpenCodeVersion = [1, 18, 5];
+
+function versionSatisfiesMinimum(version, minimum) {
+  const observed = version.replace(/^v/i, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10));
+  for (let index = 0; index < minimum.length; index += 1) {
+    const segment = Number.isNaN(observed[index]) ? 0 : observed[index];
+    if (segment > minimum[index]) return true;
+    if (segment < minimum[index]) return false;
+  }
+  return true;
 }
 
 function opencodeExecutable() {
@@ -279,8 +305,13 @@ function opencodeExecutable() {
   } catch {
     throw new OperatorError("unsupported_capability_enforcement", "OpenCode version could not be observed");
   }
-  if (version !== supportedOpenCodeVersion) {
-    throw new OperatorError("dependency_unavailable", `OpenCode ${supportedOpenCodeVersion} is required; found ${version}`);
+  if (version.length === 0) {
+    throw new OperatorError("unsupported_capability_enforcement", "OpenCode version could not be observed");
+  }
+  if (!versionSatisfiesMinimum(version, minimumOpenCodeVersion)) {
+    throw new DependencyUnavailable(
+      `OpenCode ${minimumOpenCodeVersion.join(".")} or newer is required; found ${version}`,
+    );
   }
   return { path, version };
 }
@@ -290,7 +321,7 @@ export function preflight({ target, runRoot, checkConfiguration = false } = {}) 
   const bundle = validateBundle();
   validateCollisions(paths.target);
   const executable = opencodeExecutable();
-  const environment = launchEnvironment(paths.runRoot);
+  const environment = launchEnvironment(paths.runRoot, paths.target);
   if (checkConfiguration) {
     validateResolvedConfiguration(executable.path, paths.target, environment);
     validateBundle();
@@ -552,6 +583,21 @@ function parseLauncherArgs(argv) {
   return { target: parseOption(argv, "--target"), runRoot: parseOption(argv, "--run-root") };
 }
 
+export function operatorChildEnvironment(preflightResult) {
+  // ORCHESTRATOR_TARGET conflicts are rejected by launchEnvironment's uniform
+  // values check; this is the single place that pins the launcher child to the
+  // launching process's own Node executable.
+  if (process.env.ORCHESTRATOR_NODE_EXEC !== undefined
+    && process.env.ORCHESTRATOR_NODE_EXEC !== process.execPath) {
+    throw new OperatorError("runtime_configuration_conflict", "launcher environment conflict: ORCHESTRATOR_NODE_EXEC");
+  }
+  return {
+    ...preflightResult.environment,
+    ORCHESTRATOR_TARGET: preflightResult.target,
+    ORCHESTRATOR_NODE_EXEC: process.execPath,
+  };
+}
+
 export function launch(argv = process.argv.slice(2)) {
   const { target, runRoot } = parseLauncherArgs(argv);
   const preflightResult = preflight({ target, runRoot, checkConfiguration: true });
@@ -566,7 +612,7 @@ export function launch(argv = process.argv.slice(2)) {
     "orchestrator",
   ], {
     cwd: preflightResult.target,
-    env: { ...preflightResult.environment, ORCHESTRATOR_TARGET: preflightResult.target },
+    env: operatorChildEnvironment(preflightResult),
     stdio: "inherit",
   });
   if (result.error) throw result.error;

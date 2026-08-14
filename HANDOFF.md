@@ -1237,3 +1237,12 @@ deletion.
   objective or acceptance criteria, and inside the original allowed scope.
 - Reject or defer speculative hardening, future-proofing, and adjacent defects.
   A broader repair needs an explicit user-approved scope change.
+
+## M4 default model note (2026-08-15)
+
+- `opencode/agents/orchestrator.md` now defaults the visible orchestrator
+  primary to `zai-coding-plan/glm-5.2` (previously `opencode/big-pickle`).
+  This is intentional: the m4-exit real-provider gate runs against the Z.AI
+  coding-plan backend, which requires `ZHIPU_API_KEY` to be supplied in the
+  environment. Without it, the real-provider tests are skipped rather than
+  failing the suite.
