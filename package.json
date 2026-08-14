@@ -6,6 +6,7 @@
     "./operator": "./bin/opencode-orchestrator.mjs"
   },
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "opencode": "node bin/opencode-orchestrator.mjs",
     "test:m0": "node --test test/m0-probe.test.mjs",
     "test:protocol": "node --test test/protocol-schema.test.mjs",
