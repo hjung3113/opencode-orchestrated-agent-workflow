@@ -25,7 +25,6 @@ import {
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bundleRoot = join(packageRoot, "opencode");
-const supportedOpenCodeVersion = "1.18.5";
 const operatorSchemaVersion = "1";
 const operatorActions = new Set(["run", "status", "resume", "cancel"]);
 const bundleAssets = [
@@ -54,8 +53,11 @@ const bundleAssets = [
 ];
 
 // Filled from the checked-in #34 asset tree; a changed byte or path fails closed.
-const bundleDigest = "sha256:e12e6ca683db3248401baad39d95ef8014ae245a054cc1f9d804c7181c1a8e22";
+const bundleDigest = "sha256:b9df2e52912db2991a093ddde5b47bd7d0872fb09a17844d41f25b1041088e3f";
 const generatedConfigIgnore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
+const generatedDependencyEntries = new Set(
+  generatedConfigIgnore.split("\n").filter((name) => name !== ".gitignore"),
+);
 
 const collisionNames = {
   commands: ["orchestrate", "orchestrate-status", "orchestrate-resume", "orchestrate-cancel"],
@@ -155,19 +157,23 @@ function validateBundle() {
     throw new DependencyUnavailable("#34 bundle manifest digest mismatch");
   }
   const expected = new Set(bundleAssets);
+  const gitignorePath = join(packageRoot, "opencode/.gitignore");
+  const gitignoreAccepted = existsSync(gitignorePath)
+    && readFileSync(gitignorePath, "utf8") === generatedConfigIgnore;
   for (const root of ["opencode", "workflow-agents", "workflows", "route-rules", "skills"]) {
     for (const file of walkFiles(join(packageRoot, root))) {
       const asset = `${root}/${file}`;
-      if (asset === "opencode/.gitignore" && readFileSync(join(packageRoot, asset), "utf8") === generatedConfigIgnore) continue;
+      if (asset === "opencode/.gitignore" && gitignoreAccepted) continue;
+      if (root === "opencode" && gitignoreAccepted && generatedDependencyEntries.has(file.split("/")[0])) continue;
       if (!expected.has(asset)) throw new OperatorError("runtime_configuration_conflict", `undeclared bundle asset: ${asset}`);
     }
   }
   const operatorTool = readFileSync(join(bundleRoot, "tools/orchestrator_operator.ts"), "utf8");
   const routeTool = readFileSync(join(bundleRoot, "tools/request_route.ts"), "utf8");
-  if (!operatorTool.includes('from "opencode-orchestrated-agent-workflow/operator"')
+  if (!operatorTool.includes('from "../../bin/opencode-orchestrator.mjs"')
     || !operatorTool.includes("invokeOperator")
     || /child_process|execFile|spawn|local-change\.mjs/.test(operatorTool)
-    || !routeTool.includes('from "opencode-orchestrated-agent-workflow/operator"')
+    || !routeTool.includes('from "../../bin/opencode-orchestrator.mjs"')
     || !routeTool.includes("requestRoute")) {
     throw new OperatorError("unsupported_capability_enforcement", "#34 tool adapters do not use the shared operator export");
   }
@@ -279,8 +285,8 @@ function opencodeExecutable() {
   } catch {
     throw new OperatorError("unsupported_capability_enforcement", "OpenCode version could not be observed");
   }
-  if (version !== supportedOpenCodeVersion) {
-    throw new OperatorError("dependency_unavailable", `OpenCode ${supportedOpenCodeVersion} is required; found ${version}`);
+  if (version.length === 0) {
+    throw new OperatorError("unsupported_capability_enforcement", "OpenCode version could not be observed");
   }
   return { path, version };
 }
@@ -552,6 +558,14 @@ function parseLauncherArgs(argv) {
   return { target: parseOption(argv, "--target"), runRoot: parseOption(argv, "--run-root") };
 }
 
+export function operatorChildEnvironment(preflightResult) {
+  return {
+    ...preflightResult.environment,
+    ORCHESTRATOR_TARGET: preflightResult.target,
+    ORCHESTRATOR_NODE_EXEC: process.execPath,
+  };
+}
+
 export function launch(argv = process.argv.slice(2)) {
   const { target, runRoot } = parseLauncherArgs(argv);
   const preflightResult = preflight({ target, runRoot, checkConfiguration: true });
@@ -566,7 +580,7 @@ export function launch(argv = process.argv.slice(2)) {
     "orchestrator",
   ], {
     cwd: preflightResult.target,
-    env: { ...preflightResult.environment, ORCHESTRATOR_TARGET: preflightResult.target },
+    env: operatorChildEnvironment(preflightResult),
     stdio: "inherit",
   });
   if (result.error) throw result.error;

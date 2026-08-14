@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
-import { requestRoute } from "opencode-orchestrated-agent-workflow/operator";
+import { requestRoute } from "../../bin/opencode-orchestrator.mjs";
 
 export default tool({
   description: "Submit the current worker's bounded replan proposal.",

@@ -1,7 +1,7 @@
 ---
 description: The single visible primary for the orchestrator operator.
 mode: primary
-model: opencode/big-pickle
+model: zai-coding-plan/glm-5.2
 tools:
   "*": false
   orchestrator_operator: true

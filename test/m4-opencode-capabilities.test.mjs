@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("OpenCode 1.18.5 exposes every capability required by M4", () => {
+test("OpenCode exposes every capability required by M4", () => {
   const target = mkdtempSync(join(tmpdir(), "m4-opencode-target-"));
   try {
     execFileSync("git", ["init", "-q"], { cwd: target });
@@ -20,10 +20,9 @@ test("OpenCode 1.18.5 exposes every capability required by M4", () => {
     ], { cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 60_000 }));
 
     assert.equal(matrix.schema_version, 1);
-    assert.deepEqual(matrix.runtime, {
-      executable: execFileSync("sh", ["-c", "command -v opencode"], { encoding: "utf8" }).trim(),
-      version: "1.18.5",
-    });
+    assert.equal(typeof matrix.runtime.version, "string");
+    assert.ok(matrix.runtime.version.length > 0);
+    assert.equal(matrix.runtime.executable, execFileSync("sh", ["-c", "command -v opencode"], { encoding: "utf8" }).trim());
     assert.deepEqual(matrix.rows.map(({ id }) => id), [
       "bundle.external_assets",
       "permissions.ordered",

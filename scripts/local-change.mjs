@@ -2330,7 +2330,11 @@ function policyFor(request, budgetOverride = {}) {
   };
 }
 
-function commandSpec(targetFile, expectedContent) {
+function nodeExecutable() {
+  return process.env.ORCHESTRATOR_NODE_EXEC || process.execPath;
+}
+
+export function commandSpec(targetFile, expectedContent) {
   const script = [
     "const fs=require('node:fs');",
     "const value=fs.readFileSync(process.argv[1],'utf8');",
@@ -2339,7 +2343,7 @@ function commandSpec(targetFile, expectedContent) {
   ].join("");
   return {
     command_id: "verify-change",
-    argv: [process.execPath, "-e", script, targetFile, expectedContent],
+    argv: [nodeExecutable(), "-e", script, targetFile, expectedContent],
     cwd: ".",
     timeout_seconds: 10,
   };
@@ -5075,7 +5079,64 @@ export async function runLocalChange({
         label: "worker Result proposal Attempt",
       });
     }
-    const workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
+    let workerProposal;
+    try {
+      workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
+    } catch (firstWorkerProposalError) {
+      if (preparedWorkerProposal) throw firstWorkerProposalError;
+      writePreparedExecution(ctx, "worker-implementation-1", {
+        binding: proposalExecution.binding,
+        text: "",
+        snapshot: workerSnapshot,
+        before_snapshot: workerSnapshot,
+        phase: "worker_result_proposal",
+        result_commit: resultCommit,
+        worker_snapshot: workerSnapshot,
+        observed_resources: observedResources,
+        worker_changes: workerChanges,
+        command_execution: commandExecution,
+        worker_edit_runtime_ref: workerEditRuntimeRef,
+      });
+      const correctiveProposalResult = await executeRuntimeAttempt(ctx, state, adapter, {
+        role: "worker",
+        attemptId: "worker-implementation-1",
+        taskId: "implementation-1",
+        attempt: 1,
+        prompt: [
+          "Your previous worker Result proposal was not a valid JSON object with the required fields.",
+          `The canonical Output Snapshot digest is ${workerSnapshot.digest} and the observed changed resource is exactly ${JSON.stringify(observedResources)}.`,
+          "Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal the canonical digest.",
+          "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
+        ].join("\n"),
+        beforeSnapshot: workerSnapshot,
+        deadlineSeconds: implementation.packet.deadline_seconds,
+        label: "worker Result proposal Attempt",
+      });
+      proposalExecution = correctiveProposalResult.execution;
+      writePreparedExecution(ctx, "worker-implementation-1", {
+        ...proposalExecution,
+        phase: "worker_result_proposal",
+        result_commit: resultCommit,
+        worker_snapshot: workerSnapshot,
+        observed_resources: observedResources,
+        worker_changes: workerChanges,
+        command_execution: commandExecution,
+        worker_edit_runtime_ref: workerEditRuntimeRef,
+      });
+      admitRuntimeAttempt(ctx, state, proposalExecution, {
+        attemptId: "worker-implementation-1",
+        label: "worker Result proposal Attempt",
+      });
+      writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal-retry.json", {
+        ...proposalExecution.observation,
+        artifact_id: "runtime-worker-implementation-1-proposal-retry",
+      });
+      try {
+        workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
+      } catch (secondWorkerProposalError) {
+        throw firstWorkerProposalError;
+      }
+    }
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
       throw new Error(`worker Result proposal changed_resources do not match the observed diff: proposed=${JSON.stringify(workerProposal.changed_resources)} observed=${JSON.stringify(observedResources)}`);
     }
