@@ -290,10 +290,10 @@ test("AC-36-3 commands emit only closed action inputs with exact request and Run
   });
 });
 
-test("AC-36-4 public CLI and native tool use one exported operator module", () => {
+test("AC-36-4 public CLI and native tool use one shared operator module through relative imports", () => {
   assert.deepEqual(Object.keys(operator).sort(), ["cancel", "inspect", "resume", "run"]);
   const packageJson = JSON.parse(readFileSync(join(repositoryPath, "package.json"), "utf8"));
-  assert.equal(packageJson.exports["./operator"], "./bin/opencode-orchestrator.mjs");
+  assert.equal(packageJson.exports, undefined, "the dead ./operator export was removed with the direct relative imports");
   assert.match(readFileSync(join(repositoryPath, "scripts/local-change.mjs"), "utf8"), /import\("\.\.\/bin\/opencode-orchestrator\.mjs"\)/);
   const tool = readFileSync(join(repositoryPath, "opencode/tools/orchestrator_operator.ts"), "utf8");
   assert.match(tool, /from "\.\.\/\.\.\/bin\/opencode-orchestrator\.mjs"/);

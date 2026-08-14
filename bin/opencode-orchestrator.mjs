@@ -53,11 +53,11 @@ const bundleAssets = [
 ];
 
 // Filled from the checked-in #34 asset tree; a changed byte or path fails closed.
+// The generated opencode/node_modules dependency tree (installed for
+// @opencode-ai/plugin resolution and ignored by opencode/.gitignore) is the
+// only undeclared entry allowed inside the validated bundle root.
 const bundleDigest = "sha256:b9df2e52912db2991a093ddde5b47bd7d0872fb09a17844d41f25b1041088e3f";
 const generatedConfigIgnore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
-const generatedDependencyEntries = new Set(
-  generatedConfigIgnore.split("\n").filter((name) => name !== ".gitignore"),
-);
 
 const collisionNames = {
   commands: ["orchestrate", "orchestrate-status", "orchestrate-resume", "orchestrate-cancel"],
@@ -164,7 +164,7 @@ function validateBundle() {
     for (const file of walkFiles(join(packageRoot, root))) {
       const asset = `${root}/${file}`;
       if (asset === "opencode/.gitignore" && gitignoreAccepted) continue;
-      if (root === "opencode" && gitignoreAccepted && generatedDependencyEntries.has(file.split("/")[0])) continue;
+      if (root === "opencode" && gitignoreAccepted && file.split("/")[0] === "node_modules") continue;
       if (!expected.has(asset)) throw new OperatorError("runtime_configuration_conflict", `undeclared bundle asset: ${asset}`);
     }
   }
@@ -240,7 +240,7 @@ function validateCollisions(target) {
   }
 }
 
-function launchEnvironment(runRoot) {
+function launchEnvironment(runRoot, target) {
   const runtimeRoot = join(runRoot, "operator-runtime");
   const values = {
     HOME: join(runtimeRoot, "home"),
@@ -253,6 +253,7 @@ function launchEnvironment(runRoot) {
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
     OPENCODE_DISABLE_MODELS_FETCH: "true",
     ORCHESTRATOR_RUN_ROOT: runRoot,
+    ORCHESTRATOR_TARGET: target,
   };
   for (const [name, value] of Object.entries(values)) {
     if (name !== "HOME" && process.env[name] !== undefined && process.env[name] !== value) {
@@ -264,10 +265,34 @@ function launchEnvironment(runRoot) {
       throw new OperatorError("runtime_configuration_conflict", `launcher environment conflict: ${name}`);
     }
   }
+  // ORCHESTRATOR_NODE_EXEC becomes argv[0] of admitted verification commands,
+  // so an inherited value must at least name an existing executable file.
+  const configuredNodeExec = process.env.ORCHESTRATOR_NODE_EXEC;
+  if (configuredNodeExec !== undefined
+    && (!existsSync(configuredNodeExec) || !lstatSync(configuredNodeExec).isFile())) {
+    throw new OperatorError(
+      "runtime_configuration_conflict",
+      `launcher environment conflict: ORCHESTRATOR_NODE_EXEC does not name an existing executable: ${configuredNodeExec}`,
+    );
+  }
   const environment = { ...process.env };
   delete environment.OPENCODE_CONFIG;
   delete environment.OPENCODE_CONFIG_CONTENT;
   return { ...environment, ...values };
+}
+
+// Minimum OpenCode release the closed bundle is known to resolve against;
+// older runtimes fail at the preflight gate instead of deep inside a Run.
+const minimumOpenCodeVersion = [1, 18, 5];
+
+function versionSatisfiesMinimum(version, minimum) {
+  const observed = version.replace(/^v/i, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10));
+  for (let index = 0; index < minimum.length; index += 1) {
+    const segment = Number.isNaN(observed[index]) ? 0 : observed[index];
+    if (segment > minimum[index]) return true;
+    if (segment < minimum[index]) return false;
+  }
+  return true;
 }
 
 function opencodeExecutable() {
@@ -288,6 +313,11 @@ function opencodeExecutable() {
   if (version.length === 0) {
     throw new OperatorError("unsupported_capability_enforcement", "OpenCode version could not be observed");
   }
+  if (!versionSatisfiesMinimum(version, minimumOpenCodeVersion)) {
+    throw new DependencyUnavailable(
+      `OpenCode ${minimumOpenCodeVersion.join(".")} or newer is required; found ${version}`,
+    );
+  }
   return { path, version };
 }
 
@@ -296,7 +326,7 @@ export function preflight({ target, runRoot, checkConfiguration = false } = {}) 
   const bundle = validateBundle();
   validateCollisions(paths.target);
   const executable = opencodeExecutable();
-  const environment = launchEnvironment(paths.runRoot);
+  const environment = launchEnvironment(paths.runRoot, paths.target);
   if (checkConfiguration) {
     validateResolvedConfiguration(executable.path, paths.target, environment);
     validateBundle();
@@ -559,6 +589,14 @@ function parseLauncherArgs(argv) {
 }
 
 export function operatorChildEnvironment(preflightResult) {
+  if (process.env.ORCHESTRATOR_TARGET !== undefined
+    && process.env.ORCHESTRATOR_TARGET !== preflightResult.target) {
+    throw new OperatorError("runtime_configuration_conflict", "launcher environment conflict: ORCHESTRATOR_TARGET");
+  }
+  if (process.env.ORCHESTRATOR_NODE_EXEC !== undefined
+    && process.env.ORCHESTRATOR_NODE_EXEC !== process.execPath) {
+    throw new OperatorError("runtime_configuration_conflict", "launcher environment conflict: ORCHESTRATOR_NODE_EXEC");
+  }
   return {
     ...preflightResult.environment,
     ORCHESTRATOR_TARGET: preflightResult.target,

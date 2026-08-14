@@ -2,9 +2,6 @@
   "name": "opencode-orchestrated-agent-workflow",
   "private": true,
   "type": "module",
-  "exports": {
-    "./operator": "./bin/opencode-orchestrator.mjs"
-  },
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "opencode": "node bin/opencode-orchestrator.mjs",

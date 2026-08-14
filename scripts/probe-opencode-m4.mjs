@@ -21,6 +21,15 @@ const target = resolve(args[targetIndex + 1]);
 const executable = execFileSync("sh", ["-c", "command -v opencode"], { encoding: "utf8" }).trim();
 const version = execFileSync(executable, ["--version"], { encoding: "utf8" }).trim();
 assert.ok(version.length > 0, "OpenCode runtime identity must be observable");
+const minimumOpenCodeVersion = [1, 18, 5];
+const observedSegments = version.replace(/^v/i, "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10));
+let olderThanMinimum = false;
+for (let index = 0; index < minimumOpenCodeVersion.length && !olderThanMinimum; index += 1) {
+  const observed = Number.isNaN(observedSegments[index]) ? 0 : observedSegments[index];
+  if (observed < minimumOpenCodeVersion[index]) olderThanMinimum = true;
+  else if (observed > minimumOpenCodeVersion[index]) break;
+}
+assert.ok(!olderThanMinimum, `OpenCode ${minimumOpenCodeVersion.join(".")} or newer is required; found ${version}`);
 
 const scratch = mkdtempSync(join(tmpdir(), "m4-opencode-probe-"));
 const bundle = join(scratch, "bundle");

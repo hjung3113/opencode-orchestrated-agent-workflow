@@ -2331,7 +2331,14 @@ function policyFor(request, budgetOverride = {}) {
 }
 
 function nodeExecutable() {
-  return process.env.ORCHESTRATOR_NODE_EXEC || process.execPath;
+  const configured = process.env.ORCHESTRATOR_NODE_EXEC;
+  if (configured) {
+    if (!existsSync(configured) || !lstatSync(configured).isFile()) {
+      throw new Error(`ORCHESTRATOR_NODE_EXEC does not name an existing node executable: ${configured}`);
+    }
+    return configured;
+  }
+  return process.execPath;
 }
 
 export function commandSpec(targetFile, expectedContent) {
@@ -2632,14 +2639,15 @@ export class BudgetExceeded extends Error {
   }
 }
 
-export function admitBudget(state, kind) {
+export function admitBudget(state, kind, extraExecutions = 0) {
   const limits = {
     planner_attempt: [
       state.runtime_bindings.filter(({ role }) => role === "planner").length,
       state.budget.max_planner_attempts,
     ],
     execution_attempt: [
-      state.runtime_bindings.filter(({ role }) => role === "worker" || role === "verifier").length,
+      state.runtime_bindings.filter(({ role }) => role === "worker" || role === "verifier").length
+        + extraExecutions,
       state.budget.max_execution_attempts,
     ],
     graph_revision: [
@@ -2783,6 +2791,48 @@ function admitRuntimeAttempt(ctx, state, execution, spec) {
     }
     throw error;
   }
+}
+
+// Shared dispatch for the initial and corrective worker-authored Result
+// proposal turns: one real provider execution on the admitted worker binding,
+// published as a prepared execution before the Attempt is admitted.
+async function dispatchWorkerProposal(ctx, state, adapter, {
+  prompt,
+  beforeSnapshot,
+  deadlineSeconds,
+  resultCommit,
+  workerSnapshot,
+  observedResources,
+  workerChanges,
+  commandExecution,
+  workerEditRuntimeRef,
+}) {
+  const executionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: "worker",
+    attemptId: "worker-implementation-1",
+    taskId: "implementation-1",
+    attempt: 1,
+    prompt,
+    beforeSnapshot,
+    deadlineSeconds,
+    label: "worker Result proposal Attempt",
+  });
+  const execution = executionResult.execution;
+  writePreparedExecution(ctx, "worker-implementation-1", {
+    ...execution,
+    phase: "worker_result_proposal",
+    result_commit: resultCommit,
+    worker_snapshot: workerSnapshot,
+    observed_resources: observedResources,
+    worker_changes: workerChanges,
+    command_execution: commandExecution,
+    worker_edit_runtime_ref: workerEditRuntimeRef,
+  });
+  admitRuntimeAttempt(ctx, state, execution, {
+    attemptId: "worker-implementation-1",
+    label: "worker Result proposal Attempt",
+  });
+  return execution;
 }
 
 async function reconcileRuntimeAttempt(ctx, state, adapter, attemptId, beforeSnapshot) {
@@ -4997,6 +5047,7 @@ export async function runLocalChange({
     let workerChanges;
     let observedResources;
     let proposalExecution;
+    let proposalSpec;
     if (preparedWorkerProposal) {
       const prepared = preparedWorkerExecution;
       workerSnapshot = prepared.worker_snapshot;
@@ -5049,37 +5100,27 @@ export async function runLocalChange({
         command_execution: commandExecution,
         worker_edit_runtime_ref: workerEditRuntimeRef,
       });
-      const proposalExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
-        role: "worker",
-        attemptId: "worker-implementation-1",
-        taskId: "implementation-1",
-        attempt: 1,
+      proposalSpec = {
+        beforeSnapshot: workerSnapshot,
+        deadlineSeconds: implementation.packet.deadline_seconds,
+        resultCommit,
+        workerSnapshot,
+        observedResources,
+        workerChanges,
+        commandExecution,
+        workerEditRuntimeRef,
+      };
+      proposalExecution = await dispatchWorkerProposal(ctx, state, adapter, {
+        ...proposalSpec,
         prompt: [
           "The Kernel observed and command-checked your isolated edit and committed the Result candidate.",
           `The canonical Output Snapshot digest is ${workerSnapshot.digest}. Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal ${workerSnapshot.digest}.`,
           "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
         ].join("\n"),
-        beforeSnapshot: workerSnapshot,
-        deadlineSeconds: implementation.packet.deadline_seconds,
-        label: "worker Result proposal Attempt",
-      });
-      proposalExecution = proposalExecutionResult.execution;
-      writePreparedExecution(ctx, "worker-implementation-1", {
-        ...proposalExecution,
-        phase: "worker_result_proposal",
-        result_commit: resultCommit,
-        worker_snapshot: workerSnapshot,
-        observed_resources: observedResources,
-        worker_changes: workerChanges,
-        command_execution: commandExecution,
-        worker_edit_runtime_ref: workerEditRuntimeRef,
-      });
-      admitRuntimeAttempt(ctx, state, proposalExecution, {
-        attemptId: "worker-implementation-1",
-        label: "worker Result proposal Attempt",
       });
     }
     let workerProposal;
+    let proposalRetryRef = null;
     try {
       workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
     } catch (firstWorkerProposalError) {
@@ -5097,44 +5138,29 @@ export async function runLocalChange({
         command_execution: commandExecution,
         worker_edit_runtime_ref: workerEditRuntimeRef,
       });
-      const correctiveProposalResult = await executeRuntimeAttempt(ctx, state, adapter, {
-        role: "worker",
-        attemptId: "worker-implementation-1",
-        taskId: "implementation-1",
-        attempt: 1,
+      writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal.json", {
+        ...proposalExecution.observation,
+        artifact_id: "runtime-worker-implementation-1-proposal",
+      });
+      admitBudget(state, "execution_attempt", 1);
+      proposalExecution = await dispatchWorkerProposal(ctx, state, adapter, {
+        ...proposalSpec,
         prompt: [
           "Your previous worker Result proposal was not a valid JSON object with the required fields.",
           `The canonical Output Snapshot digest is ${workerSnapshot.digest} and the observed changed resource is exactly ${JSON.stringify(observedResources)}.`,
           "Return exactly one JSON object and no Markdown for your worker-authored Result proposal. Claims and changed_resources must be arrays of strings, evidence must contain string claim/source/observation fields, and output_snapshot must equal the canonical digest.",
           "Use exactly this shape: {\"claims\":[\"the requested file was created\"],\"evidence\":[{\"claim\":\"the target was written\",\"source\":\"worker-report\",\"observation\":\"the named target contains the requested content\"}],\"changed_resources\":[\"change.txt\"],\"output_snapshot\":\"sha256:...\"}. Do not return prose.",
         ].join("\n"),
-        beforeSnapshot: workerSnapshot,
-        deadlineSeconds: implementation.packet.deadline_seconds,
-        label: "worker Result proposal Attempt",
       });
-      proposalExecution = correctiveProposalResult.execution;
-      writePreparedExecution(ctx, "worker-implementation-1", {
-        ...proposalExecution,
-        phase: "worker_result_proposal",
-        result_commit: resultCommit,
-        worker_snapshot: workerSnapshot,
-        observed_resources: observedResources,
-        worker_changes: workerChanges,
-        command_execution: commandExecution,
-        worker_edit_runtime_ref: workerEditRuntimeRef,
-      });
-      admitRuntimeAttempt(ctx, state, proposalExecution, {
-        attemptId: "worker-implementation-1",
-        label: "worker Result proposal Attempt",
-      });
-      writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal-retry.json", {
+      proposalRetryRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal-retry.json", {
         ...proposalExecution.observation,
         artifact_id: "runtime-worker-implementation-1-proposal-retry",
       });
       try {
         workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
       } catch (secondWorkerProposalError) {
-        throw firstWorkerProposalError;
+        secondWorkerProposalError.message = `${firstWorkerProposalError.message}; corrective retry also failed: ${secondWorkerProposalError.message}`;
+        throw secondWorkerProposalError;
       }
     }
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
@@ -5160,7 +5186,7 @@ export async function runLocalChange({
       attempt: 1,
       producer: workerProducer(workerAttempt.binding.agent_identity),
       runtime_ref: workerRuntimeRef,
-      inputRefs: [implementationPacketRef, workerEditRuntimeRef],
+      inputRefs: [implementationPacketRef, workerEditRuntimeRef, ...(proposalRetryRef ? [proposalRetryRef] : [])],
       createdAt: now(),
       claims: workerProposal.claims,
       evidence: workerProposal.evidence,

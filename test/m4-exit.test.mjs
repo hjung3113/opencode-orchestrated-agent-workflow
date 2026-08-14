@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -14,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   invokeOperator,
@@ -28,17 +30,21 @@ import {
   workspaceSnapshot,
 } from "../scripts/local-change.mjs";
 
-const repository = resolve(new URL("..", import.meta.url).pathname);
-const nodePath = "/opt/homebrew/opt/node@22/bin";
+const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const nodeBinPath = dirname(process.execPath);
 const exactRequest = "Add change.txt with the requested local change.";
-const generatedConfigIgnore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
-const generatedDependencyEntries = new Set(
-  generatedConfigIgnore.split("\n").filter((name) => name !== ".gitignore"),
-);
-const observedOpenCodeVersion = execFileSync("opencode", ["--version"], {
-  encoding: "utf8",
-  env: { ...process.env, PATH: `${nodePath}:${process.env.PATH ?? ""}` },
-}).trim();
+const generatedDependencyEntries = new Set(["node_modules"]);
+let observedOpenCodeVersion = null;
+try {
+  observedOpenCodeVersion = execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim() || null;
+} catch {
+  observedOpenCodeVersion = null;
+}
+const opencodeUnavailableSkip = observedOpenCodeVersion
+  ? false : "the opencode executable is not observable on PATH";
+const providerUnavailableSkip = opencodeUnavailableSkip
+  || (process.env.ZHIPU_API_KEY
+    ? false : "ZHIPU_API_KEY must be supplied externally for the real-provider Issue #39 gate");
 const cleanLauncherVariables = [
   "OPENCODE_CONFIG",
   "OPENCODE_CONFIG_CONTENT",
@@ -147,8 +153,9 @@ function dispose(paths) {
   rmSync(paths.runRoot, { recursive: true, force: true });
 }
 
-const failureTranscriptPath = join(tmpdir(), "issue-39-m4-exit-terminal.log");
-const failureEvidenceRoot = join(tmpdir(), "issue-39-m4-exit-failure-evidence");
+const failureEvidenceRunId = `${process.pid}-${randomBytes(4).toString("hex")}`;
+const failureTranscriptPath = join(tmpdir(), `issue-39-m4-exit-terminal-${failureEvidenceRunId}.log`);
+const failureEvidenceRoot = join(tmpdir(), `issue-39-m4-exit-failure-evidence-${failureEvidenceRunId}`);
 
 function redactCredential(text) {
   const credential = process.env.ZHIPU_API_KEY;
@@ -329,7 +336,7 @@ async function supportedLauncher({ target, runRoot, request }) {
   const output = [];
   const env = {
     ...process.env,
-    PATH: `${nodePath}:${process.env.PATH ?? ""}`,
+    PATH: `${nodeBinPath}:${process.env.PATH ?? ""}`,
     NODE_OPTIONS: "",
     M4_EXIT_TARGET: target,
     M4_EXIT_RUN_ROOT: runRoot,
@@ -340,7 +347,7 @@ async function supportedLauncher({ target, runRoot, request }) {
 set target $::env(M4_EXIT_TARGET)
 set runRoot $::env(M4_EXIT_RUN_ROOT)
 set request $::env(M4_EXIT_REQUEST)
-set ::env(PATH) "${nodePath}:$::env(PATH)"
+set ::env(PATH) "${nodeBinPath}:$::env(PATH)"
 set ::env(NODE_OPTIONS) ""
 log_file -a [file join $runRoot terminal.log]
 spawn npm run opencode -- --target $target --run-root $runRoot
@@ -442,9 +449,13 @@ async function realRun() {
 }
 
 test.after(async () => {
-  if (!realRunPromise) return;
-  const paths = await realRunPromise.catch(() => null);
-  if (paths) dispose(paths);
+  if (realRunPromise) {
+    const paths = await realRunPromise.catch(() => null);
+    if (paths) dispose(paths);
+    else return; // failure evidence was retained on disk for inspection
+  }
+  rmSync(failureEvidenceRoot, { recursive: true, force: true });
+  rmSync(failureTranscriptPath, { force: true });
 });
 
 test("retention helper preserves non-completed Run evidence and redacts the external credential", async () => {
@@ -481,24 +492,30 @@ test("AC-39-1 launcher supplies Node identity and commandSpec does not select th
   assert.equal(childEnv.PATH, "/sentinel-path");
   assert.equal(childEnv.EXISTING, "kept");
 
-  const nativeNode = "/sentinel/native-node";
-  await withEnvironment({ ORCHESTRATOR_NODE_EXEC: nativeNode }, async () => {
-    const spec = commandSpec("target.txt", "expected-content");
-    assert.equal(spec.command_id, "verify-change");
-    assert.equal(spec.argv[0], nativeNode);
-    assert.equal(spec.argv[1], "-e");
-    assert.equal(spec.argv[3], "target.txt");
-    assert.equal(spec.argv[4], "expected-content");
-    assert.notEqual(spec.argv[0], process.execPath);
-  });
+  const nativeNodeRoot = mkdtempSync(join(tmpdir(), "m4-exit-node-"));
+  const nativeNode = join(nativeNodeRoot, "native-node");
+  copyFileSync(process.execPath, nativeNode);
+  try {
+    await withEnvironment({ ORCHESTRATOR_NODE_EXEC: nativeNode }, async () => {
+      const spec = commandSpec("target.txt", "expected-content");
+      assert.equal(spec.command_id, "verify-change");
+      assert.equal(spec.argv[0], nativeNode);
+      assert.equal(spec.argv[1], "-e");
+      assert.equal(spec.argv[3], "target.txt");
+      assert.equal(spec.argv[4], "expected-content");
+      assert.notEqual(spec.argv[0], process.execPath);
+    });
 
-  await withEnvironment({ ORCHESTRATOR_NODE_EXEC: undefined }, async () => {
-    const spec = commandSpec("target.txt", "expected-content");
-    assert.equal(spec.argv[0], process.execPath);
-  });
+    await withEnvironment({ ORCHESTRATOR_NODE_EXEC: undefined }, async () => {
+      const spec = commandSpec("target.txt", "expected-content");
+      assert.equal(spec.argv[0], process.execPath);
+    });
+  } finally {
+    rmSync(nativeNodeRoot, { recursive: true, force: true });
+  }
 });
 
-test("AC-39-1 supported launcher sends the exact request through native orchestrator_operator into the Kernel", { timeout: 420_000 }, async () => {
+test("AC-39-1 supported launcher sends the exact request through native orchestrator_operator into the Kernel", { timeout: 420_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   assert.equal(launched.state.lifecycle_state, "completed",
     `${launched.output}\n[retained diagnostic evidence: ${launched.diagnostic_path ?? "<none>"}]`);
@@ -541,7 +558,7 @@ function freshOperator(input, context) {
     encoding: "utf8",
     env: {
       ...process.env,
-      PATH: `${nodePath}:${process.env.PATH ?? ""}`,
+      PATH: `${nodeBinPath}:${process.env.PATH ?? ""}`,
       NODE_OPTIONS: "",
       M4_OPERATOR_MODULE: join(repository, "bin/opencode-orchestrator.mjs"),
       M4_OPERATOR_INPUT: JSON.stringify(input),
@@ -842,7 +859,7 @@ test("worker Result proposal retry: two malformed proposals preserve the normal 
   }
 });
 
-test("AC-39-2 real local-change@1 reaches completed with independent verification, Promotion, Receipt, Result Ref, object id, and Output Snapshot", { timeout: 420_000 }, async () => {
+test("AC-39-2 real local-change@1 reaches completed with independent verification, Promotion, Receipt, Result Ref, object id, and Output Snapshot", { timeout: 420_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   const evidence = successEvidence(launched.runDir);
   assert.equal(evidence.state.lifecycle_state, "completed");
@@ -874,7 +891,7 @@ test("AC-39-2 real local-change@1 reaches completed with independent verificatio
   assertNoCredential(launched.runRoot);
 });
 
-test("AC-39-3 closed operator projection exposes Run, checkpoint, Runtime Binding, outcome, and Verified Result without Application", { timeout: 420_000 }, async () => {
+test("AC-39-3 closed operator projection exposes Run, checkpoint, Runtime Binding, outcome, and Verified Result without Application", { timeout: 420_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   const context = { target: launched.target, runRoot: launched.runRoot };
   const native = await invokeOperator({ action: "status", run_id: launched.state.run_id }, context);
@@ -895,7 +912,7 @@ test("AC-39-3 closed operator projection exposes Run, checkpoint, Runtime Bindin
   assert.equal(JSON.stringify(native).toLowerCase().includes("application"), false);
 });
 
-test("AC-39-4 fresh-session status, one-action resume, confirmed cancel, and cancel_unconfirmed match the direct file-backed operator", { timeout: 120_000 }, async () => {
+test("AC-39-4 fresh-session status, one-action resume, confirmed cancel, and cancel_unconfirmed match the direct file-backed operator", { timeout: 120_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   assert.equal(launched.launcher_exited, true);
   const context = { target: launched.target, runRoot: launched.runRoot };
@@ -992,7 +1009,7 @@ test("AC-39-4 fresh-session status, one-action resume, confirmed cancel, and can
   }
 });
 
-test("AC-39-5 resolved permissions and checked-in assets equal the allowlist with no undeclared worker authority or direct role selection", async () => {
+test("AC-39-5 resolved permissions and checked-in assets equal the allowlist with no undeclared worker authority or direct role selection", { skip: opencodeUnavailableSkip }, async () => {
   const paths = fixture();
   try {
     await withEnvironment(Object.fromEntries(cleanLauncherVariables.map((name) => [name, undefined])), async () => {
@@ -1074,7 +1091,7 @@ test("AC-39-5 resolved permissions and checked-in assets equal the allowlist wit
   }
 });
 
-test("AC-39-6 every real black-box row preserves target branch, status, Git-visible content, and developer-home configuration", { timeout: 420_000 }, async () => {
+test("AC-39-6 every real black-box row preserves target branch, status, Git-visible content, and developer-home configuration", { timeout: 420_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   assertPreserved(launched, "real launcher");
   assertNoCredential(launched.runRoot);
@@ -1083,7 +1100,7 @@ test("AC-39-6 every real black-box row preserves target branch, status, Git-visi
   assertPreserved(launched, "file-backed status");
 });
 
-test("AC-39-7 focused exit evidence records runtime identity, exact input, counts, duration, terminal artifact, no-mutation, and native/direct equivalence", { timeout: 420_000 }, async () => {
+test("AC-39-7 focused exit evidence records runtime identity, exact input, counts, duration, terminal artifact, no-mutation, and native/direct equivalence", { timeout: 420_000, skip: providerUnavailableSkip }, async () => {
   const launched = await realRun();
   const source = readFileSync(join(repository, "test/m4-exit.test.mjs"), "utf8");
   for (const id of ["AC-39-1", "AC-39-2", "AC-39-3", "AC-39-4", "AC-39-5", "AC-39-6", "AC-39-7"]) {
@@ -1098,7 +1115,8 @@ test("AC-39-7 focused exit evidence records runtime identity, exact input, count
   const terminal = readFileSync(launched.terminal_path, "utf8");
   assert.match(terminal, /Call `orchestrator_operator` exactly once/);
   assert.match(terminal, /Add change\.txt with the requested local change\./);
-  assert.doesNotMatch(readFileSync(join(repository, "bin/opencode-orchestrator.mjs"), "utf8"), /1\.18\.5/);
+  assert.match(readFileSync(join(repository, "bin/opencode-orchestrator.mjs"), "utf8"), /minimumOpenCodeVersion/,
+    "preflight must keep an OpenCode minimum-version compatibility gate");
   const native = freshOperator({ action: "status", run_id: launched.state.run_id }, {
     target: launched.target,
     runRoot: launched.runRoot,
