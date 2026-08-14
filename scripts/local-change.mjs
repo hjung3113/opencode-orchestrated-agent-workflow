@@ -17,6 +17,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -2333,8 +2334,18 @@ function policyFor(request, budgetOverride = {}) {
 function nodeExecutable() {
   const configured = process.env.ORCHESTRATOR_NODE_EXEC;
   if (configured) {
-    if (!existsSync(configured) || !lstatSync(configured).isFile()) {
-      throw new Error(`ORCHESTRATOR_NODE_EXEC does not name an existing node executable: ${configured}`);
+    // statSync follows symlinks so Homebrew/nvm-style node shims resolve to
+    // the real executable file.
+    let stat = null;
+    try {
+      stat = statSync(configured);
+    } catch {}
+    if (!stat?.isFile() || (stat.mode & 0o111) === 0) {
+      const error = new Error(
+        `runtime_configuration_conflict: ORCHESTRATOR_NODE_EXEC does not name an existing executable node: ${configured}`,
+      );
+      error.code = "runtime_configuration_conflict";
+      throw error;
     }
     return configured;
   }
@@ -2647,6 +2658,9 @@ export function admitBudget(state, kind, extraExecutions = 0) {
     ],
     execution_attempt: [
       state.runtime_bindings.filter(({ role }) => role === "worker" || role === "verifier").length
+        // retries re-use an admitted binding, so their consumption is
+        // journaled as durable transitions instead of new bindings
+        + state.transitions.filter(({ event_kind }) => event_kind === "execution_retry_admitted").length
         + extraExecutions,
       state.budget.max_execution_attempts,
     ],
@@ -5120,6 +5134,7 @@ export async function runLocalChange({
       });
     }
     let workerProposal;
+    let proposalRef = null;
     let proposalRetryRef = null;
     try {
       workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
@@ -5138,11 +5153,16 @@ export async function runLocalChange({
         command_execution: commandExecution,
         worker_edit_runtime_ref: workerEditRuntimeRef,
       });
-      writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal.json", {
+      proposalRef = writeArtifact(ctx, "artifacts/runtime/worker-implementation-1-proposal.json", {
         ...proposalExecution.observation,
         artifact_id: "runtime-worker-implementation-1-proposal",
       });
       admitBudget(state, "execution_attempt", 1);
+      // The retry is a real provider execution on the already-admitted worker
+      // binding, so prepareRuntimeAttempt will not create a second
+      // runtime_binding entry; persist its budget consumption as a durable
+      // transition that admitBudget("execution_attempt") counts.
+      state = applyTransition(ctx, state, "execution_retry_admitted", {});
       proposalExecution = await dispatchWorkerProposal(ctx, state, adapter, {
         ...proposalSpec,
         prompt: [
@@ -5159,8 +5179,10 @@ export async function runLocalChange({
       try {
         workerProposal = parseResultProposal(responseObject(proposalExecution.text, "worker Result proposal"));
       } catch (secondWorkerProposalError) {
-        secondWorkerProposalError.message = `${firstWorkerProposalError.message}; corrective retry also failed: ${secondWorkerProposalError.message}`;
-        throw secondWorkerProposalError;
+        throw new Error(
+          `${firstWorkerProposalError.message}; corrective retry also failed: ${secondWorkerProposalError.message}`,
+          { cause: firstWorkerProposalError },
+        );
       }
     }
     if (canonicalJson(workerProposal.changed_resources) !== canonicalJson(observedResources)) {
@@ -5186,7 +5208,12 @@ export async function runLocalChange({
       attempt: 1,
       producer: workerProducer(workerAttempt.binding.agent_identity),
       runtime_ref: workerRuntimeRef,
-      inputRefs: [implementationPacketRef, workerEditRuntimeRef, ...(proposalRetryRef ? [proposalRetryRef] : [])],
+      inputRefs: [
+        implementationPacketRef,
+        workerEditRuntimeRef,
+        ...(proposalRef ? [proposalRef] : []),
+        ...(proposalRetryRef ? [proposalRetryRef] : []),
+      ],
       createdAt: now(),
       claims: workerProposal.claims,
       evidence: workerProposal.evidence,

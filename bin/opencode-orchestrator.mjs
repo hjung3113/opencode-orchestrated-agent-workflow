@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -57,7 +58,7 @@ const bundleAssets = [
 // @opencode-ai/plugin resolution and ignored by opencode/.gitignore) is the
 // only undeclared entry allowed inside the validated bundle root.
 const bundleDigest = "sha256:b9df2e52912db2991a093ddde5b47bd7d0872fb09a17844d41f25b1041088e3f";
-const generatedConfigIgnore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
+const generatedConfigIgnore = "node_modules\n.gitignore";
 
 const collisionNames = {
   commands: ["orchestrate", "orchestrate-status", "orchestrate-resume", "orchestrate-cancel"],
@@ -265,16 +266,10 @@ function launchEnvironment(runRoot, target) {
       throw new OperatorError("runtime_configuration_conflict", `launcher environment conflict: ${name}`);
     }
   }
-  // ORCHESTRATOR_NODE_EXEC becomes argv[0] of admitted verification commands,
-  // so an inherited value must at least name an existing executable file.
-  const configuredNodeExec = process.env.ORCHESTRATOR_NODE_EXEC;
-  if (configuredNodeExec !== undefined
-    && (!existsSync(configuredNodeExec) || !lstatSync(configuredNodeExec).isFile())) {
-    throw new OperatorError(
-      "runtime_configuration_conflict",
-      `launcher environment conflict: ORCHESTRATOR_NODE_EXEC does not name an existing executable: ${configuredNodeExec}`,
-    );
-  }
+  // ORCHESTRATOR_TARGET and ORCHESTRATOR_NODE_EXEC for the launcher child are
+  // validated once, in operatorChildEnvironment; nodeExecutable() in
+  // scripts/local-change.mjs validates ORCHESTRATOR_NODE_EXEC for the
+  // command-admission path.
   const environment = { ...process.env };
   delete environment.OPENCODE_CONFIG;
   delete environment.OPENCODE_CONFIG_CONTENT;
@@ -589,10 +584,9 @@ function parseLauncherArgs(argv) {
 }
 
 export function operatorChildEnvironment(preflightResult) {
-  if (process.env.ORCHESTRATOR_TARGET !== undefined
-    && process.env.ORCHESTRATOR_TARGET !== preflightResult.target) {
-    throw new OperatorError("runtime_configuration_conflict", "launcher environment conflict: ORCHESTRATOR_TARGET");
-  }
+  // ORCHESTRATOR_TARGET conflicts are rejected by launchEnvironment's uniform
+  // values check; this is the single place that pins the launcher child to the
+  // launching process's own Node executable.
   if (process.env.ORCHESTRATOR_NODE_EXEC !== undefined
     && process.env.ORCHESTRATOR_NODE_EXEC !== process.execPath) {
     throw new OperatorError("runtime_configuration_conflict", "launcher environment conflict: ORCHESTRATOR_NODE_EXEC");

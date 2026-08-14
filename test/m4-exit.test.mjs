@@ -24,6 +24,8 @@ import {
   preflight,
 } from "../bin/opencode-orchestrator.mjs";
 import {
+  BudgetExceeded,
+  admitBudget,
   commandSpec,
   digest,
   runLocalChange,
@@ -341,13 +343,15 @@ async function supportedLauncher({ target, runRoot, request }) {
     M4_EXIT_TARGET: target,
     M4_EXIT_RUN_ROOT: runRoot,
     M4_EXIT_REQUEST: request,
+    M4_EXIT_NODE_BIN: nodeBinPath,
   };
   for (const name of cleanLauncherVariables) delete env[name];
   const expectScript = `
 set target $::env(M4_EXIT_TARGET)
 set runRoot $::env(M4_EXIT_RUN_ROOT)
 set request $::env(M4_EXIT_REQUEST)
-set ::env(PATH) "${nodeBinPath}:$::env(PATH)"
+set nodeBin $::env(M4_EXIT_NODE_BIN)
+set ::env(PATH) "$nodeBin:$::env(PATH)"
 set ::env(NODE_OPTIONS) ""
 log_file -a [file join $runRoot terminal.log]
 spawn npm run opencode -- --target $target --run-root $runRoot
@@ -483,14 +487,16 @@ test("retention helper preserves non-completed Run evidence and redacts the exte
 });
 
 test("AC-39-1 launcher supplies Node identity and commandSpec does not select the OpenCode executable in the native path", async () => {
-  const childEnv = operatorChildEnvironment({
-    environment: { PATH: "/sentinel-path", EXISTING: "kept" },
-    target: "/sentinel-target",
+  await withEnvironment({ ORCHESTRATOR_TARGET: undefined, ORCHESTRATOR_NODE_EXEC: undefined }, async () => {
+    const childEnv = operatorChildEnvironment({
+      environment: { PATH: "/sentinel-path", EXISTING: "kept" },
+      target: "/sentinel-target",
+    });
+    assert.equal(childEnv.ORCHESTRATOR_NODE_EXEC, process.execPath);
+    assert.equal(childEnv.ORCHESTRATOR_TARGET, "/sentinel-target");
+    assert.equal(childEnv.PATH, "/sentinel-path");
+    assert.equal(childEnv.EXISTING, "kept");
   });
-  assert.equal(childEnv.ORCHESTRATOR_NODE_EXEC, process.execPath);
-  assert.equal(childEnv.ORCHESTRATOR_TARGET, "/sentinel-target");
-  assert.equal(childEnv.PATH, "/sentinel-path");
-  assert.equal(childEnv.EXISTING, "kept");
 
   const nativeNodeRoot = mkdtempSync(join(tmpdir(), "m4-exit-node-"));
   const nativeNode = join(nativeNodeRoot, "native-node");
@@ -831,6 +837,34 @@ test("worker Result proposal retry: one malformed then valid worker-authored pro
     const workerBindings = state.runtime_bindings.filter(({ attempt_id }) => attempt_id === "worker-implementation-1");
     assert.equal(workerBindings.length, 1, "the corrective retry must not open a second execution authority");
     assert.equal(ran.runtime.sessionNumber, 5, "the corrective retry reuses the admitted worker session");
+    const resultEnvelope = readJson(join(ran.runDir, "artifacts/tasks/implementation-1/attempts/1/result.json"));
+    const inputRefIds = resultEnvelope.input_refs.map(({ artifact_id }) => artifact_id);
+    assert.ok(
+      inputRefIds.includes("runtime-worker-implementation-1-proposal"),
+      "the first malformed proposal's Runtime Observation ref must be retained in the Result input_refs",
+    );
+    assert.ok(
+      inputRefIds.includes("runtime-worker-implementation-1-proposal-retry"),
+      "the corrective retry's Runtime Observation ref must be retained in the Result input_refs",
+    );
+    assert.equal(
+      state.transitions.some(({ event_kind }) => event_kind === "execution_retry_admitted"),
+      true,
+      "the corrective retry's budget consumption must persist in the Run State",
+    );
+    const executionBindings = state.runtime_bindings
+      .filter(({ role }) => role === "worker" || role === "verifier").length;
+    assert.equal(
+      admitBudget(state, "execution_attempt").used,
+      executionBindings + 1,
+      "a later execution_attempt admission must count the retry as consumed budget",
+    );
+    assert.throws(
+      () => admitBudget({ ...state, budget: { ...state.budget, max_execution_attempts: executionBindings + 1 } },
+        "execution_attempt"),
+      BudgetExceeded,
+      "the retry must be rejected once max_execution_attempts is reached",
+    );
   } finally {
     dispose(ran);
   }
