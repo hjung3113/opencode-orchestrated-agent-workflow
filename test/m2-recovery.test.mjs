@@ -180,6 +180,113 @@ function cliResumeWithEnv(workspace, runRoot, runId, env, extra = []) {
   }));
 }
 
+function fullRunProvider() {
+  const fakeBin = mkdtempSync(join(tmpdir(), "m2-fullrun-provider-bin-"));
+  const providerState = join(fakeBin, "provider-state.json");
+  writeFileSync(providerState, JSON.stringify({ nextSession: 1, sessions: {}, targets: {} }));
+  const fakeOpencode = join(fakeBin, "opencode");
+  writeFileSync(fakeOpencode, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const args = process.argv.slice(2);
+const statePath = process.env.M2_FULLRUN_PROVIDER_STATE;
+const readState = () => JSON.parse(readFileSync(statePath, "utf8"));
+const writeState = (state) => writeFileSync(statePath, JSON.stringify(state));
+const send = (response, status, body) => {
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify(body));
+};
+const readBody = (request) => new Promise((resolve) => {
+  let raw = "";
+  request.on("data", (chunk) => { raw += chunk; });
+  request.on("end", () => resolve(raw.length === 0 ? {} : JSON.parse(raw)));
+});
+
+if (args[0] === "--version") {
+  process.stdout.write("m2-fullrun-opencode\\n");
+} else if (args[0] === "debug") {
+  process.stdout.write(JSON.stringify({ instructions: [], plugin: [], mcp: {}, agent: {}, command: {}, provider: {} }) + "\\n");
+} else if (args[0] === "serve") {
+  const server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, "http://127.0.0.1");
+      if (url.pathname === "/global/health") return send(response, 200, { healthy: true, version: "m2-fullrun-opencode" });
+      if (url.pathname === "/agent") return send(response, 200, ["planner", "worker", "verifier"].map((role) => ({ name: "m1-" + role, model: { providerID: "fake", modelID: "model" } })));
+      if (url.pathname === "/event") {
+        response.statusCode = 200;
+        response.setHeader("content-type", "text/event-stream");
+        response.write(": ready\\n\\n");
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/session") {
+        const state = readState();
+        const id = "session-" + state.nextSession;
+        writeState({ ...state, nextSession: state.nextSession + 1, sessions: { ...state.sessions, [id]: null } });
+        return send(response, 200, { id });
+      }
+      if (request.method === "GET" && url.pathname === "/session/status") {
+        return send(response, 200, Object.fromEntries(Object.keys(readState().sessions).map((id) => [id, { type: "idle" }])));
+      }
+      const messageMatch = url.pathname.match(/^\\/session\\/([^/]+)\\/message$/);
+      if (messageMatch && request.method === "GET") {
+        const message = readState().sessions[messageMatch[1]];
+        return send(response, 200, message ? [message] : []);
+      }
+      if (messageMatch && request.method === "POST") {
+        const sessionId = messageMatch[1];
+        const payload = await readBody(request);
+        const prompt = payload.parts?.[0]?.text ?? "";
+        const state = readState();
+        let text;
+        if (prompt.includes("graph revision 1")) {
+          text = JSON.stringify({ graph: { nodes: [{ task_id: "implementation-1", workflow_definition: "implementation" }] }, packet: { acceptance_criteria: ["target exists"], deadline_seconds: 3 } });
+        } else if (prompt.includes("Implement the admitted local-change Packet")) {
+          const target = prompt.match(/Modify exactly (.+)\\./)[1];
+          const content = JSON.parse(prompt.match(/Create it with exactly this UTF-8 content: (".*")\\./)[1]);
+          writeFileSync(target, content);
+          state.targets[sessionId] = { target, content };
+          text = JSON.stringify({ status: "edit complete" });
+        } else if (prompt.includes("worker-authored Result proposal")) {
+          const outputSnapshot = prompt.match(/output_snapshot must equal (sha256:[0-9a-f]+)\\b/)[1];
+          const target = state.targets[sessionId]?.target ?? "change.txt";
+          text = JSON.stringify({
+            claims: ["implemented"],
+            evidence: [{ claim: "the target was written", source: "worker-report", observation: "the named target contains the requested content" }],
+            changed_resources: [target],
+            output_snapshot: outputSnapshot,
+          });
+        } else if (prompt.includes("graph revision 2")) {
+          text = JSON.stringify({ carry_forward_task_id: "implementation-1", verifier_task: { task_id: "verification-1", workflow_definition: "verification", requires: ["implementation-1"], read_resources: ["change.txt"], write_resources: [] }, verifier_packet: { objective: "verify", acceptance_criteria: ["target matches"], allowed_resources: ["change.txt"], forbidden_resources: [".git"], capabilities: ["repository_read"], admitted_commands: [], deadline_seconds: 3, escalation_condition: "mismatch" } });
+        } else {
+          text = JSON.stringify({ verdict: "pass", findings: [], evidence: [{ claim: "the target matches", source: "verifier-read", observation: "the target bytes match" }] });
+        }
+        const message = { info: { id: "fullrun-message-" + state.nextSession + "-" + Object.keys(state.sessions).length, role: "assistant" }, parts: [{ type: "text", text }] };
+        writeState({ ...state, sessions: { ...state.sessions, [sessionId]: message } });
+        return send(response, 200, message);
+      }
+      return send(response, 404, { error: "not found" });
+    } catch (error) {
+      const logPath = statePath.replace(/[^/]+$/, "serve-error.log");
+      writeFileSync(logPath, request.method + " " + request.url + "\\n" + String(error?.stack ?? error) + "\\n", { flag: "a" });
+      if (!response.headersSent) { response.statusCode = 500; response.end(); }
+    }
+  });
+  server.listen(Number(args[args.indexOf("--port") + 1]), "127.0.0.1");
+}
+`);
+  chmodSync(fakeOpencode, 0o755);
+  return {
+    bin: fakeBin,
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      M2_FULLRUN_PROVIDER_STATE: providerState,
+    },
+    cleanup: () => rmSync(fakeBin, { recursive: true, force: true }),
+  };
+}
+
 function actionSnapshot(runDir, runId) {
   const state = JSON.parse(readFileSync(join(runDir, "run.json")));
   let resultRef = null;
@@ -2015,6 +2122,7 @@ test("worker Result rejects object-valued claims instead of coercing them", asyn
 
 test("Material Decision Request survives restart and admits exactly one human successor", async () => {
   const { workspace, runRoot } = fixture();
+  const provider = fullRunProvider();
   try {
     let runtime;
     const run = await runLocalChange({
@@ -2032,18 +2140,13 @@ test("Material Decision Request survives restart and admits exactly one human su
     assert.equal(runtime.sequence, 1);
     assert.equal(existsSync(join(runDir, "artifacts/graphs/0001.json")), false);
     assert.equal(existsSync(join(runDir, "artifacts/promotions/promotion-1.json")), false);
-    const checkpoint = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    const checkpoint = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env);
     assert.equal(checkpoint.lifecycle_state, "material_decision_required");
 
-    const resumed = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
+    const resumed = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env, [
       "--decision", "Use the bounded harness-owned Result Ref.",
       "--decision-disposition", "accepted",
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    ]);
     assert.equal(resumed.lifecycle_state, "completed");
     const decisionRoot = join(runDir, "artifacts/decisions");
     const decisions = readdirSync(decisionRoot).flatMap((id) => readdirSync(join(decisionRoot, id)));
@@ -2053,22 +2156,22 @@ test("Material Decision Request survives restart and admits exactly one human su
     assert.equal(decision.disposition, "accepted");
 
     const stateBeforeRepeat = readFileSync(join(runDir, "run.json"), "utf8");
-    const repeated = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
+    const repeated = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env, [
       "--decision", "A different answer must not create another successor.",
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    ]);
     assert.equal(repeated.lifecycle_state, "completed");
     assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), stateBeforeRepeat);
     assert.equal(readdirSync(join(runDir, "artifacts/decisions", readdirSync(decisionRoot)[0])).length, 1);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
+    provider.cleanup();
   }
 });
 
 test("explicitly rejected Decision is durable and never promotes", async () => {
   const { workspace, runRoot } = fixture();
+  const provider = fullRunProvider();
   try {
     const run = await runLocalChange({
       workspace,
@@ -2076,12 +2179,10 @@ test("explicitly rejected Decision is durable and never promotes", async () => {
       requestText: "Please update the file using the bounded local workflow.",
       runtimeFactory: (options) => new Runtime({ ...options, scenario: "material" }),
     });
-    const rejected = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
+    const rejected = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env, [
       "--decision", "Do not admit this Promotion.",
       "--decision-disposition", "rejected",
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    ]);
     assert.equal(rejected.lifecycle_state, "material_decision_required");
     assert.equal(existsSync(join(run.run_dir, "artifacts/outcomes/0002.json")), false);
     assert.throws(() => git(join(run.run_dir, "result-repository.git"), [
@@ -2091,12 +2192,10 @@ test("explicitly rejected Decision is durable and never promotes", async () => {
     const rejectedDecision = JSON.parse(readFileSync(join(decisionRoot, "0001.json")));
     assert.equal(rejectedDecision.disposition, "rejected");
 
-    const accepted = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
+    const accepted = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env, [
       "--decision", "Use the bounded harness-owned Result Ref.",
       "--decision-disposition", "accepted",
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    ]);
     assert.equal(accepted.lifecycle_state, "completed");
     const acceptedDecision = JSON.parse(readFileSync(join(decisionRoot, "0002.json")));
     assert.equal(acceptedDecision.disposition, "accepted");
@@ -2104,11 +2203,13 @@ test("explicitly rejected Decision is durable and never promotes", async () => {
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
+    provider.cleanup();
   }
 });
 
 test("Receipt after Decision restart includes the accepted Decision reference", async () => {
   const { workspace, runRoot } = fixture();
+  const provider = fullRunProvider();
   try {
     const run = await runLocalChange({
       workspace,
@@ -2123,10 +2224,7 @@ test("Receipt after Decision restart includes the accepted Decision reference", 
     });
     assert.equal(interrupted.checkpoint, "simulated_crash");
 
-    const resumed = JSON.parse(execFileSync(process.execPath, [
-      "scripts/local-change.mjs", "resume", "--workspace", workspace,
-      "--run-root", runRoot, "--run-id", run.run_id,
-    ], { cwd: new URL("..", import.meta.url), encoding: "utf8" }));
+    const resumed = cliResumeWithEnv(workspace, runRoot, run.run_id, provider.env);
     assert.equal(resumed.lifecycle_state, "completed");
     const state = JSON.parse(readFileSync(join(run.run_dir, "run.json")));
     const receipt = JSON.parse(readFileSync(join(run.run_dir, "artifacts/outcomes/0002.json")));
@@ -2136,5 +2234,6 @@ test("Receipt after Decision restart includes the accepted Decision reference", 
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(runRoot, { recursive: true, force: true });
+    provider.cleanup();
   }
 });

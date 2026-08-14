@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "test:m0": "node --test test/m0-probe.test.mjs",
     "test:protocol": "node --test test/protocol-schema.test.mjs",
     "test:m1": "node --test test/m1-local-change.test.mjs",
