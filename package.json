@@ -14,7 +14,8 @@
     "test:m4-workflow-routes": "node --test test/m4-workflow-routes.test.mjs",
     "test:m4-attempt-profiles-replan": "node --test test/m4-attempt-profiles-replan.test.mjs",
     "test:m4-operator": "node --test test/m4-operator.test.mjs",
-    "test:m4-exit": "node --test test/m4-exit.test.mjs"
+    "test:m4-exit": "node --test test/m4-exit.test.mjs",
+    "test:m5a-inspect": "node --test test/m5a-inspect.test.mjs"
   },
   "devDependencies": {
     "ajv": "^8.17.1"

@@ -51,7 +51,35 @@ const budget = {
   max_graph_revisions: 4,
   max_repairs_per_finding: 1,
 };
+const inspectBudget = {
+  max_concurrency: 1,
+  max_execution_attempts: 2,
+  max_planner_attempts: 3,
+  max_graph_revisions: 2,
+  max_repairs_per_finding: 0,
+};
 const m1AttemptDeadlineSeconds = 300;
+const presetDefaults = {
+  "local-change@1": {
+    capabilities: ["repository_read", "local_write", "command_execute"],
+    budget,
+    evidence_expectations: ["validated worker Result", "typed command execution evidence", "canonical Output Snapshot"],
+    verification_expectations: ["fresh independent verifier Review", "snapshot equality before Receipt"],
+    completion_conditions: ["compare-and-swap Promotion", "Receipt on unchanged verified snapshot"],
+  },
+  "inspect@1": {
+    capabilities: ["repository_read"],
+    budget: inspectBudget,
+    evidence_expectations: ["cited repository-only report Result"],
+    verification_expectations: ["fresh independent verifier Review of the cited report"],
+    completion_conditions: ["Receipt for the cited repository-only report without Promotion or Application"],
+  },
+};
+
+function presetForRequest(requestText) {
+  return typeof requestText === "string" && /\binspect[a-z]*\b/i.test(requestText)
+    ? "inspect@1" : "local-change@1";
+}
 
 const m4WorkflowDefinitions = new Map([
   ["intake", JSON.parse(readFileSync(new URL("../workflows/intake@1.json", import.meta.url)))],
@@ -86,6 +114,8 @@ const m4Capabilities = new Set([
 const m4PresetCapabilities = new Map([
   ["local-change", ["repository_read", "local_write", "command_execute"]],
   ["local-change@1", ["repository_read", "local_write", "command_execute"]],
+  ["inspect", ["repository_read"]],
+  ["inspect@1", ["repository_read"]],
 ]);
 const attemptProfileTools = [
   "read", "edit", "write", "request_route", "bash", "task", "webfetch", "websearch", "mcp",
@@ -1036,8 +1066,46 @@ function existingArtifactReference(ctx, artifactId) {
   return found;
 }
 
+function admittedRunPreset(ctx) {
+  try {
+    const state = JSON.parse(readFileSync(join(ctx.runDir, "run.json"), "utf8"));
+    return state.effective_policy?.preset ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// inspect@1 read-only and no-widening admission: once a Run is admitted as
+// inspect@1, Promotion, Result Ref mutation, promotion_ref-bearing outcomes,
+// a preset switch, or a capability addition is rejected closed at the single
+// artifact admission boundary.
+function assertPresetAdmission(ctx, artifact) {
+  if (admittedRunPreset(ctx) !== "inspect@1") return;
+  if (artifact?.kind === "promotion") {
+    throw new Error("inspect@1 admits no Promotion or Result Ref mutation");
+  }
+  if (artifact?.kind === "outcome") {
+    if (artifact.promotion_ref) {
+      throw new Error("inspect@1 admits no Promotion or Result Ref mutation");
+    }
+    if (artifact.preset && artifact.preset !== "inspect@1") {
+      throw new Error(`inspect@1 Run cannot admit a ${artifact.preset} outcome`);
+    }
+  }
+  if (artifact?.kind === "request"
+    && artifact.preset_selection?.preset
+    && artifact.preset_selection.preset !== "inspect@1") {
+    throw new Error("planner Request did not select inspect@1");
+  }
+  if (artifact?.kind === "packet" && Array.isArray(artifact.capabilities)
+    && artifact.capabilities.some((capability) => capability !== "repository_read")) {
+    throw new Error("policy narrowing widens inspect@1 capabilities");
+  }
+}
+
 export function admitArtifact(ctx, path, artifact, producerActorId = artifact?.producer?.actor_id) {
   validateProtocol(artifact, artifact.kind);
+  assertPresetAdmission(ctx, artifact);
   const storedPath = path.startsWith("artifacts/") ? path : artifactPath(path);
   const fullPath = safeArtifactPath(ctx.runDir, storedPath);
   if (!artifact.producer || artifact.producer.actor_id !== producerActorId) {
@@ -1448,7 +1516,7 @@ function replanRouteInput(ctx, state, binding, packetRef, packet) {
     ...(findingId ? { finding_id: findingId } : {}),
     constraints: {
       role: binding.role,
-      preset: "local-change@1",
+      preset: state.effective_policy?.preset ?? "local-change@1",
       capabilities: packet.capabilities,
       skills: packet.skills,
     },
@@ -1715,13 +1783,14 @@ function subscribeEvents({ port }) {
 }
 
 export class OpenCodeAdapter {
-  constructor({ workspace, runDir, baselineSnapshot, targetFile, attemptDeadlineSeconds = m1AttemptDeadlineSeconds, attemptContracts = null }) {
+  constructor({ workspace, runDir, baselineSnapshot, targetFile, attemptDeadlineSeconds = m1AttemptDeadlineSeconds, attemptContracts = null, workerReadOnly = false }) {
     this.workspace = workspace;
     this.runDir = runDir;
     this.baselineSnapshot = baselineSnapshot;
     this.targetFile = targetFile;
     this.attemptDeadlineSeconds = attemptDeadlineSeconds;
     this.attemptContracts = attemptContracts;
+    this.workerReadOnly = workerReadOnly;
     this.server = null;
     this.serverExit = null;
     this.port = null;
@@ -1765,10 +1834,12 @@ export class OpenCodeAdapter {
       if (!contract) {
         const plannerPermission = { "*": "deny" };
         const verifierPermission = { read: "allow", "*": "deny" };
-        const workerPermission = {
-          read: "allow", edit: "allow", write: "allow", bash: "deny", task: "deny",
-          webfetch: "deny", question: "deny",
-        };
+        const workerPermission = this.workerReadOnly
+          ? { read: "allow", "*": "deny" }
+          : {
+            read: "allow", edit: "allow", write: "allow", bash: "deny", task: "deny",
+            webfetch: "deny", question: "deny",
+          };
         const plannerTools = {
           read: false, grep: false, glob: false, bash: false, edit: false, write: false,
           task: false, webfetch: false,
@@ -1777,10 +1848,15 @@ export class OpenCodeAdapter {
           read: true, grep: false, glob: false, bash: false, edit: false, write: false,
           task: false, webfetch: false,
         };
-        const workerTools = {
-          read: true, grep: false, glob: false, bash: false, edit: true, write: true,
-          task: false, webfetch: false,
-        };
+        const workerTools = this.workerReadOnly
+          ? {
+            read: true, grep: false, glob: false, bash: false, edit: false, write: false,
+            task: false, webfetch: false,
+          }
+          : {
+            read: true, grep: false, glob: false, bash: false, edit: true, write: true,
+            task: false, webfetch: false,
+          };
         return [role, {
           mode: "primary",
           model: "opencode/big-pickle",
@@ -1801,7 +1877,9 @@ export class OpenCodeAdapter {
       tools: resolved[role].tools,
       permission: resolved[role].permission,
       prompt: role === "worker"
-        ? "You are a bounded implementation worker. Use only read and edit/write tools. Never use shell, network, task delegation, or external paths."
+        ? this.workerReadOnly
+          ? "You are a bounded read-only research worker. Use only the read tool on explicitly named targets. Never edit, write, use shell, network, task delegation, or external paths."
+          : "You are a bounded implementation worker. Use only read and edit/write tools. Never use shell, network, task delegation, or external paths."
         : role === "verifier"
           ? "You are a bounded independent verifier. Use only the explicitly named read target; never edit, write, shell, network, or delegate. Return the exact JSON shape requested by the prompt and no Markdown."
           : `You are a bounded ${role}. Use no tools except repository read when explicitly requested. Return the exact JSON shape requested by the prompt and no Markdown.`,
@@ -2245,10 +2323,10 @@ function validStringArray(value, label) {
   return value;
 }
 
-function requestProposal(parsed, { requestText, targetSnapshot }) {
+function requestProposal(parsed, { requestText, targetSnapshot, preset = "local-change@1" }) {
   const selection = parsed.preset_selection;
-  if (!selection || selection.preset !== "local-change@1") {
-    throw new Error("planner Request did not select local-change@1");
+  if (!selection || selection.preset !== preset) {
+    throw new Error(`planner Request did not select ${preset}`);
   }
   if (parsed.target_snapshot !== targetSnapshot) {
     throw new Error("planner Request target snapshot does not match the intake snapshot");
@@ -2270,11 +2348,14 @@ function requestProposal(parsed, { requestText, targetSnapshot }) {
     assumptions,
     target_snapshot: targetSnapshot,
     preset_selection: {
-      preset: "local-change@1",
+      preset: selection.preset,
       selection_evidence: validEvidenceArray(selection.selection_evidence),
       proposed_narrowing: selection.proposed_narrowing ?? null,
       rationale: typeof selection.rationale === "string" && selection.rationale.length > 0
-        ? selection.rationale : "The bounded request changes local repository state without external effects.",
+        ? selection.rationale
+        : preset === "inspect@1"
+          ? "The bounded request is answerable from repository evidence without local writes or external effects."
+          : "The bounded request changes local repository state without external effects.",
     },
   };
 }
@@ -2296,28 +2377,25 @@ function validEvidenceArray(value) {
 }
 
 function policyFor(request, budgetOverride = {}) {
+  const preset = request.preset_selection.preset;
+  const defaults = presetDefaults[preset];
+  if (!defaults) throw new Error(`unknown v1 preset: ${preset}`);
+  const requiredCapabilities = defaults.capabilities;
   const proposed = request.preset_selection.proposed_narrowing;
-  const capabilities = proposed?.capabilities ?? ["repository_read", "local_write", "command_execute"];
-  const requiredCapabilities = ["repository_read", "local_write", "command_execute"];
+  const capabilities = proposed?.capabilities ?? requiredCapabilities;
   if (capabilities.some((capability) => !requiredCapabilities.includes(capability))) {
-    throw new Error("policy narrowing widens local-change@1 capabilities");
+    throw new Error(`policy narrowing widens ${preset} capabilities`);
   }
   if (requiredCapabilities.some((capability) => !capabilities.includes(capability))) {
-    throw new Error("policy narrowing removes a required local-change@1 capability");
+    throw new Error(`policy narrowing removes a required ${preset} capability`);
   }
-  const narrowedBudget = { ...budget, ...(proposed?.budget ?? {}), ...budgetOverride };
+  const narrowedBudget = { ...defaults.budget, ...(proposed?.budget ?? {}), ...budgetOverride };
   for (const [field, value] of Object.entries(narrowedBudget)) {
-    if (value > budget[field]) throw new Error(`policy narrowing widens ${field}`);
+    if (value > defaults.budget[field]) throw new Error(`policy narrowing widens ${field}`);
   }
   return {
-    preset: "local-change@1",
-    preset_defaults: {
-      capabilities: ["repository_read", "local_write", "command_execute"],
-      budget,
-      evidence_expectations: ["validated worker Result", "typed command execution evidence", "canonical Output Snapshot"],
-      verification_expectations: ["fresh independent verifier Review", "snapshot equality before Receipt"],
-      completion_conditions: ["compare-and-swap Promotion", "Receipt on unchanged verified snapshot"],
-    },
+    preset,
+    preset_defaults: defaults,
     capabilities,
     proposed_narrowing: proposed,
     admitted_narrowing: proposed || Object.keys(budgetOverride).length > 0
@@ -2477,24 +2555,26 @@ function verificationPlan(parsed, {
   requestText,
   taskId = "verification-1",
   requiredTaskId = "implementation-1",
+  readResources = null,
   attemptDeadlineSeconds = m1AttemptDeadlineSeconds,
 }) {
   const plan = parsed.verifier_task ?? parsed.task;
   const packet = parsed.verifier_packet ?? parsed.packet;
   if (!plan || !packet) throw new Error("planner graph revision 2 omitted the verifier Packet");
+  const resources = readResources ?? [targetFile];
   return {
     task: {
       task_id: taskId,
       workflow_definition: "verification",
       requires: [requiredTaskId],
-      read_resources: [targetFile],
+      read_resources: resources,
       write_resources: [],
     },
     packet: {
       objective: typeof packet.objective === "string" && packet.objective.length > 0
         ? packet.objective : `Independently verify ${requestText}`,
       acceptance_criteria: validStringArray(packet.acceptance_criteria ?? ["the Output Snapshot matches the Result"], "Verifier acceptance_criteria"),
-      allowed_resources: [targetFile],
+      allowed_resources: resources,
       forbidden_resources: Array.isArray(packet.forbidden_resources) ? packet.forbidden_resources : [".git"],
       skills: [],
       capabilities: ["repository_read"],
@@ -2504,6 +2584,66 @@ function verificationPlan(parsed, {
       escalation_condition: typeof packet.escalation_condition === "string" && packet.escalation_condition.length > 0
         ? packet.escalation_condition : "block if the target snapshot or declared change is not verifiable",
     },
+  };
+}
+
+function researchPlan(parsed, {
+  requestText,
+  targetResources,
+  attemptDeadlineSeconds = m1AttemptDeadlineSeconds,
+}) {
+  const node = parsed.graph?.nodes?.[0] ?? parsed.nodes?.[0];
+  const packet = parsed.packet ?? parsed.research_packet;
+  if (!node || !packet) throw new Error("planner graph revision 1 omitted the research Packet");
+  if (node.workflow_definition !== "research") throw new Error("revision 1 node is not research");
+  if (Array.isArray(packet.capabilities)
+    && packet.capabilities.some((capability) => capability !== "repository_read")) {
+    throw new Error("policy narrowing widens inspect@1 capabilities");
+  }
+  if (Array.isArray(packet.admitted_commands) && packet.admitted_commands.length > 0) {
+    throw new Error("policy narrowing widens inspect@1 capabilities");
+  }
+  return {
+    node: {
+      task_id: "research-1",
+      workflow_definition: "research",
+      requires: [],
+      read_resources: targetResources,
+      write_resources: [],
+    },
+    packet: {
+      objective: typeof packet.objective === "string" && packet.objective.length > 0
+        ? packet.objective : requestText,
+      acceptance_criteria: validStringArray(packet.acceptance_criteria
+        ?? ["the report cites repository evidence for every claim"], "Research acceptance_criteria"),
+      allowed_resources: targetResources,
+      forbidden_resources: Array.isArray(packet.forbidden_resources) ? packet.forbidden_resources : [".git"],
+      skills: [],
+      capabilities: ["repository_read"],
+      admitted_commands: [],
+      deadline_seconds: Math.min(attemptDeadlineSeconds, Number.isSafeInteger(packet.deadline_seconds)
+        && packet.deadline_seconds > 0 ? packet.deadline_seconds : attemptDeadlineSeconds),
+      escalation_condition: typeof packet.escalation_condition === "string" && packet.escalation_condition.length > 0
+        ? packet.escalation_condition : "stop on an undeclared read, write attempt, or unavailable dependency",
+    },
+  };
+}
+
+function parseReportProposal(parsed, { allowedResources }) {
+  if (!Array.isArray(parsed?.claims) || parsed.claims.length === 0
+    || !Array.isArray(parsed?.evidence) || parsed.evidence.length === 0) {
+    throw new Error("research report must contain claims and cited evidence");
+  }
+  const evidence = validEvidenceArray(parsed.evidence);
+  if (evidence.some(({ source }) => !allowedResources.includes(source))) {
+    throw new Error("research report evidence is not cited to an admitted repository resource");
+  }
+  return {
+    claims: parsed.claims.map((claim) => {
+      if (typeof claim !== "string" || claim.length === 0) throw new Error("research report claims must contain strings");
+      return claim;
+    }),
+    evidence,
   };
 }
 
@@ -2925,7 +3065,8 @@ async function recordFailure(ctx, state, error) {
     producer: kernelProducer(),
     inputRefs: [...ctx.admittedRefs],
     createdAt: now(),
-    preset: "local-change@1",
+    preset: durableState.effective_policy?.preset
+      ?? presetForRequest(durableState.execution_context?.request_text),
     ...(durableState.effective_policy ? { effective_policy: durableState.effective_policy } : {}),
     outcome_kind: "block",
     summary: `Run blocked: ${error.message}`,
@@ -3279,7 +3420,7 @@ function blockRepairFinding(ctx, state, { findingReviewRef, repairResultRef, rev
       producer: kernelProducer(),
       inputRefs: [findingReviewRef, reviewRef],
       createdAt: now(),
-      preset: "local-change@1",
+      preset: state.effective_policy?.preset ?? "local-change@1",
       effective_policy: state.effective_policy,
       outcome_kind: "block",
       summary: recurrent ? "The same finding recurred after its one admitted repair." : "The repaired snapshot has a new verifier finding.",
@@ -3302,7 +3443,11 @@ function receiptFor(ctx, state, {
   reviewArtifactRef,
   promotionRef,
   promotedSnapshot,
+  acceptedSnapshot,
 }) {
+  const preset = state.effective_policy?.preset ?? "local-change@1";
+  const inspect = preset === "inspect@1";
+  const finalSnapshot = inspect ? acceptedSnapshot : promotedSnapshot;
   const existing = latestOutcome(ctx.runDir);
   if (existing?.outcome_kind === "receipt") {
     const path = `artifacts/outcomes/${readdirSync(join(ctx.runDir, "artifacts/outcomes")).find((file) => file.endsWith(".json") && JSON.parse(readFileSync(join(ctx.runDir, "artifacts/outcomes", file), "utf8")).artifact_id === existing.artifact_id)}`;
@@ -3312,7 +3457,7 @@ function receiptFor(ctx, state, {
       : applyTransition(ctx, state, "receipt_admitted", {
         lifecycle_state: "completed",
         active_graph_ref: graphRef,
-      }, [outcomeRef, promotionRef]);
+      }, [outcomeRef, promotionRef].filter(Boolean));
     return { state: next, outcome: existing, outcomeRef };
   }
   const refs = [
@@ -3334,16 +3479,22 @@ function receiptFor(ctx, state, {
     producer: kernelProducer(),
     inputRefs: uniqueRefs,
     createdAt: now(),
-    preset: "local-change@1",
+    preset,
     effective_policy: state.effective_policy,
     outcome_kind: "receipt",
-    summary: "Verified local-change result preserved under the harness-owned Result Ref.",
+    summary: inspect
+      ? "Verified repository-only inspect report with no Promotion or Application claim."
+      : "Verified local-change result preserved under the harness-owned Result Ref.",
     artifact_refs: uniqueRefs,
-    limitations: ["v1 preserved a harness-owned Result Ref; it did not apply changes to the user branch."],
-    accepted_snapshot: promotedSnapshot,
-    verified_snapshot: promotedSnapshot,
-    promoted_snapshot: promotedSnapshot,
-    promotion_ref: promotionRef,
+    limitations: inspect
+      ? ["inspect@1 produced a cited report from repository evidence only; no Promotion, Result Ref, or Application was admitted."]
+      : ["v1 preserved a harness-owned Result Ref; it did not apply changes to the user branch."],
+    accepted_snapshot: finalSnapshot,
+    verified_snapshot: finalSnapshot,
+    ...(inspect ? {} : {
+      promoted_snapshot: promotedSnapshot,
+      promotion_ref: promotionRef,
+    }),
   });
   const outcomeRef = writeArtifact(ctx, outcomePath.path, receipt);
   const next = state.lifecycle_state === "completed"
@@ -3351,7 +3502,7 @@ function receiptFor(ctx, state, {
     : applyTransition(ctx, state, "receipt_admitted", {
       lifecycle_state: "completed",
       active_graph_ref: graphRef,
-    }, [outcomeRef, promotionRef]);
+    }, [outcomeRef, promotionRef].filter(Boolean));
   return { state: next, outcome: receipt, outcomeRef };
 }
 
@@ -3391,7 +3542,7 @@ function materialDecisionRequest(ctx, state, {
     producer: kernelProducer(),
     inputRefs: [requestRef],
     createdAt: now(),
-    preset: "local-change@1",
+    preset: state.effective_policy?.preset ?? "local-change@1",
     effective_policy: state.effective_policy,
     outcome_kind: "material_decision_request",
     summary: "Run paused for a material Decision Authority response.",
@@ -3655,10 +3806,78 @@ function validatePlannerProvenance(ctx, state, { requestArtifactRef, resultArtif
   }
 }
 
+function validateCompletedInspectRun(ctx, state, outcomeEntry) {
+  const receipt = outcomeEntry?.outcome;
+  if (!receipt || receipt.outcome_kind !== "receipt" || receipt.preset !== "inspect@1") {
+    throw new Error("completed inspect Run requires an inspect@1 Receipt");
+  }
+  const receiptRef = reference(
+    receipt.artifact_id,
+    `artifacts/outcomes/${outcomeEntry.file}`,
+    receipt,
+  );
+  const receiptTransition = state.transitions.find(({ event_kind, record_refs }) =>
+    event_kind === "receipt_admitted"
+      && record_refs.some((recordRef) => sameArtifactReference(recordRef, receiptRef)));
+  if (!receiptTransition) throw new Error("completed Run Receipt is not admitted by Run State");
+  const resultArtifactRef = state.tasks?.["research-1"]?.artifact_ref;
+  const reviewArtifactRef = state.tasks?.["verification-1"]?.artifact_ref;
+  if (!resultArtifactRef || !reviewArtifactRef) {
+    throw new Error("completed inspect Run requires admitted Result and Review artifact references");
+  }
+  const resultArtifact = resolveArtifactReference(ctx, resultArtifactRef);
+  const review = resolveArtifactReference(ctx, reviewArtifactRef);
+  if (review.verdict !== "pass" || review.findings.length !== 0) {
+    throw new Error("completed Run requires an independent pass Review with no findings");
+  }
+  const resultRuntime = resolveArtifactReference(ctx, resultArtifact.runtime_ref);
+  const reviewRuntime = resolveArtifactReference(ctx, review.runtime_ref);
+  const workerBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === resultRuntime.attempt_id);
+  const verifierBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === reviewRuntime.attempt_id);
+  if (resultArtifact.producer.role !== "worker"
+    || review.producer.role !== "verifier"
+    || resultRuntime.role !== "worker"
+    || reviewRuntime.role !== "verifier"
+    || resultArtifact.producer.actor_id !== resultRuntime.agent_identity
+    || review.producer.actor_id !== reviewRuntime.agent_identity
+    || resultRuntime.agent_identity === reviewRuntime.agent_identity
+    || resultRuntime.session_id === reviewRuntime.session_id
+    || workerBinding?.role !== "worker"
+    || verifierBinding?.role !== "verifier"
+    || workerBinding?.session_id === verifierBinding?.session_id) {
+    throw new Error("completed inspect Run does not preserve independent research and verifier roles");
+  }
+  if (resultArtifact.changed_resources.length !== 0
+    || resultArtifact.output_snapshot !== state.workspace_baseline.snapshot_digest) {
+    throw new Error("completed inspect Run Result Evidence does not resolve to the repository snapshot");
+  }
+  if (!sameArtifactReference(review.target_task_ref, resultArtifactRef)
+    || review.target_snapshot !== resultArtifact.output_snapshot
+    || resultRuntime.observed_output_snapshot !== resultArtifact.output_snapshot
+    || reviewRuntime.observed_output_snapshot !== review.target_snapshot) {
+    throw new Error("completed inspect Run Review does not match the cited repository snapshot");
+  }
+  if (receipt.promotion_ref) {
+    throw new Error("inspect@1 admits no Promotion or Result Ref mutation");
+  }
+  if (existsSync(join(ctx.runDir, "artifacts/promotions"))) {
+    throw new Error("inspect@1 admits no Promotion artifacts");
+  }
+  const requiredReceiptRefs = [resultArtifactRef, reviewArtifactRef];
+  if (requiredReceiptRefs.some((recordRef) =>
+    !receipt.artifact_refs.some((receiptRefValue) => sameArtifactReference(receiptRefValue, recordRef)))) {
+    throw new Error("completed inspect Run Receipt is missing an admitted artifact reference");
+  }
+  return { receipt, resultArtifact, review, receiptRef };
+}
+
 function validateCompletedRun(ctx, state, outcomeEntry) {
   const receipt = outcomeEntry?.outcome;
   if (!receipt || receipt.outcome_kind !== "receipt") {
     throw new Error("completed Run requires an immutable Receipt");
+  }
+  if ((state.effective_policy?.preset ?? receipt.preset) === "inspect@1") {
+    return validateCompletedInspectRun(ctx, state, outcomeEntry);
   }
   const receiptRef = reference(
     receipt.artifact_id,
@@ -3812,7 +4031,8 @@ export function inspectRun(runDir) {
     runtime_bindings: state.runtime_bindings,
     active_runtime_bindings: state.runtime_bindings.filter(({ binding_state }) => binding_state === "active"),
     result_artifact_ref: state.tasks?.["repair-1"]?.artifact_ref
-      ?? state.tasks?.["implementation-1"]?.artifact_ref ?? null,
+      ?? state.tasks?.["implementation-1"]?.artifact_ref
+      ?? state.tasks?.["research-1"]?.artifact_ref ?? null,
     result_ref: resultRef,
     receipt: outcome?.outcome_kind === "receipt" ? {
       artifact_id: outcome.artifact_id,
@@ -4597,6 +4817,354 @@ async function continueFindingRepair({
   return { checkpoint: "review_admitted", state };
 }
 
+async function completeInspectRun({
+  ctx,
+  state,
+  adapter,
+  taskWorkspace,
+  taskBaseline,
+  request,
+  requestRef,
+  requestBinding,
+  admittedAttemptDeadlineSeconds,
+  workspace,
+  baselineBranch,
+  baselineTarget,
+  baselineStatus,
+}) {
+  const runId = state.run_id;
+  const { runDir } = ctx;
+  const snapshotPaths = new Set(taskBaseline.entries.map(({ path }) => path));
+  const targetResources = request.scope.filter((item) => snapshotPaths.has(item));
+  if (targetResources.length === 0) {
+    throw new Error("inspect request scope names no repository resource in the intake snapshot");
+  }
+
+  admitBudget(state, "planner_attempt");
+  admitBudget(state, "graph_revision");
+  const graphOnePrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+    role: "planner",
+    attemptId: "planner-graph-1",
+    attempt: 2,
+  });
+  state = graphOnePrepared.state;
+  const graphOnePrompt = [
+    "Return exactly one JSON object and no Markdown for graph revision 1 and its repository-only research Packet. Do not inspect or read any file and do not use any tool.",
+    `Answer this objective from repository evidence only: ${request.objective}`,
+    `Return graph.nodes[0].task_id=research-1, workflow_definition=research, read_resources=${JSON.stringify(targetResources)}, write_resources=[]. The Packet admits repository_read only with no commands.`,
+    `Use this shape: {"graph":{"nodes":[{"task_id":"research-1","workflow_definition":"research","requires":[],"read_resources":${JSON.stringify(targetResources)},"write_resources":[]}]},"packet":{"objective":"...","acceptance_criteria":["..."],"allowed_resources":${JSON.stringify(targetResources)},"forbidden_resources":[".git"],"skills":[],"capabilities":["repository_read"],"admitted_commands":[],"deadline_seconds":${admittedAttemptDeadlineSeconds},"escalation_condition":"..."}}`,
+  ].join("\n");
+  const graphOneExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: "planner",
+    attemptId: "planner-graph-1",
+    attempt: 2,
+    prompt: graphOnePrompt,
+    beforeSnapshot: taskBaseline,
+    deadlineSeconds: admittedAttemptDeadlineSeconds,
+    label: "graph revision 1 planner Attempt",
+  });
+  const graphOneExecution = graphOneExecutionResult.execution;
+  admitRuntimeAttempt(ctx, state, graphOneExecution, {
+    attemptId: "planner-graph-1",
+    label: "graph revision 1 planner Attempt",
+  });
+  const graphOneRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-1.json", graphOneExecution.observation);
+  const research = researchPlan(responseObject(graphOneExecution.text, "revision 1 planner"), {
+    requestText: request.objective,
+    targetResources,
+    attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
+  });
+  const researchPacket = makePacket({
+    runId,
+    graphRevision: 1,
+    taskId: "research-1",
+    workflowDefinition: "research",
+    packet: research.packet,
+    runtimeRef: graphOneRuntimeRef,
+    artifactId: "packet-research-1",
+    actorId: graphOneExecution.binding.agent_identity,
+  });
+  const researchPacketRef = writeArtifact(ctx, "artifacts/tasks/research-1/attempts/1/packet.json", researchPacket);
+  const graphOne = makeGraph({
+    runId,
+    graphRevision: 1,
+    runtimeRef: graphOneRuntimeRef,
+    requestRef,
+    triggerRef: requestRef,
+    nodes: [{ ...research.node, packet_ref: researchPacketRef }],
+    actorId: graphOneExecution.binding.agent_identity,
+  });
+  const graphOneRef = writeArtifact(ctx, "artifacts/graphs/0001.json", graphOne);
+  state = applyTransition(ctx, state, "graph_revision_1_admitted", {
+    active_graph_ref: graphOneRef,
+    runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphOneExecution.binding),
+    tasks: {
+      "research-1": { task_state: "planned", attempts: 0 },
+    },
+  }, [graphOneRef, researchPacketRef, graphOneRuntimeRef]);
+
+  admitBudget(state, "execution_attempt");
+  const researchPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+    role: "worker",
+    attemptId: "worker-research-1",
+    taskId: "research-1",
+    attempt: 1,
+  });
+  state = researchPrepared.state;
+  const researchAttempt = { binding: researchPrepared.binding };
+  state = applyTransition(ctx, state, "research_dispatched", {
+    runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, researchAttempt.binding),
+    tasks: {
+      "research-1": { task_state: "active", attempts: 1 },
+    },
+  }, [researchPacketRef]);
+  const researchPrompt = [
+    `Inspect the admitted repository-only research Packet. Use your read tool exactly once on each of ${JSON.stringify(targetResources)}; do not modify any file and do not use edit, write, shell, network, or delegation.`,
+    `Report what the repository evidence supports for: ${request.objective}`,
+    `Return exactly one JSON object and no Markdown: {"claims":["..."],"evidence":[{"claim":"...","source":"<exactly one admitted repository path from ${JSON.stringify(targetResources)}>","observation":"what the repository file contains"}]}. Every evidence source must cite exactly one admitted repository resource path.`,
+  ].join("\n");
+  const researchExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: "worker",
+    attemptId: "worker-research-1",
+    taskId: "research-1",
+    attempt: 1,
+    prompt: researchPrompt,
+    beforeSnapshot: taskBaseline,
+    deadlineSeconds: research.packet.deadline_seconds,
+    label: "research worker Attempt",
+  });
+  const researchExecution = researchExecutionResult.execution;
+  admitRuntimeAttempt(ctx, state, researchExecution, {
+    attemptId: "worker-research-1",
+    label: "research worker Attempt",
+  });
+  if (researchExecution.changes.length > 0
+    || researchExecution.snapshot.digest !== taskBaseline.digest) {
+    throw new AttemptFailure(
+      "inspect_read_only_violation",
+      "research Attempt modified the repository snapshot",
+    );
+  }
+  const researchRuntime = {
+    ...researchExecution.observation,
+    observed_changes: [],
+    observed_output_snapshot: taskBaseline.digest,
+  };
+  const researchRuntimeRef = writeArtifact(ctx, "artifacts/runtime/worker-research-1.json", researchRuntime);
+  const report = parseReportProposal(responseObject(researchExecution.text, "research report"), {
+    allowedResources: targetResources,
+  });
+  // The inspect Result resolves to the repository snapshot itself: its commit
+  // is the intake HEAD and no new commit, Result Ref, or Promotion is created.
+  const resultCommit = taskBaseline.base;
+  const reportResult = envelope({
+    kind: "result",
+    artifactId: "result-research-1",
+    runId,
+    graph_revision: 1,
+    task_id: "research-1",
+    attempt: 1,
+    producer: workerProducer(researchAttempt.binding.agent_identity),
+    runtime_ref: researchRuntimeRef,
+    inputRefs: [researchPacketRef, researchRuntimeRef],
+    createdAt: now(),
+    claims: report.claims,
+    evidence: report.evidence,
+    changed_resources: [],
+    output_snapshot: taskBaseline.digest,
+    result_commit: resultCommit,
+  });
+  const resultArtifactRef = writeArtifact(ctx, "artifacts/tasks/research-1/attempts/1/result.json", reportResult);
+  state = applyTransition(ctx, state, "research_result_admitted", {
+    runtime_bindings: state.runtime_bindings.map((binding) =>
+      binding.attempt_id === researchExecution.binding.attempt_id ? researchExecution.binding : binding),
+    tasks: {
+      "research-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: resultArtifactRef },
+    },
+  }, [researchRuntimeRef, resultArtifactRef]);
+
+  admitBudget(state, "planner_attempt");
+  admitBudget(state, "graph_revision");
+  const graphTwoPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+    role: "planner",
+    attemptId: "planner-graph-2",
+    attempt: 3,
+  });
+  state = graphTwoPrepared.state;
+  const graphTwoPrompt = [
+    "Return exactly one JSON object and no Markdown for graph revision 2. Do not inspect or read any file and do not use any tool; the kernel already supplied the research Result artifact reference.",
+    "Carry forward research-1 by its research Result artifact reference and add exactly one independent verification task with repository read only.",
+    `Use this shape: {"carry_forward_task_id":"research-1","verifier_task":{"task_id":"verification-1","workflow_definition":"verification","requires":["research-1"],"read_resources":${JSON.stringify(targetResources)},"write_resources":[]},"verifier_packet":{"objective":"...","acceptance_criteria":["..."],"allowed_resources":${JSON.stringify(targetResources)},"forbidden_resources":[".git"],"capabilities":["repository_read"],"admitted_commands":[],"deadline_seconds":${admittedAttemptDeadlineSeconds},"escalation_condition":"..."}}`,
+  ].join("\n");
+  const graphTwoExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: "planner",
+    attemptId: "planner-graph-2",
+    attempt: 3,
+    prompt: graphTwoPrompt,
+    beforeSnapshot: taskBaseline,
+    deadlineSeconds: admittedAttemptDeadlineSeconds,
+    label: "graph revision 2 planner Attempt",
+  });
+  const graphTwoExecution = graphTwoExecutionResult.execution;
+  admitRuntimeAttempt(ctx, state, graphTwoExecution, {
+    attemptId: "planner-graph-2",
+    label: "graph revision 2 planner Attempt",
+  });
+  const graphTwoRuntimeRef = writeArtifact(ctx, "artifacts/runtime/planner-graph-2.json", graphTwoExecution.observation);
+  const verification = verificationPlan(responseObject(graphTwoExecution.text, "revision 2 planner"), {
+    targetFile: targetResources[0],
+    requestText: request.objective,
+    requiredTaskId: "research-1",
+    readResources: targetResources,
+    attemptDeadlineSeconds: admittedAttemptDeadlineSeconds,
+  });
+  const verificationPacket = makePacket({
+    runId,
+    graphRevision: 2,
+    taskId: "verification-1",
+    workflowDefinition: "verification",
+    packet: verification.packet,
+    runtimeRef: graphTwoRuntimeRef,
+    artifactId: "packet-verification-1",
+    targetTaskRef: resultArtifactRef,
+    targetSnapshot: taskBaseline.digest,
+    actorId: graphTwoExecution.binding.agent_identity,
+  });
+  const verificationPacketRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/packet.json", verificationPacket);
+  const graphTwo = makeGraph({
+    runId,
+    graphRevision: 2,
+    runtimeRef: graphTwoRuntimeRef,
+    requestRef,
+    triggerRef: resultArtifactRef,
+    parentRef: graphOneRef,
+    inputRefs: [requestRef, graphOneRef, resultArtifactRef],
+    nodes: [
+      { ...research.node, packet_ref: researchPacketRef },
+      { ...verification.task, packet_ref: verificationPacketRef },
+    ],
+    actorId: graphTwoExecution.binding.agent_identity,
+  });
+  const graphTwoRef = writeArtifact(ctx, "artifacts/graphs/0002.json", graphTwo);
+  state = applyTransition(ctx, state, "graph_revision_2_admitted", {
+    active_graph_ref: graphTwoRef,
+    runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, graphTwoExecution.binding),
+    tasks: {
+      ...state.tasks,
+      "verification-1": { task_state: "planned", attempts: 0 },
+    },
+  }, [graphTwoRef, verificationPacketRef, graphTwoRuntimeRef, resultArtifactRef]);
+
+  admitBudget(state, "execution_attempt");
+  const verifierPrepared = await prepareRuntimeAttempt(ctx, state, adapter, {
+    role: "verifier",
+    attemptId: "verifier-1",
+    taskId: "verification-1",
+    attempt: 1,
+  });
+  state = verifierPrepared.state;
+  const verifierAttempt = { binding: verifierPrepared.binding };
+  if (verifierAttempt.binding.agent_identity === researchAttempt.binding.agent_identity) {
+    throw new Error("verifier_not_independent");
+  }
+  state = applyTransition(ctx, state, "verification_dispatched", {
+    runtime_bindings: upsertRuntimeBinding(state.runtime_bindings, verifierAttempt.binding),
+    tasks: {
+      ...state.tasks,
+      "verification-1": { task_state: "active", attempts: 1 },
+    },
+  }, [verificationPacketRef]);
+  const verifierPrompt = [
+    `Use your read tool exactly once on each of ${JSON.stringify(targetResources)}; do not read any other path and do not use edit, write, shell, network, or delegation.`,
+    `Independently verify the cited research report against the repository snapshot: research Result artifact reference ${resultArtifactRef.path} (${resultArtifactRef.digest}), declared output snapshot ${taskBaseline.digest}, changed resources none.`,
+    "Confirm every cited claim is supported by the repository content and that no repository content changed. After the read, do not call another tool. Your final response MUST be exactly one JSON object and no Markdown, with this shape: {\"verdict\":\"pass\",\"findings\":[],\"evidence\":[{\"claim\":\"the cited report matches repository content\",\"source\":\"verifier-read\",\"observation\":\"the cited repository paths support the report claims\"}]}",
+  ].join("\n");
+  const verifierExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
+    role: "verifier",
+    attemptId: "verifier-1",
+    taskId: "verification-1",
+    attempt: 1,
+    prompt: verifierPrompt,
+    beforeSnapshot: taskBaseline,
+    deadlineSeconds: verification.packet.deadline_seconds,
+    label: "independent verifier Attempt",
+  });
+  const verifierExecution = verifierExecutionResult.execution;
+  admitRuntimeAttempt(ctx, state, verifierExecution, {
+    attemptId: "verifier-1",
+    label: "independent verifier Attempt",
+  });
+  if (verifierExecution.changes.length > 0
+    || verifierExecution.snapshot.digest !== taskBaseline.digest) {
+    throw new Error(`Output Snapshot changed during verification: ${JSON.stringify(verifierExecution.changes)}`);
+  }
+  const verifierRuntime = {
+    ...verifierExecution.observation,
+    observed_changes: [],
+    observed_output_snapshot: taskBaseline.digest,
+  };
+  const verifierRuntimeRef = writeArtifact(ctx, "artifacts/runtime/verifier-1.json", verifierRuntime);
+  const reviewProposal = parseReview(responseObject(verifierExecution.text, "verifier"));
+  const review = envelope({
+    kind: "review",
+    artifactId: "review-verification-1",
+    runId,
+    graph_revision: 2,
+    task_id: "verification-1",
+    attempt: 1,
+    producer: verifierProducer(verifierAttempt.binding.agent_identity),
+    runtime_ref: verifierRuntimeRef,
+    inputRefs: [verificationPacketRef, resultArtifactRef],
+    createdAt: now(),
+    target_task_ref: resultArtifactRef,
+    target_snapshot: taskBaseline.digest,
+    verdict: reviewProposal.verdict,
+    evidence: reviewProposal.evidence,
+    findings: reviewProposal.findings,
+  });
+  const reviewArtifactRef = writeArtifact(ctx, "artifacts/tasks/verification-1/attempts/1/review.json", review);
+  state = applyTransition(ctx, state, "review_admitted", {
+    runtime_bindings: state.runtime_bindings.map((binding) =>
+      binding.attempt_id === verifierExecution.binding.attempt_id ? verifierExecution.binding : binding),
+    tasks: {
+      ...state.tasks,
+      "verification-1": { task_state: "artifacts_published", attempts: 1, artifact_ref: reviewArtifactRef },
+    },
+  }, [verifierRuntimeRef, reviewArtifactRef]);
+  if (review.verdict !== "pass") {
+    throw new AttemptFailure(
+      "verification_finding",
+      "inspect@1 verifier reported a finding; repairs_per_finding is 0 and no Repair is admitted",
+    );
+  }
+
+  const { state: completedState } = receiptFor(ctx, state, {
+    requestRef,
+    graphRef: graphTwoRef,
+    resultArtifactRef,
+    reviewArtifactRef,
+    promotionRef: null,
+    promotedSnapshot: null,
+    acceptedSnapshot: taskBaseline.digest,
+  });
+  state = completedState;
+  const finalTarget = workspaceSnapshot(workspace);
+  const finalStatus = gitStatus(workspace);
+  const finalBranch = git(workspace, ["branch", "--show-current"]).trim();
+  if (finalBranch !== baselineBranch
+    || finalTarget.digest !== baselineTarget.digest
+    || finalStatus !== baselineStatus) {
+    throw new Error("user branch/worktree changed during inspect run");
+  }
+  return {
+    run_id: runId,
+    run_dir: runDir,
+    output_snapshot: taskBaseline.digest,
+    user_workspace_unchanged: true,
+    inspect: inspectRun(runDir),
+  };
+}
+
 function skillRecord(workspace) {
   const path = join(workspace, skillSource);
   if (!existsSync(path)) throw new Error(`dependency_unavailable: ${skillSource}`);
@@ -4652,6 +5220,8 @@ export async function runLocalChange({
     expectedContent = existingState.execution_context.expected_content;
     requestText = existingState.execution_context.request_text;
   }
+  const preset = existingState?.effective_policy?.preset ?? presetForRequest(requestText);
+  if (!presetDefaults[preset]) throw new Error(`unknown v1 preset: ${preset}`);
   if (!/^[A-Za-z0-9._/-]+$/.test(targetFile) || targetFile.startsWith(".") || targetFile.includes("..")) {
     throw new Error(`invalid target file: ${targetFile}`);
   }
@@ -4684,9 +5254,9 @@ export async function runLocalChange({
   const taskWorkspace = mkdtempSync(join(runDir, "task-workspace-"));
   let adapter;
   let state = existingState;
-  const runBudget = existingState?.budget ?? { ...budget, ...budgetOverride };
+  const runBudget = existingState?.budget ?? { ...presetDefaults[preset].budget, ...budgetOverride };
   for (const [field, value] of Object.entries(runBudget)) {
-    if (!Number.isSafeInteger(value) || value < 0 || value > budget[field]) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > presetDefaults[preset].budget[field]) {
       throw new Error(`invalid budget narrowing: ${field}=${value}`);
     }
   }
@@ -4752,6 +5322,7 @@ export async function runLocalChange({
         runDir,
         baselineSnapshot: taskBaseline,
         targetFile,
+        workerReadOnly: preset === "inspect@1",
       });
     const admittedAttemptDeadlineSeconds = adapter.attemptDeadlineSeconds ?? m1AttemptDeadlineSeconds;
     if (!Number.isSafeInteger(admittedAttemptDeadlineSeconds) || admittedAttemptDeadlineSeconds < 1) {
@@ -4843,9 +5414,14 @@ export async function runLocalChange({
       `Repository policy references: ${JSON.stringify(bootstrap.repository_policy_refs)}`,
       `Repository policy content:\n${repositoryPolicy.content}`,
       "Treat the cited repository policy as authoritative intake context; do not invent policy from model confidence.",
-      "Select local-change@1 with no proposed narrowing.",
+      preset === "inspect@1"
+        ? "Select inspect@1 with no proposed narrowing; the request is answerable from repository evidence without local writes or external effects."
+        : "Select local-change@1 with no proposed narrowing.",
+      ...(preset === "inspect@1"
+        ? [`Record scope as exactly the repository paths named in the request: ${JSON.stringify(taskBaseline.entries.map(({ path }) => path).filter((path) => requestText.includes(path)))}.`]
+        : []),
       "Materiality is a protocol fact, not model uncertainty: record a material: ambiguity only when the raw human request explicitly leaves a durable scope or Decision Authority choice unresolved; never invent one from neutral wording or confidence. If exactly two choices are local, reversible, and low risk, record both with low-risk: prefixes and continue with one recorded Assumption.",
-      "Use this shape: {\"objective\":\"...\",\"scope\":[\"...\"],\"exclusions\":[\"...\"],\"ambiguities\":[],\"assumptions\":[],\"target_snapshot\":\"...\",\"preset_selection\":{\"preset\":\"local-change@1\",\"selection_evidence\":[{\"claim\":\"...\",\"source\":\"intake\",\"observation\":\"...\"}],\"proposed_narrowing\":null,\"rationale\":\"...\"}}",
+      `Use this shape: {"objective":"...","scope":["..."],"exclusions":["..."],"ambiguities":[],"assumptions":[],"target_snapshot":"...","preset_selection":{"preset":"${preset}","selection_evidence":[{"claim":"...","source":"intake","observation":"..."}],"proposed_narrowing":null,"rationale":"..."}}`,
     ].join("\n");
     const requestExecutionResult = await executeRuntimeAttempt(ctx, state, adapter, {
       role: "planner",
@@ -4866,6 +5442,7 @@ export async function runLocalChange({
     request = requestProposal(responseObject(requestExecution.text, "Request planner"), {
       requestText,
       targetSnapshot: taskBaseline.digest,
+      preset,
     });
     const requestArtifact = makeRequestArtifact({
       runId,
@@ -4906,6 +5483,30 @@ export async function runLocalChange({
     }
     const requestBinding = state.runtime_bindings.find(({ attempt_id }) => attempt_id === "planner-request");
     if (!requestBinding) throw new AttemptFailure("missing_request_binding", "admitted Run has no durable intake binding");
+
+    if (state.effective_policy?.preset === "inspect@1") {
+      if (existingState) {
+        throw new AttemptFailure(
+          "runtime_reconciliation_required",
+          "inspect@1 Runs complete within one dispatch; start a new bounded Run instead of resuming",
+        );
+      }
+      return await completeInspectRun({
+        ctx,
+        state,
+        adapter,
+        taskWorkspace,
+        taskBaseline,
+        request,
+        requestRef,
+        requestBinding,
+        admittedAttemptDeadlineSeconds,
+        workspace,
+        baselineBranch,
+        baselineTarget,
+        baselineStatus,
+      });
+    }
 
     let implementation;
     let implementationPacketRef;
